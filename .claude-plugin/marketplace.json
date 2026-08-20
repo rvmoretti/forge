@@ -1,0 +1,13 @@
+{
+  "name": "forge-marketplace",
+  "owner": {
+    "name": "Rodrigo Moretti"
+  },
+  "plugins": [
+    {
+      "name": "forge",
+      "source": "./plugins/forge",
+      "description": "Spec-first engineering orchestration for Claude Code: CTO orchestrator, machine-enforced gates, tiered worker agents."
+    }
+  ]
+}

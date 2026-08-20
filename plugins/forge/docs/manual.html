@@ -1,0 +1,394 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Forge User Journey</title>
+<style>
+  :root{
+    --ink:#1a1d27; --muted:#6b7080; --paper:#faf9f6; --card:#ffffff; --line:#e6e4de;
+    --you:#b45309; --you-bg:#fdf3e3; --you-line:#f0d8a8;
+    --cto:#3b3f8f; --cto-bg:#ecedfb; --cto-line:#c9cdf2;
+    --team:#0f766e; --team-bg:#e4f4f2; --team-line:#b5dedb;
+    --gate:#57606f; --gate-bg:#eef0f3; --gate-line:#d5d9e0;
+    --ok:#15803d; --ok-bg:#e9f6ec; --ok-line:#bfe3c8;
+    --code-bg:#f4f3ef; --warn-bg:#fdf6ec; --warn-line:#e3c98f; --warn-ink:#5a5142; --warn-lab:#a16207;
+  }
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){
+      --ink:#e8e8ee; --muted:#9aa0ad; --paper:#15161c; --card:#1d1f27; --line:#2e313b;
+      --you:#e8a04c; --you-bg:#2a2118; --you-line:#4d3a1e;
+      --cto:#a3a8ee; --cto-bg:#20223a; --cto-line:#3a3e6b;
+      --team:#5cc4ba; --team-bg:#16302d; --team-line:#265a54;
+      --gate:#aab2c0; --gate-bg:#242731; --gate-line:#393e4b;
+      --ok:#6fce89; --ok-bg:#1a2f20; --ok-line:#2c5238;
+      --code-bg:#252730; --warn-bg:#2b2517; --warn-line:#5c4a1e; --warn-ink:#cfc4a8; --warn-lab:#d9a441;
+    }
+  }
+  :root[data-theme="dark"]{
+    --ink:#e8e8ee; --muted:#9aa0ad; --paper:#15161c; --card:#1d1f27; --line:#2e313b;
+    --you:#e8a04c; --you-bg:#2a2118; --you-line:#4d3a1e;
+    --cto:#a3a8ee; --cto-bg:#20223a; --cto-line:#3a3e6b;
+    --team:#5cc4ba; --team-bg:#16302d; --team-line:#265a54;
+    --gate:#aab2c0; --gate-bg:#242731; --gate-line:#393e4b;
+    --ok:#6fce89; --ok-bg:#1a2f20; --ok-line:#2c5238;
+    --code-bg:#252730; --warn-bg:#2b2517; --warn-line:#5c4a1e; --warn-ink:#cfc4a8; --warn-lab:#d9a441;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+       background:var(--paper);color:var(--ink);line-height:1.5;padding:48px 24px 80px}
+  .wrap{max-width:1180px;margin:0 auto}
+  h1{font-size:30px;letter-spacing:-.02em;margin-bottom:6px;text-wrap:balance}
+  .sub{color:var(--muted);font-size:16px;max-width:740px}
+  .sub b{color:var(--ink)}
+  code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.9em;background:var(--code-bg);
+       border:1px solid var(--line);border-radius:5px;padding:1px 5px}
+
+  .legend{display:flex;gap:10px;flex-wrap:wrap;margin:26px 0 8px}
+  .chip{display:inline-flex;align-items:center;gap:8px;font-size:13px;font-weight:600;
+        padding:6px 12px;border-radius:99px;border:1px solid}
+  .chip small{font-weight:400;color:var(--muted)}
+  .c-you{color:var(--you);background:var(--you-bg);border-color:var(--you-line)}
+  .c-cto{color:var(--cto);background:var(--cto-bg);border-color:var(--cto-line)}
+  .c-team{color:var(--team);background:var(--team-bg);border-color:var(--team-line)}
+  .c-gate{color:var(--gate);background:var(--gate-bg);border-color:var(--gate-line)}
+
+  .manual{margin:34px 0 8px}
+  .manual > h2{font-size:21px;margin-bottom:4px}
+  .manual > .tag{font-size:13.5px;color:var(--muted);margin-bottom:18px;max-width:760px}
+  .mgrid{display:grid;grid-template-columns:1fr 1fr;gap:22px}
+  @media(max-width:900px){.mgrid{grid-template-columns:1fr}}
+  .mbox{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:20px 22px}
+  .mbox.wide{grid-column:1 / -1}
+  .mbox h3{font-size:15.5px;margin-bottom:2px}
+  .mbox .mtag{font-size:12.5px;color:var(--muted);margin-bottom:12px}
+  .mbox ol{list-style:none;counter-reset:s;display:flex;flex-direction:column;gap:9px}
+  .mbox ol li{counter-increment:s;font-size:13.5px;position:relative;padding-left:28px;color:var(--muted)}
+  .mbox ol li strong{color:var(--ink)}
+  .mbox ol li::before{content:counter(s);position:absolute;left:0;top:1px;width:19px;height:19px;border-radius:50%;
+        background:var(--gate-bg);border:1px solid var(--gate-line);color:var(--gate);
+        font-size:11px;font-weight:800;display:flex;align-items:center;justify-content:center}
+  .mbox ul{list-style:none;display:flex;flex-direction:column;gap:8px}
+  .mbox ul li{font-size:13.5px;position:relative;padding-left:18px;color:var(--muted)}
+  .mbox ul li strong{color:var(--ink)}
+  .mbox ul li::before{content:"›";position:absolute;left:2px;color:var(--cto);font-weight:800}
+  .cmd{display:block;margin-top:5px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+       font-size:12px;background:var(--code-bg);border:1px solid var(--line);border-radius:7px;
+       padding:6px 9px;color:var(--ink);overflow-x:auto;white-space:pre}
+  .pill-you{display:inline-block;font-size:10px;font-weight:800;letter-spacing:.05em;padding:1px 7px;border-radius:99px;
+       background:var(--you-bg);border:1px solid var(--you-line);color:var(--you);vertical-align:1px}
+  .pill-auto{display:inline-block;font-size:10px;font-weight:800;letter-spacing:.05em;padding:1px 7px;border-radius:99px;
+       background:var(--team-bg);border:1px solid var(--team-line);color:var(--team);vertical-align:1px}
+
+  .iface{margin:14px 0 40px;background:var(--card);border:1px solid var(--line);border-radius:14px;
+         padding:22px 24px;display:grid;grid-template-columns:1fr 1.4fr 1fr;gap:24px}
+  .iface h3{font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin-bottom:8px}
+  .iface p{font-size:14px}
+  .iface .big{font-size:15px;font-weight:600}
+  .interrupts{display:flex;flex-direction:column;gap:6px}
+  .interrupts span{font-size:13.5px;padding:5px 10px;border-radius:8px;background:var(--you-bg);
+                   border:1px solid var(--you-line);color:var(--you)}
+  .interrupts em{font-style:normal;font-weight:700}
+
+  .journeys{display:grid;grid-template-columns:1fr 1fr;gap:28px;align-items:start}
+  @media(max-width:900px){.journeys{grid-template-columns:1fr}.iface{grid-template-columns:1fr}}
+  .col{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:26px 24px}
+  .col > h2{font-size:19px;margin-bottom:2px}
+  .col > .tag{font-size:13px;color:var(--muted);margin-bottom:20px}
+
+  .step{position:relative;padding:0 0 18px 30px;border-left:2px solid var(--line);margin-left:9px}
+  .step:last-child{padding-bottom:0;border-left-color:transparent}
+  .dot{position:absolute;left:-10px;top:0;width:18px;height:18px;border-radius:50%;
+       border:2px solid;background:var(--card);display:flex;align-items:center;justify-content:center;
+       font-size:9px;font-weight:800}
+  .d-you{border-color:var(--you);color:var(--you)}
+  .d-cto{border-color:var(--cto);color:var(--cto)}
+  .d-team{border-color:var(--team);color:var(--team)}
+  .d-gate{border-color:var(--gate);color:var(--gate)}
+  .who{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;margin-bottom:2px}
+  .w-you{color:var(--you)} .w-cto{color:var(--cto)} .w-team{color:var(--team)} .w-gate{color:var(--gate)}
+  .step h4{font-size:15px;margin-bottom:3px}
+  .step p{font-size:13.5px;color:var(--muted)}
+  .step p strong{color:var(--ink)}
+  .say{display:block;margin-top:6px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+       font-size:12.5px;background:var(--code-bg);border:1px solid var(--line);border-radius:8px;
+       padding:7px 10px;color:var(--ink)}
+  .say b{color:var(--you)}
+  .loopref{margin-top:6px;font-size:12.5px;color:var(--cto);font-weight:600}
+
+  .loop{margin-top:44px;background:var(--card);border:1px solid var(--line);border-radius:16px;padding:28px 26px}
+  .loop h2{font-size:19px;margin-bottom:4px}
+  .loop .tag{font-size:13.5px;color:var(--muted);margin-bottom:24px;max-width:780px}
+  .flow{display:flex;align-items:stretch;gap:0;flex-wrap:wrap}
+  .node{flex:1;min-width:150px;border-radius:12px;border:1.5px solid;padding:13px 14px}
+  .node h5{font-size:13.5px;margin-bottom:3px}
+  .node p{font-size:12px;color:var(--muted)}
+  .node code{font-size:11px}
+  .n-cto{background:var(--cto-bg);border-color:var(--cto-line)}
+  .n-cto h5{color:var(--cto)}
+  .n-team{background:var(--team-bg);border-color:var(--team-line)}
+  .n-team h5{color:var(--team)}
+  .n-gate{background:var(--gate-bg);border-color:var(--gate-line)}
+  .n-gate h5{color:var(--gate)}
+  .n-ok{background:var(--ok-bg);border-color:var(--ok-line)}
+  .n-ok h5{color:var(--ok)}
+  .arrow{display:flex;align-items:center;justify-content:center;width:34px;color:var(--muted);font-size:18px;flex:none}
+  .retry{margin-top:18px;display:flex;gap:14px;align-items:flex-start;background:var(--warn-bg);
+         border:1px dashed var(--warn-line);border-radius:12px;padding:14px 16px}
+  .retry .rlab{font-size:11px;font-weight:800;letter-spacing:.07em;color:var(--warn-lab);text-transform:uppercase;flex:none;padding-top:2px}
+  .retry p{font-size:13px;color:var(--warn-ink)}
+
+  .foot{margin-top:40px;display:grid;grid-template-columns:1fr 1fr;gap:28px}
+  @media(max-width:900px){.foot{grid-template-columns:1fr}}
+  .foot .box{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:20px 22px}
+  .foot h3{font-size:15px;margin-bottom:10px}
+  .foot ul{list-style:none}
+  .foot li{font-size:13.5px;padding:4px 0 4px 22px;position:relative;color:var(--muted)}
+  .no li::before{content:"✕";position:absolute;left:0;color:#c25050;font-weight:700}
+  .yes li::before{content:"✓";position:absolute;left:0;color:var(--ok);font-weight:700}
+  .note{margin-top:26px;font-size:13px;color:var(--muted);max-width:880px}
+  .v0{display:inline-block;font-size:10.5px;font-weight:800;letter-spacing:.06em;padding:2px 7px;border-radius:6px;
+      background:var(--gate-bg);border:1px solid var(--gate-line);color:var(--gate);vertical-align:2px}
+</style>
+</head>
+<body>
+
+<div class="wrap">
+
+  <h1>Forge — how you use it</h1>
+  <p class="sub">You describe <b>what</b> should exist, at product level. Forge — the main agent operating as your CTO — runs your METHOD to spec it, turns the plan into an enforced work graph, briefs cheaper worker agents, machine-verifies every result, and loops until acceptance criteria pass. The gates are code (a state CLI plus hooks), not promises: <b>DONE requires a passing verification record, no item starts without criteria, a third identical retry is refused, and a session can't end with silently dangling work.</b> All state lives on disk — close the laptop anytime; any new session resumes from <code>forge status</code>.</p>
+
+  <div class="legend">
+    <span class="chip c-you">YOU <small>product owner — decides WHAT</small></span>
+    <span class="chip c-cto">FORGE <small>CTO / main agent — decides HOW</small></span>
+    <span class="chip c-team">TEAM <small>worker agents: explorer (haiku) · implementer, tester (sonnet) · reviewer, architect (opus)</small></span>
+    <span class="chip c-gate">GATE <small>enforced by the forge CLI + hooks — can't be skipped</small></span>
+  </div>
+
+  <div class="manual">
+    <h2>📖 The manual</h2>
+    <p class="tag">Setup, daily use, and troubleshooting. The full project walkthroughs are the two journeys below — steps tagged <span class="pill-you">YOU</span> are yours; steps tagged <span class="pill-auto">AUTO</span> happen on their own. Everything works in plain language; slash commands are shortcuts, never requirements. Prerequisites: Claude Code installed and logged in, git. Node comes with Claude Code.</p>
+
+    <div class="mgrid">
+
+      <div class="mbox wide">
+        <h3>0 · One-time setup <span style="font-weight:400;color:var(--muted);font-size:13px">(once per machine, ~5 minutes)</span></h3>
+        <p class="mtag">The plugin activates in every Claude Code session after this — nothing to repeat per project.</p>
+        <ol>
+          <li><strong>Get the plugin repo.</strong> <span class="pill-you">YOU</span> You received the <code>forge-plugin</code> folder (or zip). Push it to a git repo your team can reach — or use the shared URL if someone already did.</li>
+          <li><strong>Install it in Claude Code.</strong> <span class="pill-you">YOU</span> In any Claude Code session:
+            <span class="cmd">/plugin marketplace add &lt;repo-url&gt;
+/plugin install forge@forge-marketplace</span></li>
+          <li><strong>Verify.</strong> <span class="pill-you">YOU</span> Start a new session (<code>claude</code>). You should see the Forge operating contract load at session start, and <code>/forge:status</code> should respond. If hooks seem silent, check <code>/hooks</code> in Claude Code.</li>
+          <li><strong>Recommended extras.</strong> <span class="pill-you">YOU</span> Install <b>Graphify</b> (deterministic code graph — makes orientation and scoping near-free):
+            <span class="cmd">uv tool install graphifyy   # or: pipx install graphifyy
+graphify install</span>
+            For web projects, keep <b>Playwright</b> as a dev dependency so E2E criteria can be machine-verified. Skipping either is fine — preflight detects what's missing and asks you once (install, or proceed without); your answer is remembered per project.</li>
+        </ol>
+      </div>
+
+      <div class="mbox">
+        <h3>C · Every day after</h3>
+        <p class="mtag">The disk is the memory; sessions are disposable.</p>
+        <ul>
+          <li><strong>Resume:</strong> open <code>claude</code> in the project and say <em>"continue"</em>. The session-start hook loads the operating contract plus a live state digest — no re-explaining, ever.</li>
+          <li><strong>Check:</strong> ask <em>"where are we?"</em> — or <code>/forge:status</code>. Phase, work counts, in-progress, blocked, latest discovery.</li>
+          <li><strong>Pause:</strong> just say stop. The stop gate makes Forge settle every open item first: done, blocked-with-reason, or failed-with-diagnosis. Nothing dangles silently.</li>
+          <li><strong>New machine or teammate:</strong> clone the project repo (state travels in git), do the one-time plugin install, open <code>claude</code>. Same picture, same rules.</li>
+        </ul>
+      </div>
+
+      <div class="mbox">
+        <h3>D · When something feels off</h3>
+        <p class="mtag">The usual fixes, in order of likelihood.</p>
+        <ul>
+          <li><strong>A skill didn't trigger?</strong> Name it: <em>"run the forge method"</em> / <em>"use forge-brownfield"</em>.</li>
+          <li><strong>Hooks not firing?</strong> Run <code>/hooks</code> to inspect; after a Claude Code update, reinstall or update the plugin. Hook config formats occasionally shift between releases.</li>
+          <li><strong>Session got bounced at the end?</strong> That's the stop gate working — items were still IN_PROGRESS. Let Forge settle them; it happens at most once per stop.</li>
+          <li><strong>Told "state files are managed by the forge CLI"?</strong> Also by design — work state changes only through <code>forge task …</code> commands, never hand-edits.</li>
+          <li><strong>Forge's behavior needs tuning?</strong> Edit <code>core/OPERATING.md</code> in the plugin — it's deliberately ~130 lines so process changes land in one reviewable place. The full design rationale lives in <code>docs/TRACEABILITY.md</code>.</li>
+        </ul>
+      </div>
+
+    </div>
+  </div>
+
+  <div class="iface">
+    <div>
+      <h3>Your input</h3>
+      <p class="big">Natural language.</p>
+      <p>No prompts, no model picking, no agent wrangling. You talk product. Slash commands (<code>/forge:build</code>, <code>/forge:status</code>, <code>/forge:preflight</code>) are shortcuts — plain words always work too.</p>
+    </div>
+    <div>
+      <h3>The only three reasons you get interrupted</h3>
+      <div class="interrupts">
+        <span><em>1 · Product decision</em> — a spec hole was found; answered as an either/or, recorded to the decisions log</span>
+        <span><em>2 · Approval gate</em> — a high-risk operation needs your sign-off</span>
+        <span><em>3 · Milestone review</em> — something works end-to-end; try it, redirect</span>
+      </div>
+    </div>
+    <div>
+      <h3>Your output</h3>
+      <p class="big">Ask <em>"where are we?"</em> — or <code>/forge:status</code></p>
+      <p>Phase, preflight, work graph counts, in-progress and blocked items, latest discovery. <span class="v0">v0</span> rich text; HTML dashboard comes after the loop is proven.</p>
+    </div>
+  </div>
+
+  <div class="journeys">
+
+    <!-- GREENFIELD -->
+    <div class="col">
+      <h2>🌱 Greenfield — new project</h2>
+      <p class="tag">From idea to verified product</p>
+
+      <div class="step"><span class="dot d-you">1</span>
+        <div class="who w-you">You</div>
+        <h4>Create the project, open Claude Code, say what you want</h4>
+        <span class="cmd">mkdir my-app && cd my-app && git init
+claude</span>
+        <span class="say"><b>you:</b> "New project — an app where families plan and split holiday budgets."</span>
+        <p style="margin-top:6px">The session-start hook has already loaded the operating contract. The spec skill triggers on its own — if it doesn't, say <em>"run the forge method"</em> — and <code>forge init</code> creates the project state. <span class="pill-auto">AUTO</span></p>
+      </div>
+
+      <div class="step"><span class="dot d-cto">2</span>
+        <div class="who w-cto">Forge</div>
+        <h4>Runs the METHOD interview, layer by layer</h4>
+        <p>Vision → Domain → Experience → API → Logic → Foundation — METHOD.md verbatim, shipped inside the plugin. You answer either/or questions one at a time and approve each layer's gate; you never write spec documents yourself. Confirmed decisions land in <code>decisions.md</code>; nothing reaches a deliverable file before you confirm it. <span class="pill-you">YOU</span></p>
+      </div>
+
+      <div class="step"><span class="dot d-gate">3</span>
+        <div class="who w-gate">Gate</div>
+        <h4>Spec gates → the work graph is born</h4>
+        <p><span class="pill-auto">AUTO</span> At METHOD Step 7, alongside <code>CLAUDE.md</code> and <code>PLAN.md</code>, Forge sets the verify commands (<code>forge config set verify.test …</code>), flips <code>phase build</code>, and converts PLAN.md into work items — <strong>each with acceptance criteria carrying a machine check</strong>. Then preflight runs (yours to trigger anytime: say <em>"run preflight"</em> or <code>/forge:preflight</code>); if Graphify isn't installed it asks you once — install, or proceed without — and remembers your answer.</p>
+      </div>
+
+      <div class="step"><span class="dot d-you">4</span>
+        <div class="who w-you">You</div>
+        <h4>Say the word</h4>
+        <span class="say"><b>you:</b> "Build it."  <span style="color:var(--muted)">(or /forge:build)</span></span>
+      </div>
+
+      <div class="step"><span class="dot d-team">5</span>
+        <div class="who w-team">Team + Gates</div>
+        <h4>The build loop runs — mostly without you</h4>
+        <p>Brief → worker → <code>forge task verify</code> → review → done or fail-with-diagnosis. Item after item, in dependency order. Check progress anytime — ask <em>"where are we?"</em> or <code>/forge:status</code> — and walk away whenever you like: state lives on disk.</p>
+        <p class="loopref">↳ see "The build loop" below</p>
+      </div>
+
+      <div class="step"><span class="dot d-you">6</span>
+        <div class="who w-you">You</div>
+        <h4>Milestone review</h4>
+        <span class="say"><b>forge:</b> "Auth + family accounts verified end-to-end. Try it."<br><b>you:</b> "Invites should also work by link, not just email."</span>
+        <p style="margin-top:6px">Your feedback becomes a recorded decision → spec updated → work graph replanned. The loop continues.</p>
+      </div>
+
+      <div class="step"><span class="dot d-gate">7</span>
+        <div class="who w-gate">Gate</div>
+        <h4>Done means proven</h4>
+        <p>Every DONE item has a verification record with real command output attached. Nothing was completed by claim — the CLI refuses <code>task done</code> without passing evidence.</p>
+      </div>
+    </div>
+
+    <!-- BROWNFIELD -->
+    <div class="col">
+      <h2>🏗️ Brownfield — existing codebase <span class="v0">v0: serviceable</span></h2>
+      <p class="tag">From "add this feature" to a baseline-guarded, verified change</p>
+
+      <div class="step"><span class="dot d-you">1</span>
+        <div class="who w-you">You</div>
+        <h4>Open the repo, ask for the change</h4>
+        <span class="cmd">cd existing-repo && claude</span>
+        <span class="say"><b>you:</b> "Add CSV export to the reports page."</span>
+        <p style="margin-top:6px">The brownfield skill triggers on its own — if it doesn't, say <em>"use forge-brownfield"</em> — and <code>forge init</code> creates state if it's the first time. <span class="pill-auto">AUTO</span></p>
+      </div>
+
+      <div class="step"><span class="dot d-team">2</span>
+        <div class="who w-team">Team</div>
+        <h4>Orientation — Graphify first, Explorer second</h4>
+        <p>Structural questions (entry points, dependency closure of what will change) go to the code graph for ~zero tokens; a haiku Explorer reads only what the graph can't answer, reporting OBSERVED vs INFERRED vs UNKNOWN. No full-repo archaeology for a bounded change.</p>
+      </div>
+
+      <div class="step"><span class="dot d-gate">3</span>
+        <div class="who w-gate">Gate</div>
+        <h4>Verify commands confirmed, baseline captured — before any change</h4>
+        <p>Forge finds the project's real test/lint/typecheck commands (package.json, CI config) and asks you to confirm them <span class="pill-you">YOU</span> — they become the verification gate. Then <span class="pill-auto">AUTO</span> <code>forge baseline capture</code> runs them and records the result: RED items are logged as <strong>pre-existing</strong> — new work must not worsen them and isn't obliged to fix them (say if you want follow-up items). A project with no runnable checks gets told so plainly: the first work items build the harness.</p>
+      </div>
+
+      <div class="step"><span class="dot d-cto">4</span>
+        <div class="who w-cto">Forge</div>
+        <h4>Asks you only what the code can't answer</h4>
+        <span class="say"><b>forge:</b> "Export all rows or respect current filters? All roles or admins only?"</span>
+        <p style="margin-top:6px">A scoped mini-spec: acceptance criteria with machine checks, work items whose allowed-files scope is derived from the dependency closure.</p>
+      </div>
+
+      <div class="step"><span class="dot d-team">5</span>
+        <div class="who w-team">Team + Gates</div>
+        <h4>The same build loop — plus the baseline guard</h4>
+        <p>Verification includes <code>forge baseline check</code>: a regression against the baseline fails the item even if its own criteria pass.</p>
+        <p class="loopref">↳ see "The build loop" below</p>
+      </div>
+
+      <div class="step"><span class="dot d-cto">6</span>
+        <div class="who w-cto">Forge</div>
+        <h4>Surprises become discoveries, not detours</h4>
+        <p>"Reports has an undocumented Stripe dependency" → <code>forge discovery add</code> with evidence and impact → work graph updated, or escalated to you if it touches what users experience.</p>
+      </div>
+
+      <div class="step"><span class="dot d-you">7</span>
+        <div class="who w-you">You</div>
+        <h4>Receive the finished change</h4>
+        <span class="say"><b>forge:</b> "Done. 6 files, 9 new tests passing, baseline unchanged, docs updated. Export respects filters, admins only — as you decided."</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- THE LOOP -->
+  <div class="loop">
+    <h2>⚙️ The build loop — what runs while you're away</h2>
+    <p class="tag">Per work item. The gray gates are the forge CLI — the orchestrator couldn't skip them if it drifted: state files are hook-protected, and every transition below is checked in code. Top-tier tokens go to thinking (briefs, reviews, decisions); the team's cheap tokens go to typing.</p>
+    <div class="flow">
+      <div class="node n-cto"><h5>1 · Start + brief</h5><p><code>forge task start</code> (refused without criteria or with unmet deps) → <code>forge brief</code> skeleton + spec excerpts, decisions, domain pack, Graphify-derived scope.</p></div>
+      <div class="arrow">→</div>
+      <div class="node n-team"><h5>2 · Worker executes</h5><p>Cheap model, fresh context, bounded task. Stops and reports on any spec hole or scope conflict — never invents, never expands scope.</p></div>
+      <div class="arrow">→</div>
+      <div class="node n-gate"><h5>3 · Machine verification</h5><p><code>forge task verify</code> runs project checks + criterion checks, records real output as evidence. The worker's "it works" counts for nothing.</p></div>
+      <div class="arrow">→</div>
+      <div class="node n-cto"><h5>4 · Review evidence</h5><p>Diff + test output + report. Risky items get the opus reviewer with the security lens. Deep code reads only where evidence is ambiguous.</p></div>
+      <div class="arrow">→</div>
+      <div class="node n-ok"><h5>5 · Done — proven</h5><p><code>forge task done</code> — refused without a passing verification record. Docs synced, next item picked up.</p></div>
+    </div>
+    <div class="retry">
+      <span class="rlab">On failure</span>
+      <p><b><code>forge task fail --note "diagnosis"</code></b> — the diagnosis is required thinking, and it rides into the next brief. <b>Retry</b> = fresh worker, never the failed context. <b>After 2 failures</b> the CLI refuses to start again without <code>--escalate stronger-model | decompose | self</code>. <b>Spec hole found:</b> the loop stops guessing and brings you an either/or. And if a session tries to end with work still IN_PROGRESS, the stop gate bounces it once: done, blocked-with-reason, or failed-with-diagnosis — nothing dangles silently.</p>
+    </div>
+  </div>
+
+  <div class="foot">
+    <div class="box no">
+      <h3>What you stop doing</h3>
+      <ul>
+        <li>Writing and tuning implementation prompts — briefs are Forge's job now</li>
+        <li>Choosing agents and models per task — tiers live in the agent definitions</li>
+        <li>Checking whether the agent really ran the tests — the CLI ran them and kept the output</li>
+        <li>Re-explaining the project after every session — state loads at session start</li>
+        <li>Babysitting retries that repeat the same mistake — the third one is refused</li>
+      </ul>
+    </div>
+    <div class="box yes">
+      <h3>What you keep owning</h3>
+      <ul>
+        <li>What the product is and who it serves — the spec stays the source of intent</li>
+        <li>Every user-visible behavior decision, recorded with your authority in decisions.md</li>
+        <li>Approvals on destructive / high-risk operations</li>
+        <li>Milestone judgment: "this is right — continue" or "change course"</li>
+        <li>The METHOD — it runs verbatim inside the plugin, unmodified</li>
+      </ul>
+    </div>
+  </div>
+
+  <p class="note">State on disk, always: <code>forge/config.json</code> (phase, verify commands), <code>forge/state/</code> (work graph, preflight, baseline — hook-protected, CLI-only), <code>forge/decisions.md</code> and <code>forge/discoveries.md</code> (append-only). All plain JSON/markdown, git-versioned. Deferred beyond v0 by design: HTML dashboard, per-agent token telemetry, deep audit — see <code>docs/TRACEABILITY.md</code> in the plugin for the full spec-to-implementation map.</p>
+
+</div>
+
+</body>
+</html>
