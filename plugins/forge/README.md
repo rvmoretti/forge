@@ -36,7 +36,13 @@ experience → API → logic → foundation). When the spec gates, say "build it
 skill orients (Graphify-first), captures a baseline, asks you only the
 product questions the code can't answer, then runs the same loop.
 
-**Commands:** `/forge:status` · `/forge:preflight` · `/forge:build`
+**Commands:** `/forge:status` · `/forge:preflight` · `/forge:build` · `/forge:dashboard`
+
+**Dashboard:** `forge/dashboard.html` — a generated projection of everything on
+disk (progress, work graph by milestone, attempts/verifications, decisions,
+discoveries, preflight, baseline, spec files). It regenerates automatically on
+every state change, zero tokens; open it in a browser and just reload. State
+wins — never edit it, never treat it as the source of truth.
 
 You get interrupted for exactly three things: a product decision the spec
 doesn't answer, a high-risk approval, and milestone reviews.

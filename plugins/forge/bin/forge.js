@@ -59,7 +59,7 @@ function out(msg) { process.stdout.write(msg + '\n'); }
 
 function loadConfig() { return readJson(CONFIG_FILE, null); }
 function loadWork() { return readJson(WORK_FILE, { schema: 1, items: {}, order: [] }); }
-function saveWork(w) { writeJson(WORK_FILE, w); }
+function saveWork(w) { writeJson(WORK_FILE, w); regenDashboard(); }
 
 function run(cmd, opts = {}) {
   const r = spawnSync(cmd, { shell: true, cwd: PROJECT, encoding: 'utf8',
@@ -70,6 +70,156 @@ function run(cmd, opts = {}) {
     exit: r.status === null ? -1 : r.status,
     tail: outText.split('\n').slice(-40).join('\n')
   };
+}
+
+// ---------------------------------------------------------------------------
+// dashboard (generated projection — never authoritative; state always wins)
+// ---------------------------------------------------------------------------
+
+const DASHBOARD_FILE = path.join(FORGE, 'dashboard.html');
+
+function esc(s) {
+  return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function parseLog(file, limit) {
+  try {
+    const entries = fs.readFileSync(file, 'utf8').split('\n### ').slice(1)
+      .map(b => { const lines = b.split('\n'); return { title: lines[0].trim(), body: lines.slice(1).filter(l => l.trim()).join('\n') }; });
+    return entries.slice(-limit).reverse();
+  } catch (_) { return []; }
+}
+
+function regenDashboard() {
+  try { generateDashboard(); } catch (_) { /* dashboard is best-effort; never block state ops */ }
+}
+
+function generateDashboard() {
+  const cfg = readJson(CONFIG_FILE, null);
+  if (!cfg) return; // no project yet
+  const w = readJson(WORK_FILE, { items: {}, order: [] });
+  const pf = readJson(PREFLIGHT_FILE, null);
+  const base = readJson(BASELINE_FILE, null);
+  const decisions = parseLog(DECISIONS_FILE, 12);
+  const discoveries = parseLog(DISCOVERIES_FILE, 12);
+
+  const counts = { TODO: 0, IN_PROGRESS: 0, BLOCKED: 0, DONE: 0, CANCELLED: 0 };
+  let ready = 0;
+  const byMilestone = {};
+  for (const id of w.order) {
+    const t = w.items[id];
+    counts[t.status] = (counts[t.status] || 0) + 1;
+    const isReady = t.status === 'TODO' && t.deps.every(d => !w.items[d] || w.items[d].status === 'DONE') && t.criteria.length > 0;
+    if (isReady) ready++;
+    const m = t.milestone || '(no milestone)';
+    (byMilestone[m] = byMilestone[m] || []).push({ t, isReady });
+  }
+  const total = w.order.length;
+  const pct = total ? Math.round(100 * counts.DONE / total) : 0;
+
+  const sColor = { DONE: '#15803d', IN_PROGRESS: '#3b3f8f', BLOCKED: '#b91c1c', TODO: '#57606f', CANCELLED: '#9aa0ad', READY: '#0f766e' };
+  const chip = (label, color) =>
+    `<span style="display:inline-block;font-size:10.5px;font-weight:700;letter-spacing:.04em;padding:1px 8px;border-radius:99px;border:1px solid ${color}44;color:${color};background:${color}12">${esc(label)}</span>`;
+
+  // spec files
+  let specRows = '';
+  if (cfg.specDir && fs.existsSync(path.join(PROJECT, cfg.specDir))) {
+    try {
+      specRows = fs.readdirSync(path.join(PROJECT, cfg.specDir)).filter(f => !f.startsWith('.')).map(f => {
+        const st = fs.statSync(path.join(PROJECT, cfg.specDir, f));
+        return `<tr><td><code>${esc(f)}</code></td><td class="mut">${st.isDirectory() ? 'dir' : (st.size + ' B')}</td><td class="mut">${new Date(st.mtimeMs).toISOString().slice(0, 16).replace('T', ' ')}</td></tr>`;
+      }).join('');
+    } catch (_) { /* ignore */ }
+  }
+
+  const milestoneBlocks = Object.entries(byMilestone).map(([m, items]) => {
+    const done = items.filter(x => x.t.status === 'DONE').length;
+    const rows = items.map(({ t, isReady }) => {
+      const fails = t.attempts.filter(a => a.outcome === 'failed').length;
+      const lastV = t.verifications.length ? t.verifications[t.verifications.length - 1] : null;
+      return `<tr>
+        <td>${chip(isReady ? 'READY' : t.status, sColor[isReady ? 'READY' : t.status] || '#57606f')}</td>
+        <td><b>${esc(t.id || '')}</b> ${esc(t.title)}${t.status === 'BLOCKED' ? `<div class="mut">⛔ ${esc(t.blockReason)}</div>` : ''}${t.status === 'CANCELLED' ? `<div class="mut">✕ ${esc(t.cancelReason)}</div>` : ''}</td>
+        <td class="mut">${t.deps.length ? t.deps.map(esc).join(', ') : '—'}</td>
+        <td class="mut">${t.criteria.length}${t.criteria.some(c => c.check) ? ' ✓' : ''}</td>
+        <td>${fails ? chip(fails + ' failed', '#b45309') : '<span class="mut">—</span>'}</td>
+        <td>${lastV ? chip(lastV.passed ? 'passed' : 'failed', lastV.passed ? '#15803d' : '#b91c1c') + `<span class="mut" style="margin-left:6px">${esc(lastV.ts.slice(0, 16).replace('T', ' '))}</span>` : '<span class="mut">never</span>'}</td>
+      </tr>`;
+    }).join('');
+    return `<h3>${esc(m)} <span class="mut" style="font-weight:400">${done}/${items.length} done</span></h3>
+      <div class="tblwrap"><table><thead><tr><th>Status</th><th>Item</th><th>Deps</th><th>Criteria</th><th>Attempts</th><th>Last verification</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+  }).join('');
+
+  const logBlock = (entries, empty) => entries.length
+    ? entries.map(e => `<div class="log"><b>${esc(e.title)}</b><pre>${esc(e.body)}</pre></div>`).join('')
+    : `<p class="mut">${empty}</p>`;
+
+  const pfBlock = pf
+    ? pf.results.map(r => `<tr><td>${chip(r.ok ? 'OK' : r.severity.toUpperCase(), r.ok ? '#15803d' : (r.severity === 'mandatory' ? '#b91c1c' : '#b45309'))}</td><td>${esc(r.name)}</td><td class="mut">${esc(r.note)}</td></tr>`).join('')
+    : '<tr><td colspan="3" class="mut">never run</td></tr>';
+
+  const baseBlock = base
+    ? base.results.map(r => `<tr><td>${chip(r.exit === 0 ? 'GREEN' : 'RED (pre-existing)', r.exit === 0 ? '#15803d' : '#b45309')}</td><td>${esc(r.kind)}</td><td class="mut"><code>${esc(r.cmd)}</code></td></tr>`).join('')
+    : '<tr><td colspan="3" class="mut">not captured (greenfield, or run: forge baseline capture)</td></tr>';
+
+  const html = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Forge — ${esc(cfg.project)}</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;background:#faf9f6;color:#1a1d27;line-height:1.5;padding:36px 20px 70px}
+.wrap{max-width:1100px;margin:0 auto}
+h1{font-size:24px;letter-spacing:-.02em} h2{font-size:17px;margin:28px 0 10px} h3{font-size:14.5px;margin:16px 0 8px}
+.mut{color:#6b7080;font-size:12.5px}
+code{font-family:ui-monospace,Menlo,monospace;font-size:.9em;background:#f0efe9;border-radius:4px;padding:1px 4px}
+.head{display:flex;justify-content:space-between;align-items:flex-end;gap:16px;flex-wrap:wrap;margin-bottom:6px}
+.bar{height:8px;background:#e6e4de;border-radius:99px;overflow:hidden;margin:10px 0 4px}
+.bar div{height:100%;background:#15803d;border-radius:99px}
+.cards{display:flex;gap:12px;flex-wrap:wrap;margin:14px 0}
+.card{background:#fff;border:1px solid #e6e4de;border-radius:12px;padding:10px 16px;min-width:96px}
+.card b{font-size:20px;font-variant-numeric:tabular-nums} .card span{display:block;font-size:11px;color:#6b7080;text-transform:uppercase;letter-spacing:.05em}
+.tblwrap{overflow-x:auto;background:#fff;border:1px solid #e6e4de;border-radius:12px}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{font-size:10.5px;text-transform:uppercase;letter-spacing:.06em;color:#6b7080;text-align:left;padding:8px 12px;border-bottom:1px solid #e6e4de}
+td{padding:8px 12px;border-bottom:1px solid #f0efe9;vertical-align:top} tr:last-child td{border-bottom:none}
+.log{background:#fff;border:1px solid #e6e4de;border-radius:10px;padding:10px 14px;margin-bottom:8px;font-size:13px}
+.log pre{font-family:inherit;white-space:pre-wrap;color:#464b58;font-size:12.5px;margin-top:2px}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:20px}@media(max-width:840px){.grid2{grid-template-columns:1fr}}
+.stamp{font-size:11.5px;color:#9aa0ad}
+</style></head><body><div class="wrap">
+<div class="head">
+  <div><h1>⚙️ Forge — ${esc(cfg.project)}</h1>
+  <div class="mut">Phase: <b>${esc(cfg.phase)}</b> · Verify: ${Object.keys(cfg.verify || {}).length ? Object.keys(cfg.verify).map(esc).join(', ') : 'not set'} · Graphify: ${esc((cfg.options || {}).graphify || 'unset')}</div></div>
+  <div class="stamp">GENERATED PROJECTION — state wins, never edit this file.<br>Generated ${new Date().toISOString().slice(0, 19).replace('T', ' ')} UTC · refresh: <code>forge dashboard</code></div>
+</div>
+<div class="bar"><div style="width:${pct}%"></div></div>
+<div class="mut">${counts.DONE}/${total} work items done (${pct}%)</div>
+<div class="cards">
+  <div class="card"><b>${counts.DONE}</b><span>done</span></div>
+  <div class="card"><b>${counts.IN_PROGRESS}</b><span>in progress</span></div>
+  <div class="card"><b>${ready}</b><span>ready</span></div>
+  <div class="card"><b>${counts.TODO - ready}</b><span>todo</span></div>
+  <div class="card"><b style="color:${counts.BLOCKED ? '#b91c1c' : 'inherit'}">${counts.BLOCKED}</b><span>blocked</span></div>
+  <div class="card"><b>${counts.CANCELLED}</b><span>cancelled</span></div>
+</div>
+<h2>Work graph</h2>
+${milestoneBlocks || '<p class="mut">No work items yet.</p>'}
+<div class="grid2">
+<div><h2>Decisions <span class="mut" style="font-weight:400">(latest first · forge/decisions.md)</span></h2>${logBlock(decisions, 'None recorded yet.')}</div>
+<div><h2>Discoveries <span class="mut" style="font-weight:400">(latest first · forge/discoveries.md)</span></h2>${logBlock(discoveries, 'None recorded yet.')}</div>
+</div>
+<div class="grid2">
+<div><h2>Preflight ${pf ? `<span class="mut" style="font-weight:400">${esc(pf.ts.slice(0, 16).replace('T', ' '))}</span>` : ''}</h2>
+<div class="tblwrap"><table><tbody>${pfBlock}</tbody></table></div></div>
+<div><h2>Baseline ${base ? `<span class="mut" style="font-weight:400">${esc(base.ts.slice(0, 16).replace('T', ' '))}</span>` : ''}</h2>
+<div class="tblwrap"><table><tbody>${baseBlock}</tbody></table></div></div>
+</div>
+${specRows ? `<h2>Specification <span class="mut" style="font-weight:400">(${esc(cfg.specDir)}/ — the source of intent)</span></h2>
+<div class="tblwrap"><table><thead><tr><th>File</th><th>Size</th><th>Modified</th></tr></thead><tbody>${specRows}</tbody></table></div>` : ''}
+</div></body></html>`;
+
+  fs.mkdirSync(FORGE, { recursive: true });
+  fs.writeFileSync(DASHBOARD_FILE, html);
 }
 
 // ---------------------------------------------------------------------------
@@ -155,6 +305,7 @@ const commands = {
       keys.slice(0, -1).forEach(k => { node[k] = node[k] || {}; node = node[k]; });
       node[keys[keys.length - 1]] = value === 'true' ? true : value === 'false' ? false : value;
       writeJson(CONFIG_FILE, cfg);
+      regenDashboard();
       out(`Set ${keyPath} = ${value}`);
     } else die('Usage: forge config get [path] | forge config set <path> <value>');
   },
@@ -209,6 +360,7 @@ const commands = {
     }
 
     writeJson(PREFLIGHT_FILE, { ts: ts(), results });
+    regenDashboard();
     const mandatoryFailed = results.filter(r => !r.ok && r.severity === 'mandatory');
     const decisions = results.filter(r => !r.ok && r.severity === 'decision');
     for (const r of results) out(`${r.ok ? 'OK  ' : (r.severity === 'mandatory' ? 'FAIL' : 'WARN')}  ${r.name}: ${r.note}`);
@@ -380,6 +532,7 @@ const commands = {
     if (argv[1] !== 'add') die('Usage: forge decision add --title t --decision d --why w [--authority human|forge]');
     appendMd(DECISIONS_FILE, '# Decisions log (append-only, via forge CLI)',
       `\n### ${ts()} — ${opt('title') || '(untitled)'}\n- Authority: ${opt('authority') || 'forge'}\n- Decision: ${opt('decision') || ''}\n- Why: ${opt('why') || ''}\n`);
+    regenDashboard();
     out('Decision recorded.');
   },
 
@@ -387,6 +540,7 @@ const commands = {
     if (argv[1] !== 'add') die('Usage: forge discovery add --title t --evidence e --impact i [--affects T1,T2]');
     appendMd(DISCOVERIES_FILE, '# Discoveries log (append-only, via forge CLI)',
       `\n### ${ts()} — ${opt('title') || '(untitled)'}\n- Evidence: ${opt('evidence') || ''}\n- Impact: ${opt('impact') || ''}\n- Affects: ${opt('affects') || '-'}\n`);
+    regenDashboard();
     out('Discovery recorded. If it invalidates planned work, update the work graph now (block/cancel/add items) — a logged discovery with unhandled consequences is a failure.');
   },
 
@@ -398,6 +552,7 @@ const commands = {
     if (sub === 'capture') {
       const results = Object.entries(cfg.verify).map(([k, cmd]) => Object.assign({ kind: k }, run(cmd)));
       writeJson(BASELINE_FILE, { ts: ts(), results });
+      regenDashboard();
       results.forEach(r => out(`${r.exit === 0 ? 'GREEN' : 'RED  '}  ${r.kind}: ${r.cmd}`));
       out('Baseline captured. RED items are recorded as PRE-EXISTING failures — new work must not make them worse and is not required to fix them.');
     } else if (sub === 'check') {
@@ -446,6 +601,14 @@ const commands = {
       if (lastDisc && lastDisc.trim() && !lastDisc.startsWith('#')) out(`\nLatest discovery: ${lastDisc.split('\n')[0]}`);
     }
     out(`\nLogs: forge/decisions.md · forge/discoveries.md`);
+  },
+
+  // -- dashboard ----------------------------------------------------------------
+  dashboard() {
+    if (!loadConfig()) die('No forge project here (run: forge init).');
+    generateDashboard();
+    out(`Dashboard regenerated: ${path.relative(PROJECT, DASHBOARD_FILE)}`);
+    out('Open it in a browser. It also auto-regenerates after every state change — just reload the tab.');
   },
 
   // -- hooks ------------------------------------------------------------------
@@ -523,6 +686,7 @@ const commands = {
   discovery add --title --evidence --impact [--affects T1,T2]
   baseline capture | check               brownfield: record and guard pre-existing state
   status                                 project overview
+  dashboard                              (re)generate forge/dashboard.html — also auto-regens on every state change
   hook session-start|pretooluse|stop     (used by plugin hooks)`);
   }
 };
