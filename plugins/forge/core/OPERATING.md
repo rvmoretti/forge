@@ -49,8 +49,11 @@ orientation, baseline capture, scoped mini-spec — then the same loop.
    claim. Then review the diff and the worker's report yourself; read code
    deeply only where evidence is ambiguous or risk is high.
 5. **Close or retry**:
-   - Pass and review clean → `forge task done <id>`; sync any affected docs;
-     move on.
+   - Pass and review clean → `forge task done <id>`; sync any affected docs.
+     On brownfield projects, also accrete the spec: merge what this change
+     established (entities, rules, behavior the user decided) into the spec
+     folder with [CONFIRMED]/[OBSERVED]/_TBD_ provenance — see the
+     forge-brownfield skill §6. Then move on.
    - Fail → `forge task fail <id> --note "<root-cause diagnosis>"`. Diagnose
      BEFORE retrying. Retry = fresh worker + brief + your diagnosis. Never
      resume a failed worker's context; never redispatch the same brief

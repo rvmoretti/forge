@@ -47,6 +47,11 @@ answer — product questions as either/or choices. Write acceptance criteria
 `forge task add` with scope derived from the dependency closure (allowed
 files = the closure; forbidden = shared contracts/areas outside it).
 
+If the project has no spec folder yet, create one now in the METHOD layer
+format (skeleton only — empty layer files with their completeness-bar lines)
+and record it: `forge config set specDir "<folder>"`. Propose the location
+(`spec/` or `<project>-spec/`); the user confirms.
+
 ## 5. Hand off to the build loop
 
 Normal loop. The baseline guard is automatic: once a baseline exists,
@@ -55,3 +60,37 @@ even if its own criteria pass (deliberate exceptions need
 `--skip-baseline --reason`). `baseline capture` also advances the project to
 build phase, so preflight's verification gate is armed without the spec
 phase having run.
+
+## 6. Spec accretion (after each completed change)
+
+The spec grows along the paths where work happens — never by whole-system
+reverse-engineering. When an item completes, merge what this change
+established into the spec folder, in METHOD's layer format:
+
+- entities touched → `01-domain.md` (fields, relationships, delete behavior
+  as actually decided);
+- user-visible behavior decided → `02-experience.md`;
+- endpoints defined/changed → `03-api.md`;
+- rules with their acceptance criteria → `04-logic.md`;
+- infrastructure/provider facts → `05-foundation.md`.
+
+Tag every statement with its provenance:
+
+- **[CONFIRMED]** — the user decided this (it exists in the decisions log).
+  This is intent.
+- **[OBSERVED]** — derived from code. This describes reality; it is NOT
+  blessed intent — never silently promote it. If a later change needs it to
+  be intent, ask the user then.
+- **_TBD_** — known gap, deliberately left open (METHOD's convention).
+
+Rules: only touch the sections this change actually established — no
+opportunistic rewriting of neighboring content. Where an OBSERVED statement
+contradicts a CONFIRMED one, that is a discovery
+(`forge discovery add`) — record it, don't pick a winner silently. Dead
+corners of the codebase staying undocumented is honest, not a failure;
+coherence across projects comes from the format, not from completeness.
+
+Full upfront spec reconstruction is a separate, explicit opt-in — run it as
+its own Forge project (milestones per subsystem, human gates adjudicating
+intended-vs-accidental per slice) when a rewrite, migration, audit, or
+documentation deliverable genuinely requires whole-system intent.
