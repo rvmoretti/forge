@@ -89,6 +89,17 @@ memory.
 
 ## Changelog
 
+### v0.3.1 — brownfield spec accretion
+Brownfield projects converge on the same METHOD-format spec as greenfield
+ones — incrementally, never by whole-system reverse-engineering. After each
+completed change, what it established is merged into the spec folder with
+explicit provenance: **[CONFIRMED]** (user-decided — intent),
+**[OBSERVED]** (derived from code — reality, never silently promoted to
+intent), **_TBD_** (known gap). OBSERVED-vs-CONFIRMED contradictions are
+recorded as discoveries. Full upfront reconstruction remains an explicit
+opt-in, run as its own Forge project. (Skill + operating contract change;
+no CLI change.)
+
 ### v0.3.0 — enforcement hardening + milestone gates
 Implements every finding from `FORGE-REVIEW-2026-08-20.md` (external review vs
 ChatDev 2.0) plus the incremental-delivery design:
