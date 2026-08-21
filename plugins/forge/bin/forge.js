@@ -13,6 +13,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const { spawnSync } = require('child_process');
 
 // ---------------------------------------------------------------------------
@@ -133,6 +134,11 @@ function generateDashboard() {
   }
 
   const milestoneBlocks = Object.entries(byMilestone).map(([m, items]) => {
+    const gate = (w.gates || {})[m];
+    const allClosed = items.every(x => ['DONE', 'CANCELLED'].includes(x.t.status));
+    const gateChip = m === '(no milestone)' ? '' :
+      gate && gate.approved ? chip('GATE APPROVED', '#15803d') :
+      allClosed ? chip('AWAITING HUMAN APPROVAL', '#b45309') : chip('gate pending', '#57606f');
     const done = items.filter(x => x.t.status === 'DONE').length;
     const rows = items.map(({ t, isReady }) => {
       const fails = t.attempts.filter(a => a.outcome === 'failed').length;
@@ -146,7 +152,7 @@ function generateDashboard() {
         <td>${lastV ? chip(lastV.passed ? 'passed' : 'failed', lastV.passed ? '#15803d' : '#b91c1c') + `<span class="mut" style="margin-left:6px">${esc(lastV.ts.slice(0, 16).replace('T', ' '))}</span>` : '<span class="mut">never</span>'}</td>
       </tr>`;
     }).join('');
-    return `<h3>${esc(m)} <span class="mut" style="font-weight:400">${done}/${items.length} done</span></h3>
+    return `<h3>${esc(m)} <span class="mut" style="font-weight:400">${done}/${items.length} done</span> ${gateChip}</h3>
       <div class="tblwrap"><table><thead><tr><th>Status</th><th>Item</th><th>Deps</th><th>Criteria</th><th>Attempts</th><th>Last verification</th></tr></thead><tbody>${rows}</tbody></table></div>`;
   }).join('');
 
@@ -230,12 +236,49 @@ const argv = process.argv.slice(2);
 function flag(name) { return argv.includes('--' + name); }
 function opt(name) {
   const i = argv.indexOf('--' + name);
-  return i >= 0 && argv[i + 1] !== undefined ? argv[i + 1] : null;
+  if (i < 0 || argv[i + 1] === undefined) return null;
+  // 2.3: never swallow the next flag as a value
+  if (String(argv[i + 1]).startsWith('--')) return null;
+  return argv[i + 1];
 }
 function optAll(name) {
   const vals = [];
-  argv.forEach((a, i) => { if (a === '--' + name && argv[i + 1] !== undefined) vals.push(argv[i + 1]); });
+  argv.forEach((a, i) => {
+    if (a === '--' + name && argv[i + 1] !== undefined && !String(argv[i + 1]).startsWith('--')) vals.push(argv[i + 1]);
+  });
   return vals;
+}
+
+// 3.1/F7: bind evidence to the actual tree state (HEAD + working-tree status hash)
+function treeState() {
+  const head = run('git rev-parse HEAD', { timeout: 10000 });
+  const st = run('git status --porcelain', { timeout: 20000 });
+  if (st.exit !== 0) return null; // not a git repo — preflight makes this mandatory anyway
+  return ((head.exit === 0 ? head.tail : 'NOHEAD') + '|' +
+          crypto.createHash('sha1').update(st.tail).digest('hex')).slice(0, 80);
+}
+
+// F4/3.4: baseline comparison as data — used by `task verify` and `baseline check`
+function baselineCompare(cfg) {
+  const base = readJson(BASELINE_FILE, null);
+  if (!base) return [];
+  const results = [];
+  for (const b of base.results) {
+    const currentCmd = (cfg.verify || {})[b.kind];
+    if (currentCmd && currentCmd !== b.cmd) {
+      // 3.4: command changed since capture — comparison would be meaningless
+      results.push({ kind: `baseline:${b.kind}`, cmd: currentCmd, exit: 1,
+        tail: `verify.${b.kind} changed since the baseline was captured ('${b.cmd}' → '${currentCmd}').`,
+        note: `recapture required: forge baseline capture` });
+      continue;
+    }
+    const now = run(currentCmd || b.cmd);
+    const was = b.exit === 0;
+    const is = now.exit === 0;
+    if (was && !is) results.push({ kind: `baseline:${b.kind}`, cmd: b.cmd, exit: 1, tail: now.tail, note: 'REGRESSION — was GREEN at baseline' });
+    else results.push({ kind: `baseline:${b.kind}`, cmd: b.cmd, exit: 0, tail: '', note: was ? 'GREEN → GREEN' : (is ? 'pre-existing RED now GREEN' : 'pre-existing RED (not made worse)') });
+  }
+  return results;
 }
 
 // ---------------------------------------------------------------------------
@@ -263,6 +306,41 @@ function depsSatisfied(w, item) {
     const dep = w.items[d];
     return !dep || dep.status !== 'DONE';
   });
+}
+
+// F9: milestone sequence = order of first appearance; gates live in w.gates
+function milestoneSeq(w) {
+  const seq = [];
+  for (const id of w.order) {
+    const m = w.items[id].milestone;
+    if (m && !seq.includes(m)) seq.push(m);
+  }
+  return seq;
+}
+
+function milestoneComplete(w, m) {
+  return w.order.every(id => {
+    const t = w.items[id];
+    return t.milestone !== m || ['DONE', 'CANCELLED'].includes(t.status);
+  });
+}
+
+// Returns a refusal string when starting an item of `m` is gated, else null.
+function milestoneGateBlock(w, cfg, m) {
+  if (!m) return null;
+  if (((cfg || {}).options || {}).gates === 'end-only') return null;
+  const seq = milestoneSeq(w);
+  for (const prev of seq) {
+    if (prev === m) break;
+    if (!milestoneComplete(w, prev)) {
+      return `milestone '${prev}' still has unfinished items — earlier milestones complete (and get approved) before '${m}' starts.`;
+    }
+    const gate = (w.gates || {})[prev];
+    if (!gate || !gate.approved) {
+      return `milestone '${prev}' is complete but awaits HUMAN approval. Demo it to the user, then record their approval:\n  forge milestone approve ${prev} --note "<their verdict>"\n(Or switch gating off for this project: forge config set options.gates end-only)`;
+    }
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -317,6 +395,10 @@ const commands = {
     const results = [];
     const check = (name, ok, note, severity = 'mandatory') =>
       results.push({ name, ok, note, severity });
+
+    // node version — README requires >= 18
+    const major = parseInt(process.version.slice(1), 10);
+    check('node', major >= 18, `${process.version}${major >= 18 ? '' : ' — Forge requires Node >= 18'}`);
 
     // git — mandatory always
     const git = run('git rev-parse --is-inside-work-tree', { timeout: 10000 });
@@ -395,7 +477,8 @@ const commands = {
       w.items[item.id] = Object.assign({
         title: '', objective: '', milestone: null, deps: [], criteria: [],
         scope: { allowed: [], forbidden: [] },
-        status: 'TODO', attempts: [], verifications: [],
+        status: 'TODO', attempts: [], verifications: [], history: [],
+        preState: null, startTree: null,
         blockReason: null, cancelReason: null, created: ts(), updated: ts()
       }, item, { status: 'TODO' });
       w.order.push(item.id);
@@ -418,24 +501,41 @@ const commands = {
 
     } else if (sub === 'start') {
       const item = getItem(w, argv[2]);
-      if (!['TODO', 'BLOCKED', 'IN_PROGRESS'].includes(item.status))
+      // 1.1/F3: an in-flight item must be resolved before any re-start — no silent re-dispatch
+      if (item.status === 'IN_PROGRESS')
+        die(`Refused: '${item.id}' is already IN_PROGRESS. Resolve the current attempt first:\n` +
+            `  forge task fail ${item.id} --note "<root-cause diagnosis>"   (counts toward escalation)\n` +
+            `  forge task block ${item.id} --reason "..."\n` +
+            `  forge task verify ${item.id} && forge task done ${item.id}`);
+      if (!['TODO', 'BLOCKED'].includes(item.status))
         die(`Cannot start '${item.id}' from status ${item.status}.`);
       if (item.criteria.length === 0)
         die(`Refused: '${item.id}' has no acceptance criteria. A work item without criteria cannot be verified, so it cannot be started.\n` +
-            `Add criteria first (task add used --criterion "desc::check-command").`);
+            `Add criteria first (task update ${item.id} --criterion-add "desc::check-command").`);
       const missing = depsSatisfied(w, item);
       if (missing.length)
-        die(`Refused: '${item.id}' has unfinished dependencies: ${missing.join(', ')}.`);
+        die(`Refused: '${item.id}' has unfinished dependencies: ${missing.join(', ')}.\n` +
+            `(A CANCELLED dependency must be dropped or re-pointed: forge task update ${item.id} --deps ...)`);
+      const gateMsg = milestoneGateBlock(w, loadConfig(), item.milestone);
+      if (gateMsg) die(`Refused: ${gateMsg}`);
       const fails = failedAttempts(item);
       if (fails >= 2 && !opt('escalate'))
         die(`Refused: '${item.id}' has failed ${fails} attempts. A third identical attempt is not allowed.\n` +
             `Escalate explicitly: forge task start ${item.id} --escalate <stronger-model|decompose|self|revisit-criteria> --note "what changes this time"`);
+      // 1.2/F5: red-first — record each criterion check's pre-work result
+      item.preState = item.criteria.map(c => c.check ? { desc: c.desc, exit: run(c.check).exit } : null);
+      item.startTree = treeState();
+      const alreadyGreen = item.preState.filter(p => p && p.exit === 0);
       item.status = 'IN_PROGRESS';
       item.blockReason = null;
       item.attempts.push({ ts: ts(), outcome: 'started', escalation: opt('escalate') || null, note: opt('note') || null });
       item.updated = ts();
       saveWork(w);
       out(`${item.id} → IN_PROGRESS${opt('escalate') ? ` (escalation: ${opt('escalate')})` : ''}`);
+      if (alreadyGreen.length)
+        out(`WARNING: ${alreadyGreen.length} criterion check(s) ALREADY PASS before any work:\n` +
+            alreadyGreen.map(p => `  - ${p.desc}`).join('\n') +
+            `\nEither the item is already satisfied (cancel it with a reason) or these checks are vacuous (fix them: forge task update). 'done' will refuse if nothing changes.`);
 
     } else if (sub === 'verify') {
       const item = getItem(w, argv[2]);
@@ -446,11 +546,22 @@ const commands = {
       if (results.length === 0)
         die(`Nothing executable to verify for '${item.id}': no project verify commands and no criterion checks.\n` +
             `This item cannot be machine-verified. Either add a check, or record a human verification decision in the decisions log and cancel/redefine the item.`);
+      // 1.3/F4: the baseline guard is part of verification, not prose
+      let skippedBaseline = null;
+      if (fs.existsSync(BASELINE_FILE)) {
+        if (flag('skip-baseline')) {
+          if (!opt('reason')) die('--skip-baseline requires --reason "..." (the reason is recorded in the verification evidence).');
+          skippedBaseline = opt('reason');
+        } else {
+          for (const r of baselineCompare(cfg)) results.push(r);
+        }
+      }
       const passed = results.every(r => r.exit === 0);
-      item.verifications.push({ ts: ts(), passed, results });
+      item.verifications.push({ ts: ts(), passed, results, tree: treeState(), skippedBaseline });
       item.updated = ts();
       saveWork(w);
-      for (const r of results) out(`${r.exit === 0 ? 'PASS' : 'FAIL'}  [${r.kind}] ${r.cmd}${r.exit !== 0 ? '\n' + r.tail : ''}`);
+      for (const r of results) out(`${r.exit === 0 ? 'PASS' : 'FAIL'}  [${r.kind}] ${r.cmd}${r.note ? `  (${r.note})` : ''}${r.exit !== 0 ? '\n' + r.tail : ''}`);
+      if (skippedBaseline) out(`NOTE: baseline check SKIPPED — reason recorded: ${skippedBaseline}`);
       out(passed ? `\n${item.id}: verification PASSED` : `\n${item.id}: verification FAILED`);
       if (!passed) process.exit(1);
 
@@ -461,11 +572,28 @@ const commands = {
       if (!v || !v.passed)
         die(`Refused: '${item.id}' has no passing verification record.\n` +
             `Run: forge task verify ${item.id} — DONE is granted by evidence, not by claim.`);
+      // 3.1/F7: evidence must describe the CURRENT tree
+      const now = treeState();
+      if (v.tree && now && v.tree !== now)
+        die(`Refused: the tree changed since the passing verification (${v.ts}).\n` +
+            `Stale evidence proves nothing — re-verify: forge task verify ${item.id}`);
+      // 1.2/F5: red-first — green-before, green-after, nothing changed ⇒ the checks proved nothing
+      const checked = (item.preState || []).filter(Boolean);
+      if (checked.length && checked.every(p => p.exit === 0) && item.startTree && now && item.startTree === now)
+        die(`Refused: every criterion check already passed BEFORE work started, and the tree is unchanged since start.\n` +
+            `These checks prove nothing about this item. Either the item was already satisfied (forge task cancel ${item.id} --reason "already satisfied")\n` +
+            `or the checks are vacuous (forge task update ${item.id} --criterion-remove/--criterion-add --reason "...").`);
       item.status = 'DONE';
       item.attempts.push({ ts: ts(), outcome: 'passed', note: opt('note') || null });
       item.updated = ts();
       saveWork(w);
       out(`${item.id} → DONE (verified ${v.ts})`);
+      // F9: surface the gate the moment a milestone completes
+      if (item.milestone && milestoneComplete(w, item.milestone) && !((w.gates || {})[item.milestone] || {}).approved
+          && ((loadConfig() || {}).options || {}).gates !== 'end-only')
+        out(`\nMILESTONE '${item.milestone}' IS COMPLETE and now awaits human review.\n` +
+            `Demo it to the user, collect their verdict, then: forge milestone approve ${item.milestone} --note "..."\n` +
+            `Items in later milestones will refuse to start until then.`);
 
     } else if (sub === 'fail') {
       const item = getItem(w, argv[2]);
@@ -490,13 +618,80 @@ const commands = {
       const item = getItem(w, argv[2]);
       if (item.status === 'DONE') die(`'${item.id}' is DONE; completed work is not cancelled, it is superseded (create a new item).`);
       if (!opt('reason')) die('Cancellation must be explicit: --reason "..."');
+      // 2.2/F6: a cancelled dependency must not silently brick its dependents
+      const dependents = w.order.filter(id2 =>
+        w.items[id2].deps.includes(item.id) && !['DONE', 'CANCELLED'].includes(w.items[id2].status));
+      const mode = opt('dependents');
+      if (dependents.length && !mode)
+        die(`Refused: cancelling '${item.id}' would strand dependent item(s): ${dependents.join(', ')}.\n` +
+            `Decide their fate explicitly:\n` +
+            `  --dependents drop     remove '${item.id}' from their deps (recorded in each item's history)\n` +
+            `  --dependents cancel   cascade-cancel them with the same reason\n` +
+            `  or re-point them first: forge task update <id> --deps ... --reason "..."`);
       item.status = 'CANCELLED';
       item.cancelReason = opt('reason');
       item.updated = ts();
+      if (mode === 'drop') {
+        for (const id2 of dependents) {
+          const d = w.items[id2];
+          d.deps = d.deps.filter(x => x !== item.id);
+          (d.history = d.history || []).push({ ts: ts(), change: `dep '${item.id}' dropped (dependency cancelled)`, reason: item.cancelReason });
+          d.updated = ts();
+        }
+      } else if (mode === 'cancel') {
+        const cascade = [...dependents];
+        while (cascade.length) {
+          const id2 = cascade.shift();
+          const d = w.items[id2];
+          if (d.status === 'CANCELLED') continue;
+          d.status = 'CANCELLED';
+          d.cancelReason = `cascade from ${item.id}: ${item.cancelReason}`;
+          d.updated = ts();
+          cascade.push(...w.order.filter(id3 =>
+            w.items[id3].deps.includes(id2) && !['DONE', 'CANCELLED'].includes(w.items[id3].status)));
+        }
+      }
       saveWork(w);
-      out(`${item.id} → CANCELLED: ${item.cancelReason}`);
+      out(`${item.id} → CANCELLED: ${item.cancelReason}` +
+          (dependents.length ? `\nDependents ${mode === 'cancel' ? 'cascade-cancelled' : 'updated (dep dropped)'}: ${dependents.join(', ')}` : ''));
 
-    } else die('Usage: forge task add|list|show|start|verify|done|fail|block|cancel ...');
+    } else if (sub === 'update') {
+      // 2.1/F6: makes '--escalate revisit-criteria' executable; every mutation is recorded
+      const item = getItem(w, argv[2]);
+      if (['DONE', 'CANCELLED'].includes(item.status))
+        die(`'${item.id}' is ${item.status} — closed items are not edited; create a new item that supersedes it.`);
+      const changes = [];
+      const touchingCriteria = optAll('criterion-add').length > 0 || optAll('criterion-remove').length > 0;
+      if (touchingCriteria && item.attempts.some(a => a.outcome === 'failed') && !opt('reason'))
+        die(`Refused: this item has failed attempts — changing its criteria moves the goalposts.\n` +
+            `That can be right, but it must be auditable: add --reason "why the criteria change".`);
+      for (const k of ['title', 'objective', 'milestone']) {
+        const v = opt(k);
+        if (v !== null) { changes.push(`${k}: '${item[k]}' → '${v}'`); item[k] = v; }
+      }
+      if (opt('deps') !== null) {
+        const nd = opt('deps').split(',').map(s => s.trim()).filter(Boolean);
+        changes.push(`deps: [${item.deps}] → [${nd}]`); item.deps = nd;
+      }
+      if (opt('allowed') !== null) { item.scope.allowed = opt('allowed').split(',').map(s => s.trim()).filter(Boolean); changes.push('scope.allowed updated'); }
+      if (opt('forbidden') !== null) { item.scope.forbidden = opt('forbidden').split(',').map(s => s.trim()).filter(Boolean); changes.push('scope.forbidden updated'); }
+      for (const idx of optAll('criterion-remove').map(Number).sort((a, b) => b - a)) {
+        if (!item.criteria[idx]) die(`No criterion at index ${idx} (use: forge task show ${item.id}).`);
+        changes.push(`criterion removed: '${item.criteria[idx].desc}'`);
+        item.criteria.splice(idx, 1);
+      }
+      for (const c of optAll('criterion-add')) {
+        const [desc, check] = c.split('::');
+        item.criteria.push({ desc: desc.trim(), check: (check || '').trim() || null });
+        changes.push(`criterion added: '${desc.trim()}'`);
+      }
+      if (!changes.length) die('Nothing to update. See: forge help');
+      (item.history = item.history || []).push({ ts: ts(), change: changes.join('; '), reason: opt('reason') || null });
+      item.updated = ts();
+      saveWork(w);
+      out(`${item.id} updated:\n` + changes.map(c => `  - ${c}`).join('\n'));
+
+    } else die('Usage: forge task add|list|show|start|verify|done|fail|block|cancel|update ...');
   },
 
   // -- brief ------------------------------------------------------------------
@@ -552,21 +747,25 @@ const commands = {
     if (sub === 'capture') {
       const results = Object.entries(cfg.verify).map(([k, cmd]) => Object.assign({ kind: k }, run(cmd)));
       writeJson(BASELINE_FILE, { ts: ts(), results });
+      // P3: brownfield projects that skip the spec phase must still get build-phase gates
+      if (cfg.phase === 'spec') {
+        cfg.phase = 'build';
+        writeJson(CONFIG_FILE, cfg);
+        out("Phase advanced spec → build (baseline captured implies build work is starting).");
+      }
       regenDashboard();
       results.forEach(r => out(`${r.exit === 0 ? 'GREEN' : 'RED  '}  ${r.kind}: ${r.cmd}`));
-      out('Baseline captured. RED items are recorded as PRE-EXISTING failures — new work must not make them worse and is not required to fix them.');
+      out('Baseline captured. RED items are recorded as PRE-EXISTING failures — new work must not make them worse and is not required to fix them.\n' +
+          'From now on, `forge task verify` includes this baseline automatically.');
     } else if (sub === 'check') {
-      const base = readJson(BASELINE_FILE, null);
-      if (!base) die('No baseline captured. Run: forge baseline capture');
+      if (!fs.existsSync(BASELINE_FILE)) die('No baseline captured. Run: forge baseline capture');
+      const results = baselineCompare(cfg);
       let regressed = false;
-      for (const b of base.results) {
-        const now = run(cfg.verify[b.kind] || b.cmd);
-        const was = b.exit === 0 ? 'GREEN' : 'RED';
-        const is = now.exit === 0 ? 'GREEN' : 'RED';
-        if (was === 'GREEN' && is === 'RED') { regressed = true; out(`REGRESSION  ${b.kind}: was GREEN at baseline, now RED\n${now.tail}`); }
-        else out(`OK  ${b.kind}: baseline ${was} → now ${is}`);
+      for (const r of results) {
+        if (r.exit !== 0) { regressed = true; out(`FAIL  ${r.kind}: ${r.note}\n${r.tail}`); }
+        else out(`OK  ${r.kind}: ${r.note}`);
       }
-      if (regressed) die('\nBaseline regression detected. The current change degrades previously-working behavior.');
+      if (regressed) die('\nBaseline check failed (regression or changed verify command — see above).');
       out('\nNo baseline regressions.');
     } else die('Usage: forge baseline capture|check');
   },
@@ -603,6 +802,42 @@ const commands = {
     out(`\nLogs: forge/decisions.md · forge/discoveries.md`);
   },
 
+  // -- milestone gates (F9) -------------------------------------------------------
+  milestone() {
+    const sub = argv[1];
+    const w = loadWork();
+    w.gates = w.gates || {};
+    if (sub === 'list') {
+      const cfg = loadConfig() || {};
+      out(`Gating mode: ${(cfg.options || {}).gates || 'per-milestone'}`);
+      for (const m of milestoneSeq(w)) {
+        const items = w.order.filter(id => w.items[id].milestone === m);
+        const done = items.filter(id => ['DONE', 'CANCELLED'].includes(w.items[id].status)).length;
+        const g = w.gates[m];
+        const state = g && g.approved ? `APPROVED ${g.ts}${g.note ? ` — ${g.note}` : ''}`
+          : (milestoneComplete(w, m) ? 'COMPLETE — AWAITING HUMAN APPROVAL' : 'in progress');
+        out(`  ${m}: ${done}/${items.length} items · ${state}`);
+      }
+    } else if (sub === 'approve') {
+      const m = argv[2];
+      if (!m || !milestoneSeq(w).includes(m)) die(`Unknown milestone '${m || ''}'. See: forge milestone list`);
+      if (!milestoneComplete(w, m))
+        die(`Refused: milestone '${m}' still has unfinished items — approval is for a testable, finished slice.`);
+      w.gates[m] = { approved: true, ts: ts(), note: opt('note') || null };
+      saveWork(w);
+      appendMd(DECISIONS_FILE, '# Decisions log (append-only, via forge CLI)',
+        `\n### ${ts()} — Milestone '${m}' approved\n- Authority: human\n- Decision: milestone gate approved after human review\n- Why: ${opt('note') || '(no note recorded)'}\n`);
+      out(`Milestone '${m}' approved — later milestones may now start.`);
+    } else if (sub === 'reopen') {
+      const m = argv[2];
+      if (!opt('reason')) die('Reopening a gate must be explicit: --reason "..."');
+      if (!w.gates[m] || !w.gates[m].approved) die(`Milestone '${m}' is not approved; nothing to reopen.`);
+      w.gates[m] = { approved: false, ts: ts(), note: `REOPENED: ${opt('reason')}` };
+      saveWork(w);
+      out(`Milestone '${m}' gate reopened: ${opt('reason')} — items in later milestones are blocked again.`);
+    } else die('Usage: forge milestone list | approve <name> [--note "..."] | reopen <name> --reason "..."');
+  },
+
   // -- dashboard ----------------------------------------------------------------
   dashboard() {
     if (!loadConfig()) die('No forge project here (run: forge init).');
@@ -622,7 +857,10 @@ const commands = {
       const parts = [];
       const operating = path.join(PLUGIN_ROOT, 'core', 'OPERATING.md');
       if (fs.existsSync(operating)) parts.push(fs.readFileSync(operating, 'utf8'));
-      parts.push(`\n---\nFORGE_CLI: node "${path.join(PLUGIN_ROOT, 'bin', 'forge.js')}" (run from the project root)\n`);
+      // 2.4: imperative — there is no installed `forge` binary
+      parts.push(`\n---\nIMPORTANT — command form: there is NO installed 'forge' binary. Wherever this contract, a skill, or a doc says 'forge X', the actual command is:\n` +
+        `    node "${path.join(PLUGIN_ROOT, 'bin', 'forge.js')}" X\n` +
+        `run from the project root. This applies to every forge command, every time.\n`);
       if (fs.existsSync(CONFIG_FILE)) {
         const digest = spawnSync(process.execPath, [__filename, 'status'], { cwd: PROJECT, encoding: 'utf8' });
         parts.push('## Current project state\n```\n' + (digest.stdout || '') + '```');
@@ -653,15 +891,25 @@ const commands = {
 
     } else if (which === 'stop') {
       if (input.stop_hook_active) process.exit(0); // never loop
-      const w = readJson(WORK_FILE, null);
+      let w = null;
+      try { w = JSON.parse(fs.readFileSync(WORK_FILE, 'utf8')); } catch (_) { process.exit(0); } // P4: never crash a hook on bad state
       if (!w) process.exit(0);
       const inProg = w.order.filter(id => w.items[id].status === 'IN_PROGRESS');
-      if (!inProg.length) process.exit(0);
-      process.stderr.write(
+      // 3.2: twice-failed TODO items are dangling work too — surface them
+      const failedTodo = w.order.filter(id => {
+        const t = w.items[id];
+        return t.status === 'TODO' && t.attempts.some(a => a.outcome === 'failed');
+      });
+      if (!inProg.length && !failedTodo.length) process.exit(0);
+      let msg = '';
+      if (inProg.length) msg +=
         `Open work items are still IN_PROGRESS: ${inProg.join(', ')}.\n` +
         `Before finishing: verify and complete them (forge task verify/done), mark them blocked with a reason (forge task block --reason), ` +
-        `or record a failed attempt with a diagnosis (forge task fail --note). If the user asked to pause, block with reason "user paused". ` +
-        `Then give the user a short status summary.\n`);
+        `or record a failed attempt with a diagnosis (forge task fail --note). If the user asked to pause, block with reason "user paused".\n`;
+      if (failedTodo.length) msg +=
+        `Items with recorded failed attempts are sitting in TODO: ${failedTodo.join(', ')}. ` +
+        `State their disposition in your closing summary (queued for escalation / superseded / awaiting decision) so nothing dangles silently.\n`;
+      process.stderr.write(msg + `Then give the user a short status summary.\n`);
       process.exit(2);
 
     } else die('Usage: forge hook session-start|pretooluse|stop');
@@ -677,10 +925,19 @@ const commands = {
            (or: task add --json '{...}')
   task list [--status S] | show <id>
   task start <id> [--escalate strategy --note why]
-  task verify <id>                       run project verify commands + criterion checks; records evidence
-  task done <id>                         only with a passing verification record
+                                         refuses: no criteria, unmet deps, unapproved earlier milestone,
+                                         already IN_PROGRESS, 3rd attempt w/o --escalate; records pre-work check state
+  task verify <id> [--skip-baseline --reason r]
+                                         project checks + criterion checks + baseline (when captured); records evidence + tree state
+  task done <id>                         refuses: no passing verification, tree changed since verification,
+                                         checks that were green before work with an unchanged tree
   task fail <id> --note "diagnosis"      record failed attempt (2 failures ⇒ escalation required)
-  task block <id> --reason | cancel <id> --reason
+  task update <id> [--title|--objective|--milestone|--deps|--allowed|--forbidden]
+                   [--criterion-add "d::cmd"]... [--criterion-remove i]... [--reason r]
+                                         audited edits; criteria changes after failures require --reason
+  task block <id> --reason | cancel <id> --reason [--dependents drop|cancel]
+  milestone list | approve <m> [--note] | reopen <m> --reason
+                                         human gates between milestones (config: options.gates per-milestone|end-only)
   brief <id>                             print the brief skeleton for a work item
   decision add --title --decision --why [--authority human|forge]
   discovery add --title --evidence --impact [--affects T1,T2]

@@ -40,12 +40,25 @@ At **Step 7** (generate handoff artifacts), in addition to `CLAUDE.md` and
    - `forge config set options.web true|false`
    - `forge config set specDir "<spec folder>"`
    - `forge config set phase build`
-2. Convert `PLAN.md` into the work graph: one `forge task add` per task, in
-   dependency order, with `--deps`, `--milestone`, and **acceptance criteria
-   taken from the spec** (`04-logic.md` criteria are mandatory sources).
-   Give every criterion a machine check (`--criterion "desc::command"`)
-   wherever one can exist — a criterion nobody can run is a weak gate.
-3. Run `forge preflight` and resolve anything it raises (including the
+2. **Propose the milestone cut and confirm it with the user.** Milestones
+   are phases that end in something the user can personally test — a
+   runnable vertical slice ("auth + create a family + see it persisted"),
+   never a horizontal layer ("database schema"). Put the walking skeleton
+   (thinnest end-to-end path) in M1 so integration risk surfaces first.
+   For each milestone, define a demo criterion: the command that runs it and
+   a short "what to try" script for the user. Present the cut as a proposal;
+   the user confirms or adjusts it — this is a product-owner decision.
+   Then ask one more either/or: stop for their testing after each milestone
+   (`per-milestone`, recommended default) or run straight through
+   (`end-only`)? Record it: `forge config set options.gates <choice>`.
+3. Convert `PLAN.md` into the work graph: one `forge task add` per task, in
+   dependency order, with `--deps`, `--milestone` (from the confirmed cut),
+   and **acceptance criteria taken from the spec** (`04-logic.md` criteria
+   are mandatory sources). Give every criterion a machine check
+   (`--criterion "desc::command"`) wherever one can exist — a criterion
+   nobody can run is a weak gate, and the CLI's red-first check will flag
+   vacuous ones.
+4. Run `forge preflight` and resolve anything it raises (including the
    Graphify install-or-skip question if unset).
 
 Then tell the user the spec phase is complete and the project is ready for

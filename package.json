@@ -1,0 +1,8 @@
+{
+  "name": "forge-plugin-repo",
+  "private": true,
+  "version": "0.3.0",
+  "scripts": {
+    "test": "node --test"
+  }
+}

@@ -54,20 +54,39 @@ orientation, baseline capture, scoped mini-spec — then the same loop.
    - Fail → `forge task fail <id> --note "<root-cause diagnosis>"`. Diagnose
      BEFORE retrying. Retry = fresh worker + brief + your diagnosis. Never
      resume a failed worker's context; never redispatch the same brief
-     unchanged. After 2 failures the CLI forces `--escalate`: stronger model,
-     different decomposition, or do it yourself.
+     unchanged. An IN_PROGRESS item cannot be re-started — resolve it first
+     (fail / block / done); the CLI enforces this. After 2 failures the CLI
+     forces `--escalate`: stronger model, different decomposition, revised
+     criteria (`forge task update --reason`), or do it yourself.
+
+6. **Milestone gate** (when `options.gates` is `per-milestone`, the default):
+   when the last item of a milestone goes DONE, stop. Demo the running slice
+   to the user (the milestone's demo criterion says how), collect their
+   verdict, record it: `forge milestone approve <M> --note "..."`. Their
+   feedback becomes decisions and work-graph updates BEFORE the next
+   milestone starts. The CLI refuses to start later-milestone items until
+   the gate is approved — this is the user's early-drift catch; never ask
+   them to skip it, though they may switch to `end-only` themselves.
 
 ## Hard rules (enforced by tooling — do not fight them, work with them)
 
 - All work state changes go through the `forge` CLI. Direct edits to
   `forge/state/*` and `forge/config.json` are blocked by hooks.
-- DONE requires a passing verification record. No exceptions, including for
-  your own direct work.
-- An item with no acceptance criteria cannot start. Write criteria first.
+- DONE requires a passing verification record **for the current tree** — edit
+  anything after a green verify and `done` demands a re-verify. No
+  exceptions, including for your own direct work.
+- An item with no acceptance criteria cannot start. Write criteria first —
+  and write them red-first: `start` records each check's pre-work result,
+  and `done` refuses when checks that were green before any work are still
+  the only evidence. A check that cannot fail proves nothing.
 - Brownfield: capture the baseline before the first change
-  (`forge baseline capture`); run `forge baseline check` as part of
-  verification. Pre-existing failures are recorded, not silently fixed and
-  not made worse.
+  (`forge baseline capture` — it also advances the phase to build). From
+  then on `task verify` includes the baseline automatically; a regression
+  fails verification. Pre-existing failures are recorded, not silently
+  fixed and not made worse.
+- Cancelling an item with live dependents forces you to decide their fate
+  (`--dependents drop|cancel`); revising an item is `forge task update`,
+  audited, with `--reason` required when criteria change after failures.
 
 ## Proportionality
 

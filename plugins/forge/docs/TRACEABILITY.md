@@ -49,7 +49,9 @@ where it lives in this plugin. Homes:
 | Conversational protocol, verbosity | 241–242 | CORE | "Interaction with the user" section |
 | Spec-First methodology integration | 233–240, 321–327 | SKILL (forge-method) | METHOD.md verbatim; proposal→confirmation→decision protocol kept |
 | Commands surface | 145–149 | commands/ | /forge:status, /forge:preflight, /forge:build |
-| Acceptance scenarios | 74 | Partially DEFERRED | Gates A–L covered by CLI/hook tests (see repo tests); formal eval suite v0.5 |
+| Acceptance scenarios | 74 | CLI tests (v0.3) | `tests/cli.test.js` — 20 refusal/gate tests, one per advertised enforcement (`npm test`); formal agent-behavior eval suite remains DEFERRED to v0.5 |
+| Milestone/human review gates | 45–46, 241 ("milestone review"), 236 | CLI (v0.3) | `forge milestone approve/reopen`; `task start` refuses later-milestone items until earlier gates approved; config `options.gates per-milestone\|end-only`; approvals recorded as human-authority decisions |
+| Verification integrity (review 1.1–1.3, 3.1) | 38, 59, 121–122 | CLI (v0.3) | retry-ladder bypass closed (no start from IN_PROGRESS); baseline folded into `task verify`; red-first criterion gate; verification records bound to git tree state |
 
 ## Deliberate design departures from the spec (decided in review, 2026-08)
 

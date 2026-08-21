@@ -49,6 +49,9 @@ files = the closure; forbidden = shared contracts/areas outside it).
 
 ## 5. Hand off to the build loop
 
-Normal loop, one addition: verification for brownfield items includes
-`forge baseline check` — a baseline regression fails the item even if its own
-criteria pass.
+Normal loop. The baseline guard is automatic: once a baseline exists,
+`forge task verify` includes the comparison and a regression fails the item
+even if its own criteria pass (deliberate exceptions need
+`--skip-baseline --reason`). `baseline capture` also advances the project to
+build phase, so preflight's verification gate is armed without the spec
+phase having run.
