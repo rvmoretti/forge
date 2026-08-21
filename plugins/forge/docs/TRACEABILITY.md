@@ -41,7 +41,7 @@ where it lives in this plugin. Homes:
 | Human escalation format | 44, 119 | CORE | "A or B, I recommend A because X" rule |
 | Autonomy modes, approval policy | 45–46, 201–202, 248–249 | CORE + Claude Code permissions | v0 uses Claude Code's native permission system as the approval gate; per-operation policy config → DEFERRED |
 | Failure recovery, Git, retries | 47, 54, 137–138, 230, 256–258 | CLI | Retry ladder with forced escalation; git assumed as recovery substrate |
-| Control Center | 48–50, 112, 142–144, 243–245 | DEFERRED | `forge status` (rich text) covers observability for v0; HTML dashboard after loop stabilizes |
+| Control Center | 48–50, 112, 142–144, 243–245 | CLI (v0.2) | `forge dashboard` generates `forge/dashboard.html` deterministically from state; auto-regens on every CLI state mutation; stamped as generated projection (§50 state-wins rule enforced by regeneration) |
 | Audit protocol | 51–52, 148, 262–263 | DEFERRED (deep audit) | Lightweight consistency lives in status + baseline; deep audit v0.5 |
 | State consistency, transactions, idempotency | 53, 216–219, 152–154 | CLI | Atomic writes (tmp+rename), stable ids, idempotent init/preflight; corruption → refuse + instruct recovery from git |
 | Session restart, interruption, emergency stop | 270–273 | HOOK | SessionStart digest; Stop gate refuses silent dangling work (with loop protection) |
