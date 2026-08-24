@@ -12,6 +12,7 @@
 'use strict';
 
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
 const { spawnSync } = require('child_process');
@@ -528,7 +529,7 @@ const commands = {
       const alreadyGreen = item.preState.filter(p => p && p.exit === 0);
       item.status = 'IN_PROGRESS';
       item.blockReason = null;
-      item.attempts.push({ ts: ts(), outcome: 'started', escalation: opt('escalate') || null, note: opt('note') || null });
+      item.attempts.push({ ts: ts(), outcome: 'started', escalation: opt('escalate') || null, note: opt('note') || null, agent: opt('agent') || null });
       item.updated = ts();
       saveWork(w);
       out(`${item.id} → IN_PROGRESS${opt('escalate') ? ` (escalation: ${opt('escalate')})` : ''}`);
@@ -802,6 +803,129 @@ const commands = {
     out(`\nLogs: forge/decisions.md · forge/discoveries.md`);
   },
 
+  // -- usage (v0.4) — OBSERVED telemetry from local Claude Code session logs ------
+  usage() {
+    const projectsRoot = process.env.FORGE_CLAUDE_PROJECTS || path.join(os.homedir(), '.claude', 'projects');
+    if (!fs.existsSync(projectsRoot)) die(`UNAVAILABLE: no Claude Code session logs found at ${projectsRoot}.`);
+    // locate this project's transcript folder: sanitized-cwd name, else scan for matching cwd
+    const sanitized = PROJECT.replace(/[^a-zA-Z0-9]/g, '-');
+    let dirCandidates = [path.join(projectsRoot, sanitized)].filter(fs.existsSync);
+    if (!dirCandidates.length) {
+      for (const d of fs.readdirSync(projectsRoot)) {
+        const full = path.join(projectsRoot, d);
+        try {
+          const f = fs.readdirSync(full).find(x => x.endsWith('.jsonl'));
+          if (!f) continue;
+          const head = fs.readFileSync(path.join(full, f), 'utf8').split('\n').slice(0, 20).join('\n');
+          if (head.includes(`"cwd":${JSON.stringify(PROJECT)}`)) { dirCandidates.push(full); break; }
+        } catch (_) { /* skip */ }
+      }
+    }
+    if (!dirCandidates.length)
+      die(`UNAVAILABLE: no session logs for this project under ${projectsRoot}.\n` +
+          `(Logs appear after Claude Code sessions run in ${PROJECT}.)`);
+
+    const agg = {
+      sessions: 0, firstTs: null, lastTs: null,
+      models: {},          // model → {thread: main|side} → {calls,in,out,cacheCreate,cacheRead}
+      dispatches: [],      // {ts, type, itemId|null}
+      byDay: {},           // yyyy-mm-dd → out tokens
+    };
+    const bump = (model, thread, u) => {
+      const m = (agg.models[model] = agg.models[model] || {});
+      const t = (m[thread] = m[thread] || { calls: 0, in: 0, out: 0, cacheCreate: 0, cacheRead: 0 });
+      t.calls++; t.in += u.input_tokens || 0; t.out += u.output_tokens || 0;
+      t.cacheCreate += u.cache_creation_input_tokens || 0; t.cacheRead += u.cache_read_input_tokens || 0;
+    };
+    for (const dir2 of dirCandidates) {
+      for (const f of fs.readdirSync(dir2).filter(x => x.endsWith('.jsonl'))) {
+        agg.sessions++;
+        for (const line of fs.readFileSync(path.join(dir2, f), 'utf8').split('\n')) {
+          if (!line.trim()) continue;
+          let d; try { d = JSON.parse(line); } catch (_) { continue; }
+          const tsv = d.timestamp;
+          if (tsv) {
+            if (!agg.firstTs || tsv < agg.firstTs) agg.firstTs = tsv;
+            if (!agg.lastTs || tsv > agg.lastTs) agg.lastTs = tsv;
+          }
+          if (d.type !== 'assistant' || !d.message) continue;
+          const model = d.message.model || 'unknown';
+          if (model === '<synthetic>') continue;
+          const u = d.message.usage || {};
+          bump(model, d.isSidechain ? 'side' : 'main', u);
+          if (tsv) agg.byDay[tsv.slice(0, 10)] = (agg.byDay[tsv.slice(0, 10)] || 0) + (u.output_tokens || 0);
+          for (const c of (Array.isArray(d.message.content) ? d.message.content : [])) {
+            if (c && c.type === 'tool_use' && (c.name === 'Task' || c.name === 'Agent')) {
+              const p = (c.input || {}).prompt || '';
+              const m2 = p.match(/Work brief — (\S+?):/);
+              agg.dispatches.push({ ts: tsv || null, type: (c.input || {}).subagent_type || 'unknown', itemId: m2 ? m2[1] : null });
+            }
+          }
+        }
+      }
+    }
+
+    // ---- report ----
+    out(`# Forge usage — OBSERVED from local session logs (never estimated)`);
+    out(`Source: ${dirCandidates.join(', ')}`);
+    out(`Sessions: ${agg.sessions} · window: ${agg.firstTs ? agg.firstTs.slice(0, 16) : '?'} → ${agg.lastTs ? agg.lastTs.slice(0, 16) : '?'}`);
+    out(`\n## Tokens by model and thread (main = orchestrator, side = dispatched subagents)`);
+    let mainOut = 0, sideOut = 0;
+    for (const [model, threads] of Object.entries(agg.models)) {
+      for (const [thread, t] of Object.entries(threads)) {
+        if (thread === 'main') mainOut += t.out; else sideOut += t.out;
+        out(`  ${model} [${thread}]: ${t.calls} calls · in ${t.in.toLocaleString()} · out ${t.out.toLocaleString()} · cache write ${t.cacheCreate.toLocaleString()} / read ${t.cacheRead.toLocaleString()}`);
+      }
+    }
+    const totOut = mainOut + sideOut;
+    out(`\n## Delegation`);
+    out(`  Output tokens — orchestrator: ${mainOut.toLocaleString()} · subagents: ${sideOut.toLocaleString()}` +
+        (totOut ? ` · ${Math.round(100 * sideOut / totOut)}% delegated` : ''));
+    const byType = {};
+    for (const disp of agg.dispatches) byType[disp.type] = (byType[disp.type] || 0) + 1;
+    const forgeCount = Object.entries(byType).filter(([k]) => k.startsWith('forge-')).reduce((a, [, v]) => a + v, 0);
+    out(`  Dispatches: ${agg.dispatches.length} total — ` +
+        (Object.keys(byType).length ? Object.entries(byType).map(([k, v]) => `${k}×${v}`).join(' · ') : 'NONE'));
+    if (agg.dispatches.length)
+      out(`  Through forge roster: ${forgeCount}/${agg.dispatches.length}` +
+          (forgeCount < agg.dispatches.length ? '  ← work is bypassing the forge agents (built-in/other types above)' : ''));
+    else
+      out(`  ← ZERO dispatches: the orchestrator is doing all work itself in the main thread.`);
+    const tied = agg.dispatches.filter(d2 => d2.itemId);
+    const perItem = {};
+    for (const d2 of tied) perItem[d2.itemId] = (perItem[d2.itemId] || 0) + 1;
+    out(`  Tied to work items (brief id found in prompt): ` +
+        (tied.length ? Object.entries(perItem).map(([k, v]) => `${k}×${v}`).join(' · ') : 'none') +
+        (agg.dispatches.length - tied.length ? ` · ${agg.dispatches.length - tied.length} dispatch(es) carried no forge brief` : ''));
+
+    // drift: tokens spent after the last forge state change
+    try {
+      const stateM = fs.statSync(WORK_FILE).mtime.toISOString();
+      let after = 0;
+      for (const dir2 of dirCandidates)
+        for (const f of fs.readdirSync(dir2).filter(x => x.endsWith('.jsonl')))
+          for (const line of fs.readFileSync(path.join(dir2, f), 'utf8').split('\n')) {
+            if (!line.includes('"assistant"')) continue;
+            let d2; try { d2 = JSON.parse(line); } catch (_) { continue; }
+            if (d2.type === 'assistant' && d2.timestamp > stateM && d2.message && d2.message.usage)
+              after += d2.message.usage.output_tokens || 0;
+          }
+      out(`\n## Progress vs spend`);
+      out(`  Last forge state change: ${stateM.slice(0, 16)} · output tokens spent SINCE then: ${after.toLocaleString()}`);
+      if (after > 20000) out(`  ← significant spend with no state movement: work may be happening outside the forge loop. Check what the session is doing.`);
+    } catch (_) { /* no work file */ }
+
+    out(`\n## Activity by day (output tokens)`);
+    for (const [day, v] of Object.entries(agg.byDay).sort())
+      out(`  ${day}: ${'█'.repeat(Math.min(40, Math.ceil(v / 2000)))} ${v.toLocaleString()}`);
+    out(`\nCaveats: per-agent-type token attribution inside subagent threads is not exposed by the logs (reported in aggregate as [side]); ` +
+        `milestone-level token attribution is not reliably derivable and is therefore not shown. Absent data is absent, never estimated.`);
+    if (flag('write')) {
+      writeJson(path.join(STATE, 'usage.json'), { ts: ts(), models: agg.models, dispatches: agg.dispatches.length, byType, mainOut, sideOut });
+      out('\nSaved snapshot: forge/state/usage.json');
+    }
+  },
+
   // -- milestone gates (F9) -------------------------------------------------------
   milestone() {
     const sub = argv[1];
@@ -924,7 +1048,7 @@ const commands = {
            [--criterion "desc::check-cmd"]... [--allowed glob,..] [--forbidden glob,..]
            (or: task add --json '{...}')
   task list [--status S] | show <id>
-  task start <id> [--escalate strategy --note why]
+  task start <id> [--agent forge-implementer] [--escalate strategy --note why]
                                          refuses: no criteria, unmet deps, unapproved earlier milestone,
                                          already IN_PROGRESS, 3rd attempt w/o --escalate; records pre-work check state
   task verify <id> [--skip-baseline --reason r]
@@ -944,6 +1068,9 @@ const commands = {
   baseline capture | check               brownfield: record and guard pre-existing state
   status                                 project overview
   dashboard                              (re)generate forge/dashboard.html — also auto-regens on every state change
+  usage [--write]                        OBSERVED token/dispatch report from local session logs:
+                                         by model, orchestrator vs subagents, dispatches by agent type,
+                                         per-item dispatch counts, spend since last state change
   hook session-start|pretooluse|stop     (used by plugin hooks)`);
   }
 };
