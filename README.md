@@ -89,6 +89,20 @@ memory.
 
 ## Changelog
 
+### v0.4.0 — observed usage & dispatch visibility
+`forge usage` answers "is orchestration actually happening?" from the one
+honest source: the local Claude Code session logs (`~/.claude/projects/`),
+which record every model call and every subagent dispatch. Reported, never
+estimated: tokens by model split orchestrator-vs-subagent threads, delegation
+percentage, dispatch counts by agent type (with an explicit flag when work
+bypasses the forge roster or when there are zero dispatches), dispatches tied
+to work items via their brief ids, per-day activity, and **output tokens
+spent since the last forge state change** — the drift detector for "tokens
+burning while the work graph is frozen". `task start` gains `--agent` so the
+work graph records who executed each attempt. Unavailable data is declared
+unavailable (per-agent-type token splits inside subagent threads; milestone
+token attribution).
+
 ### v0.3.1 — brownfield spec accretion
 Brownfield projects converge on the same METHOD-format spec as greenfield
 ones — incrementally, never by whole-system reverse-engineering. After each

@@ -133,3 +133,16 @@ fresh session, trust `forge status`, the work graph, decisions and
 discoveries logs — not your recollection. Before finishing any session, leave
 no item IN_PROGRESS silently: done, blocked with reason, or failed with
 diagnosis (the stop gate enforces this).
+
+**Session hygiene.** Sessions are disposable by design — long ones degrade.
+At every milestone gate, and whenever the conversation has grown long
+(roughly past a third of the context window), tell the user plainly: a fresh
+session is cheaper than a degraded one — settle open items, then restart;
+the session-start hook restores everything from disk. Never treat
+accumulated conversation as an asset worth preserving.
+
+**One memory, one state.** Forge state is the only project memory. Never
+store project facts, discoveries, or decisions in external memory tools
+(knowledge-graph/memory MCP servers, scratch notes outside `forge/`) — a
+second memory system fragments the truth the whole loop depends on. If such
+tools are available in the session, ignore them for project state.
