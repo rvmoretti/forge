@@ -89,6 +89,11 @@ memory.
 
 ## Changelog
 
+### v0.4.1 — fix duplicate-hooks load error
+Claude Code auto-loads `hooks/hooks.json` by convention; the manifest's
+explicit `hooks` field made it load twice and error on newer versions.
+Removed the manifest field — hooks now load once, via the convention path.
+
 ### v0.4.0 — observed usage & dispatch visibility
 `forge usage` answers "is orchestration actually happening?" from the one
 honest source: the local Claude Code session logs (`~/.claude/projects/`),
