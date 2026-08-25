@@ -89,6 +89,13 @@ memory.
 
 ## Changelog
 
+### v0.4.2 — usage report accuracy
+Roster detection now matches plugin-prefixed agent types (`forge:forge-implementer`),
+fixing a false "work is bypassing the forge agents" warning. When dispatches
+exist but no subagent-thread usage appears in the logs (some Claude Code
+versions store worker transcripts elsewhere), the delegation split now reports
+UNAVAILABLE instead of a misleading 0%.
+
 ### v0.4.1 — fix duplicate-hooks load error
 Claude Code auto-loads `hooks/hooks.json` by convention; the manifest's
 explicit `hooks` field made it load twice and error on newer versions.
