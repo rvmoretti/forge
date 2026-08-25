@@ -39,7 +39,7 @@ experience → API → logic → foundation). When the spec gates, say "build it
 skill orients (Graphify-first), captures a baseline, asks you only the
 product questions the code can't answer, then runs the same loop.
 
-**Commands:** `/forge:status` · `/forge:preflight` · `/forge:build` · `/forge:dashboard`
+**Commands:** `/forge:status` · `/forge:preflight` · `/forge:build` · `/forge:dashboard` · `/forge:usage`
 
 **Dashboard:** `forge/dashboard.html` — a generated projection of everything on
 disk (progress, work graph by milestone, attempts/verifications, decisions,
@@ -67,6 +67,7 @@ plugins/forge/
 │   └── forge-domain-packs/ backend · frontend · testing · security checklists
 │                          (curated from msitarzewski/agency-agents)
 ├── commands/              /forge:status /forge:preflight /forge:build
+│                          /forge:dashboard /forge:usage
 └── docs/
     ├── manual.html        the user manual — setup + greenfield/brownfield
     │                      walkthroughs; open in any browser, give to newcomers
@@ -88,6 +89,12 @@ session recovers the full picture from disk — the conversation is never the
 memory.
 
 ## Changelog
+
+### v0.4.4 — /forge:usage slash command
+The usage report existed only as a CLI subcommand (`forge usage`) since
+v0.4.0; there was no slash form. Added `commands/usage.md` so `/forge:usage`
+works inside a session. The zero-token path is unchanged: run
+`node <plugin>/bin/forge.js usage` from any plain terminal.
 
 ### v0.4.3 — real worker telemetry
 `forge usage` now reads worker transcripts from
