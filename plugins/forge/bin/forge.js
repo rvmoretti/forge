@@ -837,10 +837,25 @@ const commands = {
       t.calls++; t.in += u.input_tokens || 0; t.out += u.output_tokens || 0;
       t.cacheCreate += u.cache_creation_input_tokens || 0; t.cacheRead += u.cache_read_input_tokens || 0;
     };
+    // main-session transcripts sit in the project dir; worker transcripts sit in
+    // <session-uuid>/subagents/agent-*.jsonl subdirectories (Claude Code >= 2.1)
+    const files = [];
     for (const dir2 of dirCandidates) {
-      for (const f of fs.readdirSync(dir2).filter(x => x.endsWith('.jsonl'))) {
-        agg.sessions++;
-        for (const line of fs.readFileSync(path.join(dir2, f), 'utf8').split('\n')) {
+      for (const entry of fs.readdirSync(dir2)) {
+        const full = path.join(dir2, entry);
+        if (entry.endsWith('.jsonl')) { files.push({ f: full, forcedSide: false, isSession: true }); continue; }
+        const sub = path.join(full, 'subagents');
+        try {
+          if (fs.statSync(full).isDirectory() && fs.existsSync(sub))
+            for (const wf of fs.readdirSync(sub).filter(x => x.endsWith('.jsonl')))
+              files.push({ f: path.join(sub, wf), forcedSide: true, isSession: false });
+        } catch (_) { /* skip */ }
+      }
+    }
+    {
+      for (const { f, forcedSide, isSession } of files) {
+        if (isSession) agg.sessions++;
+        for (const line of fs.readFileSync(f, 'utf8').split('\n')) {
           if (!line.trim()) continue;
           let d; try { d = JSON.parse(line); } catch (_) { continue; }
           const tsv = d.timestamp;
@@ -852,7 +867,7 @@ const commands = {
           const model = d.message.model || 'unknown';
           if (model === '<synthetic>') continue;
           const u = d.message.usage || {};
-          bump(model, d.isSidechain ? 'side' : 'main', u);
+          bump(model, (forcedSide || d.isSidechain) ? 'side' : 'main', u);
           if (tsv) agg.byDay[tsv.slice(0, 10)] = (agg.byDay[tsv.slice(0, 10)] || 0) + (u.output_tokens || 0);
           for (const c of (Array.isArray(d.message.content) ? d.message.content : [])) {
             if (c && c.type === 'tool_use' && (c.name === 'Task' || c.name === 'Agent')) {
