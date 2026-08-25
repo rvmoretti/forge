@@ -879,11 +879,17 @@ const commands = {
     }
     const totOut = mainOut + sideOut;
     out(`\n## Delegation`);
-    out(`  Output tokens — orchestrator: ${mainOut.toLocaleString()} · subagents: ${sideOut.toLocaleString()}` +
-        (totOut ? ` · ${Math.round(100 * sideOut / totOut)}% delegated` : ''));
+    if (sideOut === 0 && agg.dispatches.length > 0)
+      out(`  Output tokens — orchestrator: ${mainOut.toLocaleString()} · subagents: UNAVAILABLE\n` +
+          `  (dispatches exist but no subagent-thread usage appears in these logs — this Claude Code version\n` +
+          `   likely stores worker transcripts elsewhere; token split by thread cannot be observed here)`);
+    else
+      out(`  Output tokens — orchestrator: ${mainOut.toLocaleString()} · subagents: ${sideOut.toLocaleString()}` +
+          (totOut ? ` · ${Math.round(100 * sideOut / totOut)}% delegated` : ''));
     const byType = {};
     for (const disp of agg.dispatches) byType[disp.type] = (byType[disp.type] || 0) + 1;
-    const forgeCount = Object.entries(byType).filter(([k]) => k.startsWith('forge-')).reduce((a, [, v]) => a + v, 0);
+    // plugin agents report as "forge:forge-implementer"; bare "forge-implementer" also counts
+    const forgeCount = Object.entries(byType).filter(([k]) => k.includes('forge-')).reduce((a, [, v]) => a + v, 0);
     out(`  Dispatches: ${agg.dispatches.length} total — ` +
         (Object.keys(byType).length ? Object.entries(byType).map(([k, v]) => `${k}×${v}`).join(' · ') : 'NONE'));
     if (agg.dispatches.length)
