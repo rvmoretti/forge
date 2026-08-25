@@ -89,6 +89,12 @@ memory.
 
 ## Changelog
 
+### v0.4.3 — real worker telemetry
+`forge usage` now reads worker transcripts from
+`<session>/subagents/agent-*.jsonl` (where Claude Code ≥ 2.1 stores them),
+so the delegation split reports observed orchestrator-vs-worker tokens by
+model instead of UNAVAILABLE.
+
 ### v0.4.2 — usage report accuracy
 Roster detection now matches plugin-prefixed agent types (`forge:forge-implementer`),
 fixing a false "work is bypassing the forge agents" warning. When dispatches
