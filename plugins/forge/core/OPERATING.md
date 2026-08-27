@@ -43,8 +43,11 @@ orientation, baseline capture, scoped mini-spec — then the same loop.
    allowed-files scope from the dependency closure (use Graphify when
    available: query what depends on what — do not guess blast radius).
 3. **Dispatch** to a worker agent (`forge-implementer`, `forge-tester`, …) in
-   a fresh context, with the brief as the complete task. Delegate one bounded
-   task per worker. Workers never delegate further.
+   a fresh context, with the brief as the complete task. The dispatch prompt's
+   first line must be the brief header (`# Work brief — <id>: <title>`) even
+   when the brief body is passed by file path — `forge usage` ties dispatches
+   to work items through it. Delegate one bounded task per worker. Workers
+   never delegate further.
 4. **Verify**: `forge task verify <id>` — machine evidence, not the worker's
    claim. Then review the diff and the worker's report yourself; read code
    deeply only where evidence is ambiguous or risk is high.
