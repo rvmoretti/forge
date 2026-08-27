@@ -73,6 +73,9 @@ plugins/forge/
 └── docs/
     ├── manual.html        the user manual — setup + greenfield/brownfield
     │                      walkthroughs; open in any browser, give to newcomers
+    ├── architecture.html  functional diagrams — who talks to whom, where the
+    │                      truth lives, the work-item state machine with its
+    │                      refusal edges
     └── TRACEABILITY.md    FORGE spec §1–§333 → where each rule lives
 ```
 
