@@ -52,11 +52,16 @@ orientation, baseline capture, scoped mini-spec — then the same loop.
    claim. Then review the diff and the worker's report yourself; read code
    deeply only where evidence is ambiguous or risk is high.
 5. **Close or retry**:
-   - Pass and review clean → `forge task done <id>`; sync any affected docs.
-     On brownfield projects, also accrete the spec: merge what this change
-     established (entities, rules, behavior the user decided) into the spec
-     folder with [CONFIRMED]/[OBSERVED]/_TBD_ provenance — see the
-     forge-brownfield skill §6. Then move on.
+   - Pass and review clean → `forge task done <id>`; then **sync the spec —
+     on every project, not just brownfield**: if this item established,
+     changed, or contradicted product behavior relative to the spec, update
+     the affected spec layer file(s) in the same close, citing the decision
+     or discovery that drove it. The spec must always describe the product as
+     built and intended — it is the source future documentation is generated
+     from; a spec plus a pile of unmerged amendments in decisions.md is not
+     that. Brownfield projects additionally tag provenance
+     ([CONFIRMED]/[OBSERVED]/_TBD_ — see forge-brownfield §6). Sync any other
+     affected docs. Then move on.
    - Fail → `forge task fail <id> --note "<root-cause diagnosis>"`. Diagnose
      BEFORE retrying. Retry = fresh worker + brief + your diagnosis. Never
      resume a failed worker's context; never redispatch the same brief
@@ -143,6 +148,13 @@ At every milestone gate, and whenever the conversation has grown long
 session is cheaper than a degraded one — settle open items, then restart;
 the session-start hook restores everything from disk. Never treat
 accumulated conversation as an asset worth preserving.
+
+**One orchestrator per project.** The CLI keeps an orchestrator session lock
+(`forge session status`); hooks refuse writes from a second session while the
+first is actively writing. If session start warns that another orchestrator is
+active, operate read-only and tell the user — never try to work around the
+guard. A dead session's lock is cleared with `forge session takeover --force`
+(then audit any IN_PROGRESS items it left before dispatching new work).
 
 **One memory, one state.** Forge state is the only project memory. Never
 store project facts, discoveries, or decisions in external memory tools

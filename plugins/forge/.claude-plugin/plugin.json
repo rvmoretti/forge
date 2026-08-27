@@ -1,7 +1,7 @@
 {
   "name": "forge",
-  "description": "Forge v0 — spec-first engineering orchestration: a CTO operating contract for the main agent, a state CLI with machine-enforced gates (verification before DONE, retry escalation, baseline guard), tiered worker agents, and skills for the spec phase (METHOD), brownfield orientation, and domain packs.",
-  "version": "0.4.5",
+  "description": "Forge v0 \u2014 spec-first engineering orchestration: a CTO operating contract for the main agent, a state CLI with machine-enforced gates (verification before DONE, retry escalation, baseline guard), tiered worker agents, and skills for the spec phase (METHOD), brownfield orientation, and domain packs.",
+  "version": "0.5.0",
   "author": {
     "name": "Rodrigo Moretti"
   }

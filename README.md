@@ -7,7 +7,7 @@ agents, machine-verifies every result, and loops until acceptance criteria
 pass. You own WHAT and WHY; Forge owns HOW.
 
 The rules that matter are enforced by code, not prompts — and every claim
-below is covered by a test in `tests/cli.test.js` (`npm test`, 20 tests):
+below is covered by a test in `tests/cli.test.js` (`npm test`, 26 tests):
 
 - **DONE requires a passing verification record for the current tree** — no record, a failed record, or evidence older than the latest edit all refuse.
 - **Checks must prove something** — `start` records each criterion check's pre-work result; if everything was green before work and nothing changed, `done` refuses (vacuous or already-satisfied criteria get flagged, not laundered).
@@ -17,6 +17,8 @@ below is covered by a test in `tests/cli.test.js` (`npm test`, 20 tests):
 - **Brownfield changes are baseline-guarded in the verification itself** — once a baseline exists, `task verify` runs the comparison automatically; a regression fails the record (deliberate skips need `--skip-baseline --reason`).
 - **State files can only change through the CLI** — direct edits are blocked by a hook; work-item edits go through audited `forge task update`; cancelling an item with live dependents forces an explicit decision about them.
 - **Sessions can't end with silently dangling work** — the stop gate catches in-progress items and failed items parked in TODO.
+- **One orchestrator per project** — a session lock (heartbeat on every write) makes hooks refuse writes from a second session while the first is active; a clean finish releases it, a stale one ages out, and `forge session takeover --force` clears a dead session's lock.
+- **Log entries can't lose their identity** — `decision add` / `discovery add` refuse when no title is given (a bare positional argument counts as the title), instead of silently recording "(untitled)".
 
 ## Install
 
@@ -89,6 +91,34 @@ session recovers the full picture from disk — the conversation is never the
 memory.
 
 ## Changelog
+
+### v0.5.0 — one orchestrator, one living spec
+Three changes, each closing a failure observed in the field:
+
+- **Orchestrator session lock** (the duplicate-orchestrator fix). Root cause
+  of the T27 edit-war incident: a resumed/headless session and the visible
+  session both believed they owned the project. Now every write beats a
+  heartbeat into `forge/state/session.json`; the PreToolUse hook refuses
+  Write/Edit from any OTHER session while the lock is fresh (15-min TTL),
+  session start warns an arriving second orchestrator to stay read-only, a
+  clean stop releases the lock, and `forge session status | takeover
+  [--force]` gives the human the referee's whistle. Sessions without a
+  session_id in hook input (older Claude Code) are unaffected.
+- **Universal spec sync** (greenfield spec drift fix). Spec accretion was
+  brownfield-only; greenfield relied on one soft "sync any affected docs"
+  line, so gate feedback and mid-build decisions piled up in decisions.md
+  while spec/ went stale. The close step in OPERATING.md now requires, on
+  every project, updating the affected spec layer when a completed item
+  established/changed/contradicted product behavior — citing the driving
+  decision/discovery — and `task done` prints the reminder. The spec is the
+  documentation-generation source; it must always describe the product as
+  built and intended.
+- **Titled log entries.** `decision add` / `discovery add` silently recorded
+  "(untitled)" with empty fields when called without flags — quiet data loss
+  dressed as compliance. Both now accept a bare positional argument as the
+  title and refuse outright when no title arrives either way.
+
+6 new tests (26 total).
 
 ### v0.4.5 — dispatch-to-item tie hardening
 `forge usage` tied dispatches to work items only via the inline brief header

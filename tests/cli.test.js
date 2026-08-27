@@ -296,3 +296,69 @@ test('usage ties dispatches via inline header, brief file path, and known item i
   assert.match(out, /T20f×2/);
   assert.match(out, /1 dispatch\(es\) could not be tied/);
 });
+
+// --- v0.5: orchestrator session lock ----------------------------------------
+
+test('pretooluse blocks writes from a second session while the first is active', () => {
+  // session A claims via a write
+  const a = hook('pretooluse', { session_id: 'sess-A', tool_name: 'Write', tool_input: { file_path: 'src/app.js' } });
+  assert.strictEqual(a.code, 0);
+  // session B is refused
+  const b = hook('pretooluse', { session_id: 'sess-B', tool_name: 'Write', tool_input: { file_path: 'src/app.js' } });
+  assert.strictEqual(b.code, 2);
+  assert.match(b.out, /EDIT-WAR GUARD/);
+  // session A keeps working
+  const a2 = hook('pretooluse', { session_id: 'sess-A', tool_name: 'Edit', tool_input: { file_path: 'src/other.js' } });
+  assert.strictEqual(a2.code, 0);
+});
+
+test('a stale lock is taken over silently; a released lock too', () => {
+  hook('pretooluse', { session_id: 'sess-A', tool_name: 'Write', tool_input: { file_path: 'src/app.js' } });
+  // age the lock past the TTL
+  const sessFile = path.join(dir, 'forge', 'state', 'session.json');
+  const l = JSON.parse(fs.readFileSync(sessFile, 'utf8'));
+  l.lastBeat = new Date(Date.now() - 16 * 60 * 1000).toISOString();
+  fs.writeFileSync(sessFile, JSON.stringify(l));
+  const b = hook('pretooluse', { session_id: 'sess-B', tool_name: 'Write', tool_input: { file_path: 'src/app.js' } });
+  assert.strictEqual(b.code, 0);
+  assert.strictEqual(JSON.parse(fs.readFileSync(sessFile, 'utf8')).sessionId, 'sess-B');
+});
+
+test('clean stop releases the lock; the next session claims freely', () => {
+  hook('pretooluse', { session_id: 'sess-A', tool_name: 'Write', tool_input: { file_path: 'src/app.js' } });
+  const stop = hook('stop', { session_id: 'sess-A' });
+  assert.strictEqual(stop.code, 0);
+  const sessFile = path.join(dir, 'forge', 'state', 'session.json');
+  assert.strictEqual(JSON.parse(fs.readFileSync(sessFile, 'utf8')).released, true);
+  const b = hook('pretooluse', { session_id: 'sess-B', tool_name: 'Write', tool_input: { file_path: 'src/app.js' } });
+  assert.strictEqual(b.code, 0);
+});
+
+test('session takeover refuses an active lock without --force, clears with it', () => {
+  hook('pretooluse', { session_id: 'sess-A', tool_name: 'Write', tool_input: { file_path: 'src/app.js' } });
+  const refuse = forge(['session', 'takeover']);
+  assert.notStrictEqual(refuse.code, 0);
+  assert.match(refuse.out, /ACTIVE/);
+  const force = forge(['session', 'takeover', '--force']);
+  assert.strictEqual(force.code, 0);
+  const b = hook('pretooluse', { session_id: 'sess-B', tool_name: 'Write', tool_input: { file_path: 'src/app.js' } });
+  assert.strictEqual(b.code, 0);
+});
+
+// --- v0.5: decision/discovery title required ---------------------------------
+
+test('discovery/decision add refuse without a title; positional title accepted', () => {
+  const discFile = path.join(dir, 'forge', 'discoveries.md');
+  const before = fs.existsSync(discFile) ? fs.readFileSync(discFile, 'utf8') : null;
+  const noTitle = forge(['discovery', 'add', '--evidence', 'e', '--impact', 'i']);
+  assert.notStrictEqual(noTitle.code, 0);
+  assert.match(noTitle.out, /needs a title/);
+  const after = fs.existsSync(discFile) ? fs.readFileSync(discFile, 'utf8') : null;
+  assert.strictEqual(after, before); // nothing appended
+  const positional = forge(['discovery', 'add', 'S8 screen missing', '--impact', 'i']);
+  assert.strictEqual(positional.code, 0);
+  assert.match(fs.readFileSync(path.join(dir, 'forge', 'discoveries.md'), 'utf8'), /S8 screen missing/);
+  const dec = forge(['decision', 'add', '--decision', 'd', '--why', 'w']);
+  assert.notStrictEqual(dec.code, 0);
+  assert.match(dec.out, /needs a title/);
+});
