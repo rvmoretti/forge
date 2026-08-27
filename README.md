@@ -90,6 +90,16 @@ memory.
 
 ## Changelog
 
+### v0.4.5 — dispatch-to-item tie hardening
+`forge usage` tied dispatches to work items only via the inline brief header
+(`# Work brief — <id>:`); orchestrators that pass briefs by file path made
+every new dispatch untraceable (observed in the field: 17/73 untied and
+climbing). The matcher now falls back to (2) a brief file path in the prompt
+(`briefs/<id>.md`) and (3) the first known work-item id appearing in the
+prompt (longest id wins, so `T20f` never mis-ties to `T20`). OPERATING.md now
+also requires the brief header as the dispatch prompt's first line regardless
+of how the brief body is delivered. Covered by a new fixture test (21 total).
+
 ### v0.4.4 — /forge:usage slash command
 The usage report existed only as a CLI subcommand (`forge usage`) since
 v0.4.0; there was no slash form. Added `commands/usage.md` so `/forge:usage`

@@ -831,6 +831,15 @@ const commands = {
       dispatches: [],      // {ts, type, itemId|null}
       byDay: {},           // yyyy-mm-dd → out tokens
     };
+    // Known work-item ids, for tying dispatches whose prompt names an item
+    // without an inline brief header (e.g. brief passed by file path).
+    let knownIdRe = null;
+    try {
+      const ids = Object.keys(loadWork().items || {})
+        .filter(id => /^[A-Za-z0-9][\w.-]*$/.test(id))
+        .sort((a, b) => b.length - a.length); // longest first: T20f before T20
+      if (ids.length) knownIdRe = new RegExp(`\\b(${ids.map(id => id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})\\b`);
+    } catch (_) { /* no work graph -> inline/path matching only */ }
     const bump = (model, thread, u) => {
       const m = (agg.models[model] = agg.models[model] || {});
       const t = (m[thread] = m[thread] || { calls: 0, in: 0, out: 0, cacheCreate: 0, cacheRead: 0 });
@@ -872,8 +881,14 @@ const commands = {
           for (const c of (Array.isArray(d.message.content) ? d.message.content : [])) {
             if (c && c.type === 'tool_use' && (c.name === 'Task' || c.name === 'Agent')) {
               const p = (c.input || {}).prompt || '';
+              // Tie dispatch → work item. In order of confidence:
+              // 1. inline brief header; 2. brief file path; 3. first known work-item id in the prompt.
+              let itemId = null;
               const m2 = p.match(/Work brief — (\S+?):/);
-              agg.dispatches.push({ ts: tsv || null, type: (c.input || {}).subagent_type || 'unknown', itemId: m2 ? m2[1] : null });
+              if (m2) itemId = m2[1];
+              if (!itemId) { const m3 = p.match(/[Bb]riefs?\/([A-Za-z0-9][\w.-]*?)\.md\b/); if (m3) itemId = m3[1]; }
+              if (!itemId && knownIdRe) { const m4 = p.match(knownIdRe); if (m4) itemId = m4[1]; }
+              agg.dispatches.push({ ts: tsv || null, type: (c.input || {}).subagent_type || 'unknown', itemId });
             }
           }
         }
@@ -915,9 +930,9 @@ const commands = {
     const tied = agg.dispatches.filter(d2 => d2.itemId);
     const perItem = {};
     for (const d2 of tied) perItem[d2.itemId] = (perItem[d2.itemId] || 0) + 1;
-    out(`  Tied to work items (brief id found in prompt): ` +
+    out(`  Tied to work items (inline brief, brief file path, or known item id in prompt): ` +
         (tied.length ? Object.entries(perItem).map(([k, v]) => `${k}×${v}`).join(' · ') : 'none') +
-        (agg.dispatches.length - tied.length ? ` · ${agg.dispatches.length - tied.length} dispatch(es) carried no forge brief` : ''));
+        (agg.dispatches.length - tied.length ? ` · ${agg.dispatches.length - tied.length} dispatch(es) could not be tied to any work item` : ''));
 
     // drift: tokens spent after the last forge state change
     try {

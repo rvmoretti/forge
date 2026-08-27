@@ -266,3 +266,33 @@ test('stop hook blocks on IN_PROGRESS, reports failed-TODO, respects stop_hook_a
   // blocked-with-reason + no failed-TODO-only rule violation? T1 now BLOCKED (not TODO) => clean stop
   assert.strictEqual(hook('stop', {}).code, 0);
 });
+
+// --- usage: dispatch → work-item tie (v0.4.5) -------------------------------
+
+test('usage ties dispatches via inline header, brief file path, and known item id', () => {
+  addItem('T20'); addItem('T20f');
+  // fake session logs: FORGE_CLAUDE_PROJECTS/<sanitized-cwd>/session.jsonl
+  const logsRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-logs-'));
+  const projDir = path.join(logsRoot, dir.replace(/[^a-zA-Z0-9]/g, '-'));
+  fs.mkdirSync(projDir, { recursive: true });
+  const disp = (prompt) => JSON.stringify({
+    type: 'assistant', timestamp: '2026-08-26T12:00:00.000Z',
+    message: { model: 'm', usage: { output_tokens: 1 },
+      content: [{ type: 'tool_use', name: 'Task', input: { subagent_type: 'forge:forge-implementer', prompt } }] }
+  });
+  fs.writeFileSync(path.join(projDir, 'session.jsonl'), [
+    disp('# Work brief — T20: title\ndo the thing'),                    // 1. inline header
+    disp('Your brief is in forge/briefs/T20f.md — follow it exactly'),  // 2. brief file path
+    disp('Implement the T20f follow-up per the attached spec'),         // 3. bare known id (longest match wins)
+    disp('Refactor the widget; no item reference anywhere'),            // untied
+  ].join('\n'));
+  const r = spawnSync(process.execPath, [CLI, 'usage'], {
+    cwd: dir, encoding: 'utf8',
+    env: Object.assign({}, process.env, { CLAUDE_PROJECT_DIR: dir, FORGE_CLAUDE_PROJECTS: logsRoot })
+  });
+  const out = (r.stdout || '') + (r.stderr || '');
+  assert.strictEqual(r.status, 0);
+  assert.match(out, /T20×1/);
+  assert.match(out, /T20f×2/);
+  assert.match(out, /1 dispatch\(es\) could not be tied/);
+});
