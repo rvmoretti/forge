@@ -30,7 +30,9 @@ const PREFLIGHT_FILE = path.join(STATE, 'preflight.json');
 const BASELINE_FILE = path.join(STATE, 'baseline.json');
 const DECISIONS_FILE = path.join(FORGE, 'decisions.md');
 const DISCOVERIES_FILE = path.join(FORGE, 'discoveries.md');
+const SESSION_FILE = path.join(STATE, 'session.json');
 const PLUGIN_ROOT = path.resolve(__dirname, '..');
+const LOCK_TTL_MS = 15 * 60 * 1000; // an orchestrator that hasn't written in 15min is presumed gone
 
 function ts() { return new Date().toISOString(); }
 
@@ -62,6 +64,21 @@ function out(msg) { process.stdout.write(msg + '\n'); }
 function loadConfig() { return readJson(CONFIG_FILE, null); }
 function loadWork() { return readJson(WORK_FILE, { schema: 1, items: {}, order: [] }); }
 function saveWork(w) { writeJson(WORK_FILE, w); regenDashboard(); }
+
+// -- orchestrator session lock (v0.5): one active orchestrator per project ----
+function loadLock() { try { return JSON.parse(fs.readFileSync(SESSION_FILE, 'utf8')); } catch (_) { return null; } }
+function saveLock(l) { try { fs.mkdirSync(STATE, { recursive: true }); fs.writeFileSync(SESSION_FILE, JSON.stringify(l, null, 2) + '\n'); } catch (_) { /* hooks never crash */ } }
+function lockFresh(l) {
+  if (!l || l.released) return false;
+  const beat = Date.parse(l.lastBeat || 0);
+  return Number.isFinite(beat) && (Date.now() - beat) < LOCK_TTL_MS;
+}
+function lockAge(l) {
+  const beat = Date.parse((l || {}).lastBeat || 0);
+  if (!Number.isFinite(beat)) return '?';
+  const s = Math.round((Date.now() - beat) / 1000);
+  return s < 120 ? `${s}s ago` : `${Math.round(s / 60)}min ago`;
+}
 
 function run(cmd, opts = {}) {
   const r = spawnSync(cmd, { shell: true, cwd: PROJECT, encoding: 'utf8',
@@ -589,6 +606,10 @@ const commands = {
       item.updated = ts();
       saveWork(w);
       out(`${item.id} → DONE (verified ${v.ts})`);
+      // v0.5: the spec is the living source of truth on EVERY project
+      out(`Spec sync: if this item established, changed, or contradicted product behavior, update the affected ` +
+          `spec layer file(s) NOW, citing the decision/discovery that drove it — the spec must always describe ` +
+          `the product as built and intended.`);
       // F9: surface the gate the moment a milestone completes
       if (item.milestone && milestoneComplete(w, item.milestone) && !((w.gates || {})[item.milestone] || {}).approved
           && ((loadConfig() || {}).options || {}).gates !== 'end-only')
@@ -724,20 +745,47 @@ const commands = {
   },
 
   // -- decisions / discoveries -------------------------------------------------
+  // v0.5: a bare positional argument after 'add' is accepted as the title;
+  // an entry with NO title at all is refused instead of silently logged as (untitled).
   decision() {
     if (argv[1] !== 'add') die('Usage: forge decision add --title t --decision d --why w [--authority human|forge]');
+    const posTitle = argv[2] && !argv[2].startsWith('--') ? argv[2] : null;
+    const title = opt('title') || posTitle;
+    if (!title) die('Refused: a decision needs a title — nothing was recorded.\nUsage: forge decision add --title "..." --decision "..." --why "..." [--authority human|forge]');
     appendMd(DECISIONS_FILE, '# Decisions log (append-only, via forge CLI)',
-      `\n### ${ts()} — ${opt('title') || '(untitled)'}\n- Authority: ${opt('authority') || 'forge'}\n- Decision: ${opt('decision') || ''}\n- Why: ${opt('why') || ''}\n`);
+      `\n### ${ts()} — ${title}\n- Authority: ${opt('authority') || 'forge'}\n- Decision: ${opt('decision') || ''}\n- Why: ${opt('why') || ''}\n`);
     regenDashboard();
     out('Decision recorded.');
   },
 
   discovery() {
     if (argv[1] !== 'add') die('Usage: forge discovery add --title t --evidence e --impact i [--affects T1,T2]');
+    const posTitle = argv[2] && !argv[2].startsWith('--') ? argv[2] : null;
+    const title = opt('title') || posTitle;
+    if (!title) die('Refused: a discovery needs a title — nothing was recorded.\nUsage: forge discovery add --title "..." --evidence "..." --impact "..." [--affects T1,T2]');
     appendMd(DISCOVERIES_FILE, '# Discoveries log (append-only, via forge CLI)',
-      `\n### ${ts()} — ${opt('title') || '(untitled)'}\n- Evidence: ${opt('evidence') || ''}\n- Impact: ${opt('impact') || ''}\n- Affects: ${opt('affects') || '-'}\n`);
+      `\n### ${ts()} — ${title}\n- Evidence: ${opt('evidence') || ''}\n- Impact: ${opt('impact') || ''}\n- Affects: ${opt('affects') || '-'}\n`);
     regenDashboard();
     out('Discovery recorded. If it invalidates planned work, update the work graph now (block/cancel/add items) — a logged discovery with unhandled consequences is a failure.');
+  },
+
+  // -- session lock (v0.5) ------------------------------------------------------
+  session() {
+    const sub = argv[1];
+    const l = loadLock();
+    if (sub === 'status') {
+      if (!l) out('No orchestrator session lock recorded.');
+      else out(`Lock: session ${l.sessionId} · started ${l.startedAt} · last beat ${l.lastBeat} (${lockAge(l)}) · ` +
+               (l.released ? 'RELEASED' : (lockFresh(l) ? 'ACTIVE' : 'STALE')));
+    } else if (sub === 'takeover') {
+      if (!l) { out('No lock to take over — the next session to write in this project claims orchestration.'); return; }
+      if (lockFresh(l) && !argv.includes('--force'))
+        die(`Refused: the lock is ACTIVE (session ${String(l.sessionId).slice(0, 8)}…, last beat ${lockAge(l)}).\n` +
+            `If you are certain that session is dead or must stand down, re-run: forge session takeover --force`);
+      saveLock(Object.assign({}, l, { released: true, lastBeat: ts(), takenOver: ts() }));
+      out('Lock released. The next session to write in this project claims orchestration.\n' +
+          'If the previous session left items IN_PROGRESS, audit them before dispatching new work.');
+    } else die('Usage: forge session status|takeover [--force]');
   },
 
   // -- baseline -----------------------------------------------------------------
@@ -839,7 +887,7 @@ const commands = {
         .filter(id => /^[A-Za-z0-9][\w.-]*$/.test(id))
         .sort((a, b) => b.length - a.length); // longest first: T20f before T20
       if (ids.length) knownIdRe = new RegExp(`\\b(${ids.map(id => id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})\\b`);
-    } catch (_) { /* no work graph -> inline/path matching only */ }
+    } catch (_) { /* no work graph → inline/path matching only */ }
     const bump = (model, thread, u) => {
       const m = (agg.models[model] = agg.models[model] || {});
       const t = (m[thread] = m[thread] || { calls: 0, in: 0, out: 0, cacheCreate: 0, cacheRead: 0 });
@@ -1030,6 +1078,23 @@ const commands = {
           '- New project → this is the SPEC PHASE: use the forge-method skill; run `forge init` to create state.\n' +
           '- Existing codebase → use the forge-brownfield skill; run `forge init`, then orientation.');
       }
+      // v0.5: one orchestrator per project — surface the lock at session start
+      {
+        const sid = input.session_id || null;
+        const l = loadLock();
+        if (l && lockFresh(l) && l.sessionId !== sid) {
+          parts.push(`\n## ⚠ ANOTHER ORCHESTRATOR IS ACTIVE\n` +
+            `Session ${String(l.sessionId).slice(0, 8)}… last wrote ${lockAge(l)} in this project. ` +
+            `Do NOT orchestrate, dispatch workers, or edit files — your writes will be blocked by the edit-war guard. ` +
+            `Tell the user immediately: either close the other session, or (if it is dead) run \`forge session takeover --force\`. ` +
+            `Until then, operate read-only.`);
+        } else if (sid && (!l || !lockFresh(l) || l.sessionId === sid)) {
+          saveLock({ sessionId: sid, startedAt: (l && l.sessionId === sid && l.startedAt) || ts(), lastBeat: ts(), released: false });
+          if (l && !l.released && !lockFresh(l) && l.sessionId !== sid)
+            parts.push(`\nNote: took over a stale orchestrator lock (session ${String(l.sessionId).slice(0, 8)}…, last active ${lockAge(l)}). ` +
+              `If that session left items IN_PROGRESS, audit them before dispatching new work.`);
+        }
+      }
       out(parts.join('\n'));
       process.exit(0);
 
@@ -1047,20 +1112,41 @@ const commands = {
           `Use: forge task ... | forge config set ... | forge decision add ... | forge discovery add ...\n`);
         process.exit(2);
       }
+      // v0.5 edit-war guard: refuse writes while a DIFFERENT orchestrator session is actively writing
+      {
+        const sid = input.session_id || null;
+        if (sid) {
+          const l = loadLock();
+          if (l && l.sessionId !== sid && lockFresh(l)) {
+            process.stderr.write(
+              `EDIT-WAR GUARD: another orchestrator session (${String(l.sessionId).slice(0, 8)}…, last active ${lockAge(l)}) ` +
+              `is writing to this project. Two orchestrators editing one tree caused data loss before; this write is blocked.\n` +
+              `Tell the user: close one of the two sessions — or, if the other one is dead, run: forge session takeover --force\n`);
+            process.exit(2);
+          }
+          saveLock({ sessionId: sid, startedAt: (l && l.sessionId === sid && l.startedAt) || ts(), lastBeat: ts(), released: false });
+        }
+      }
       process.exit(0);
 
     } else if (which === 'stop') {
-      if (input.stop_hook_active) process.exit(0); // never loop
+      // v0.5: release the orchestrator lock on clean finish (kept on exit 2 — session continues)
+      const releaseLock = () => {
+        const sid = input.session_id || null;
+        const l = loadLock();
+        if (sid && l && l.sessionId === sid && !l.released) saveLock(Object.assign({}, l, { released: true, lastBeat: ts() }));
+      };
+      if (input.stop_hook_active) { releaseLock(); process.exit(0); } // never loop
       let w = null;
-      try { w = JSON.parse(fs.readFileSync(WORK_FILE, 'utf8')); } catch (_) { process.exit(0); } // P4: never crash a hook on bad state
-      if (!w) process.exit(0);
+      try { w = JSON.parse(fs.readFileSync(WORK_FILE, 'utf8')); } catch (_) { releaseLock(); process.exit(0); } // P4: never crash a hook on bad state
+      if (!w) { releaseLock(); process.exit(0); }
       const inProg = w.order.filter(id => w.items[id].status === 'IN_PROGRESS');
       // 3.2: twice-failed TODO items are dangling work too — surface them
       const failedTodo = w.order.filter(id => {
         const t = w.items[id];
         return t.status === 'TODO' && t.attempts.some(a => a.outcome === 'failed');
       });
-      if (!inProg.length && !failedTodo.length) process.exit(0);
+      if (!inProg.length && !failedTodo.length) { releaseLock(); process.exit(0); }
       let msg = '';
       if (inProg.length) msg +=
         `Open work items are still IN_PROGRESS: ${inProg.join(', ')}.\n` +
@@ -1107,6 +1193,7 @@ const commands = {
   usage [--write]                        OBSERVED token/dispatch report from local session logs:
                                          by model, orchestrator vs subagents, dispatches by agent type,
                                          per-item dispatch counts, spend since last state change
+  session status | takeover [--force]    orchestrator lock: who is allowed to write; takeover clears a dead session's lock
   hook session-start|pretooluse|stop     (used by plugin hooks)`);
   }
 };

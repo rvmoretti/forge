@@ -63,6 +63,10 @@ phase having run.
 
 ## 6. Spec accretion (after each completed change)
 
+Spec sync at item close is universal — greenfield projects do it too (see the
+operating contract's build loop, step 5). This section adds what is specific
+to brownfield: provenance tags, because here reality and intent can differ.
+
 The spec grows along the paths where work happens — never by whole-system
 reverse-engineering. When an item completes, merge what this change
 established into the spec folder, in METHOD's layer format:
