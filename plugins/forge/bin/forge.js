@@ -851,6 +851,59 @@ const commands = {
     out(`\nLogs: forge/decisions.md · forge/discoveries.md`);
   },
 
+  // -- stats (v0.6) — process metrics derived from the work graph on disk --------
+  stats() {
+    const w = loadWork();
+    if (!w.order.length) die('No work items yet — nothing to measure.');
+    const items = w.order.map(id => w.items[id]);
+    const by = {};
+    items.forEach(i => { by[i.status] = (by[i.status] || 0) + 1; });
+    out(`# Forge stats — derived from forge/state/work.json (zero tokens, no estimates)`);
+    out(`Items: ${items.length} — ` + Object.entries(by).map(([k, v]) => `${k}:${v}`).join(' · '));
+
+    const done = items.filter(i => i.status === 'DONE');
+    const failsOf = i => i.attempts.filter(a => a.outcome === 'failed').length;
+    if (done.length) {
+      const firstPass = done.filter(i => failsOf(i) === 0).length;
+      const totalFails = done.reduce((a, i) => a + failsOf(i), 0);
+      out(`\n## Outcomes (${done.length} DONE)`);
+      out(`  First-pass rate: ${firstPass}/${done.length} (${Math.round(100 * firstPass / done.length)}%) — done with zero failed attempts`);
+      out(`  Failed attempts absorbed: ${totalFails} · avg ${(totalFails / done.length).toFixed(2)} per completed item`);
+      const retried = done.filter(i => failsOf(i) > 0).sort((a, b) => failsOf(b) - failsOf(a)).slice(0, 8);
+      if (retried.length) out(`  Most retried: ` + retried.map(i => `${i.id}×${failsOf(i)}`).join(' · '));
+      const esc = items.reduce((a, i) => a + i.attempts.filter(x => x.outcome === 'started' && x.escalation).length, 0);
+      out(`  Escalations invoked: ${esc}`);
+      // start → done wall-clock (includes human time: reviews, gates, nights — this is elapsed, not effort)
+      const spans = done.map(i => {
+        const s = i.attempts.find(a => a.outcome === 'started');
+        const p = [...i.attempts].reverse().find(a => a.outcome === 'passed');
+        return s && p ? (Date.parse(p.ts) - Date.parse(s.ts)) / 3600000 : null;
+      }).filter(v => v !== null && v >= 0).sort((a, b) => a - b);
+      if (spans.length) {
+        const med = spans[Math.floor(spans.length / 2)];
+        out(`  First-start → done elapsed: median ${med < 1 ? Math.round(med * 60) + 'min' : med.toFixed(1) + 'h'} · ` +
+            `p90 ${(spans[Math.floor(spans.length * 0.9)]).toFixed(1)}h  (wall-clock — includes review/gate/idle time)`);
+      }
+    }
+
+    // milestones
+    const ms = [];
+    items.forEach(i => { if (i.milestone && !ms.includes(i.milestone)) ms.push(i.milestone); });
+    if (ms.length) {
+      out(`\n## Milestones`);
+      for (const m of ms) {
+        const mi = items.filter(i => i.milestone === m);
+        const mdone = mi.filter(i => i.status === 'DONE').length;
+        const mfails = mi.reduce((a, i) => a + failsOf(i), 0);
+        const g = (w.gates || {})[m];
+        out(`  ${m}: ${mdone}/${mi.length} done · ${mfails} failed attempt(s) · gate: ` +
+            (g && g.approved ? `approved ${g.ts.slice(0, 10)}` : (mdone === mi.length ? 'COMPLETE — awaiting human review' : 'pending')));
+      }
+    }
+    out(`\nCaveat: elapsed times are wall-clock spans between recorded state transitions, not effort. ` +
+        `Token/dispatch telemetry lives in 'forge usage'.`);
+  },
+
   // -- usage (v0.4) — OBSERVED telemetry from local Claude Code session logs ------
   usage() {
     const projectsRoot = process.env.FORGE_CLAUDE_PROJECTS || path.join(os.homedir(), '.claude', 'projects');
@@ -1127,6 +1180,44 @@ const commands = {
           saveLock({ sessionId: sid, startedAt: (l && l.sessionId === sid && l.startedAt) || ts(), lastBeat: ts(), released: false });
         }
       }
+      // v0.6 scope guard: config-protected paths and the forbidden scope of
+      // IN_PROGRESS items are refusals, not advice. Never crash the hook.
+      try {
+        const rel = path.relative(PROJECT, path.resolve(PROJECT, fp)).replace(/\\/g, '/');
+        const matches = (pattern) => {
+          const pat = String(pattern).replace(/\\/g, '/').replace(/^\.\//, '');
+          if (!pat) return false;
+          if (pat.endsWith('/')) return rel === pat.slice(0, -1) || rel.startsWith(pat);
+          if (pat.includes('*')) {
+            const re = new RegExp('^' + pat.split('*').map(s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('[^]*') + '$');
+            return re.test(rel);
+          }
+          return rel === pat || rel.startsWith(pat + '/');
+        };
+        let cfg = null; try { cfg = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')); } catch (_) { }
+        const prot = String(((cfg || {}).options || {}).protect || '').split(',').map(s => s.trim()).filter(Boolean);
+        const hitProt = prot.find(p => matches(p));
+        if (hitProt) {
+          process.stderr.write(
+            `PROTECTED PATH: '${rel}' is frozen by config (options.protect: '${hitProt}') — the edit is blocked.\n` +
+            `If this change is genuinely intended, the human updates the protection first:\n` +
+            `forge config set options.protect "<new comma-separated list>"\n`);
+          process.exit(2);
+        }
+        let w = null; try { w = JSON.parse(fs.readFileSync(WORK_FILE, 'utf8')); } catch (_) { }
+        for (const id of (w && w.order) || []) {
+          const it = w.items[id];
+          if (!it || it.status !== 'IN_PROGRESS') continue;
+          const hit = ((it.scope || {}).forbidden || []).find(p => matches(p));
+          if (hit) {
+            process.stderr.write(
+              `SCOPE GUARD: '${rel}' is in the FORBIDDEN scope of in-progress item ${id} ('${hit}') — the edit is blocked.\n` +
+              `Per the brief: if correctness requires touching excluded areas, STOP and report — never expand scope silently.\n` +
+              `If the scope itself is wrong, revise it deliberately first: forge task update ${id} --forbidden "..." --reason "..."\n`);
+            process.exit(2);
+          }
+        }
+      } catch (_) { /* hooks never crash */ }
       process.exit(0);
 
     } else if (which === 'stop') {
@@ -1193,6 +1284,8 @@ const commands = {
   usage [--write]                        OBSERVED token/dispatch report from local session logs:
                                          by model, orchestrator vs subagents, dispatches by agent type,
                                          per-item dispatch counts, spend since last state change
+  stats                                  process metrics from the work graph: first-pass rate, retries,
+                                         escalations, elapsed times, per-milestone health
   session status | takeover [--force]    orchestrator lock: who is allowed to write; takeover clears a dead session's lock
   hook session-start|pretooluse|stop     (used by plugin hooks)`);
   }
