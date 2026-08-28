@@ -7,7 +7,7 @@ agents, machine-verifies every result, and loops until acceptance criteria
 pass. You own WHAT and WHY; Forge owns HOW.
 
 The rules that matter are enforced by code, not prompts — and every claim
-below is covered by a test in `tests/cli.test.js` (`npm test`, 26 tests):
+below is covered by a test in `tests/cli.test.js` (`npm test`, 29 tests):
 
 - **DONE requires a passing verification record for the current tree** — no record, a failed record, or evidence older than the latest edit all refuse.
 - **Checks must prove something** — `start` records each criterion check's pre-work result; if everything was green before work and nothing changed, `done` refuses (vacuous or already-satisfied criteria get flagged, not laundered).
@@ -19,6 +19,11 @@ below is covered by a test in `tests/cli.test.js` (`npm test`, 26 tests):
 - **Sessions can't end with silently dangling work** — the stop gate catches in-progress items and failed items parked in TODO.
 - **One orchestrator per project** — a session lock (heartbeat on every write) makes hooks refuse writes from a second session while the first is active; a clean finish releases it, a stale one ages out, and `forge session takeover --force` clears a dead session's lock.
 - **Log entries can't lose their identity** — `decision add` / `discovery add` refuse when no title is given (a bare positional argument counts as the title), instead of silently recording "(untitled)".
+- **Scope is enforced, not advisory** — while an item is IN_PROGRESS, edits to its `scope.forbidden` paths are blocked by the hook, and paths frozen in config (`options.protect`) are blocked always. (Applies to file-tool edits; shell-level writes remain a review concern.)
+
+Development discipline: **every field failure becomes a permanent test** —
+the session lock, the untitled-log refusal, and the dispatch-tie fallbacks
+all began as observed failures and stay in the suite as regressions.
 
 ## Install
 
@@ -41,7 +46,7 @@ experience → API → logic → foundation). When the spec gates, say "build it
 skill orients (Graphify-first), captures a baseline, asks you only the
 product questions the code can't answer, then runs the same loop.
 
-**Commands:** `/forge:status` · `/forge:preflight` · `/forge:build` · `/forge:dashboard` · `/forge:usage`
+**Commands:** `/forge:status` · `/forge:preflight` · `/forge:build` · `/forge:dashboard` · `/forge:usage` · `/forge:stats`
 
 **Dashboard:** `forge/dashboard.html` — a generated projection of everything on
 disk (progress, work graph by milestone, attempts/verifications, decisions,
@@ -94,6 +99,36 @@ session recovers the full picture from disk — the conversation is never the
 memory.
 
 ## Changelog
+
+### v0.6.0 — enforced scope, process metrics, unbiased review
+Informed by Anthropic's AI-native SDLC playbook, filtered against what Forge
+already enforces:
+
+- **Scope enforcement.** `scope.forbidden` was advisory prose in the brief;
+  now the PreToolUse hook refuses Write/Edit to any IN_PROGRESS item's
+  forbidden paths (exact path, directory `dir/`, or `*` glob), and
+  `options.protect` in config freezes paths unconditionally (generated code,
+  migrations, vendored packages). A blocked worker must stop and report —
+  scope changes go through audited `task update`, never around the guard.
+- **`forge stats` (+ `/forge:stats`).** Process-health counterpart to
+  `forge usage`, derived from work.json at zero tokens: first-pass rate,
+  failed attempts absorbed, most-retried items, escalations, first-start →
+  done elapsed times (wall-clock, honestly labeled), per-milestone health
+  with gate status.
+- **Fresh-context review rule.** The operating contract now requires
+  high-risk diffs to be reviewed by `forge-reviewer` in a fresh context: the
+  orchestrator briefed the work, so its own read is colored by the
+  assumptions that produced it. Machine verification was already unbiased;
+  this closes the judgment side.
+- Development discipline written down: every field failure becomes a
+  permanent test. 3 new tests (29 total).
+
+Deliberately deferred from the playbook (triggers recorded here): the
+maintain loop (monitoring bands → auto-intent → pipeline) until a Forge
+project has production traffic to calibrate against; continuous evals of
+agent configuration until the suite would test something a real incident has
+shown to matter; PR-review and enterprise managed-settings layers (org-scale,
+out of Forge's solo-first scope).
 
 ### v0.5.0 — one orchestrator, one living spec
 Three changes, each closing a failure observed in the field:

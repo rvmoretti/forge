@@ -50,7 +50,11 @@ orientation, baseline capture, scoped mini-spec — then the same loop.
    never delegate further.
 4. **Verify**: `forge task verify <id>` — machine evidence, not the worker's
    claim. Then review the diff and the worker's report yourself; read code
-   deeply only where evidence is ambiguous or risk is high.
+   deeply only where evidence is ambiguous or risk is high. **For high-risk
+   diffs, dispatch the review to `forge-reviewer` in a fresh context** — you
+   briefed this work, so your own read is colored by the assumptions that
+   produced it; a fresh context's verdict is not. Machine checks are already
+   unbiased; this rule is about the judgment layer.
 5. **Close or retry**:
    - Pass and review clean → `forge task done <id>`; then **sync the spec —
      on every project, not just brownfield**: if this item established,
@@ -98,6 +102,12 @@ orientation, baseline capture, scoped mini-spec — then the same loop.
 - Cancelling an item with live dependents forces you to decide their fate
   (`--dependents drop|cancel`); revising an item is `forge task update`,
   audited, with `--reason` required when criteria change after failures.
+- Scope is enforced, not advisory: while an item is IN_PROGRESS, edits to its
+  `scope.forbidden` paths are blocked by the hook, as are paths frozen in
+  config (`options.protect` — use it for generated code, migrations, vendored
+  packages). A blocked edit means stop and report, or deliberately revise the
+  scope (`forge task update --forbidden ... --reason ...`) — never work
+  around the guard.
 
 ## Proportionality
 

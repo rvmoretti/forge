@@ -362,3 +362,52 @@ test('discovery/decision add refuse without a title; positional title accepted',
   assert.notStrictEqual(dec.code, 0);
   assert.match(dec.out, /needs a title/);
 });
+
+// --- v0.6: scope enforcement -------------------------------------------------
+
+test('hook blocks edits to a forbidden path while its item is IN_PROGRESS, allows after done', () => {
+  forge(['task', 'add', '--id', 'T1', '--title', 't', '--criterion', 'ok::node -e "process.exit(0)"',
+         '--forbidden', 'src/gen/,schemas/events.json']);
+  forge(['task', 'start', 'T1']);
+  const dir1 = hook('pretooluse', { session_id: 's1', tool_name: 'Write', tool_input: { file_path: 'src/gen/Model.java' } });
+  assert.strictEqual(dir1.code, 2);
+  assert.match(dir1.out, /SCOPE GUARD/);
+  assert.match(dir1.out, /T1/);
+  const exact = hook('pretooluse', { session_id: 's1', tool_name: 'Edit', tool_input: { file_path: 'schemas/events.json' } });
+  assert.strictEqual(exact.code, 2);
+  const ok = hook('pretooluse', { session_id: 's1', tool_name: 'Write', tool_input: { file_path: 'src/app.js' } });
+  assert.strictEqual(ok.code, 0);
+  // resolve the item — the forbidden scope no longer applies
+  touch('work.txt');
+  forge(['task', 'verify', 'T1']);
+  forge(['task', 'done', 'T1']);
+  const after = hook('pretooluse', { session_id: 's1', tool_name: 'Write', tool_input: { file_path: 'src/gen/Model.java' } });
+  assert.strictEqual(after.code, 0);
+});
+
+test('config options.protect blocks edits regardless of work items', () => {
+  forge(['config', 'set', 'options.protect', 'migrations/,vendor/']);
+  const r = hook('pretooluse', { session_id: 's1', tool_name: 'Write', tool_input: { file_path: 'migrations/001_init.sql' } });
+  assert.strictEqual(r.code, 2);
+  assert.match(r.out, /PROTECTED PATH/);
+  const ok = hook('pretooluse', { session_id: 's1', tool_name: 'Write', tool_input: { file_path: 'src/app.js' } });
+  assert.strictEqual(ok.code, 0);
+});
+
+// --- v0.6: stats ---------------------------------------------------------------
+
+test('stats reports first-pass rate, retries and milestone health', () => {
+  forge(['task', 'add', '--id', 'T1', '--title', 't', '--criterion', 'ok::node -e "process.exit(0)"', '--milestone', 'M1']);
+  forge(['task', 'add', '--id', 'T2', '--title', 't', '--criterion', 'ok::node -e "process.exit(0)"', '--milestone', 'M1']);
+  forge(['task', 'start', 'T1']); touch('a.txt');
+  forge(['task', 'verify', 'T1']); forge(['task', 'done', 'T1']);
+  forge(['task', 'start', 'T2']);
+  forge(['task', 'fail', 'T2', '--note', 'diag']);
+  forge(['task', 'start', 'T2']); touch('b.txt');
+  forge(['task', 'verify', 'T2']); forge(['task', 'done', 'T2']);
+  const r = forge(['stats']);
+  assert.strictEqual(r.code, 0);
+  assert.match(r.out, /First-pass rate: 1\/2/);
+  assert.match(r.out, /T2×1/);
+  assert.match(r.out, /M1: 2\/2 done/);
+});
