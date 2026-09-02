@@ -7,13 +7,14 @@ agents, machine-verifies every result, and loops until acceptance criteria
 pass. You own WHAT and WHY; Forge owns HOW.
 
 The rules that matter are enforced by code, not prompts — and every claim
-below is covered by a test in `tests/cli.test.js` (`npm test`, 32 tests):
+below is covered by a test in `tests/cli.test.js` (`npm test`, 34 tests):
 
 - **DONE requires a passing verification record for the current tree** — no record, a failed record, or evidence older than the latest edit all refuse.
 - **Checks must prove something** — `start` records each criterion check's pre-work result; if everything was green before work and nothing changed, `done` refuses (vacuous or already-satisfied criteria get flagged, not laundered).
 - **No work item starts without acceptance criteria**, with unmet dependencies, or while already in progress — an in-flight item must be resolved (done / failed-with-diagnosis / blocked) before any re-dispatch, so retries can't dodge the counter.
 - **A third identical retry is rejected** — after 2 recorded failures the CLI forces an explicit escalation (stronger model / decompose / revise criteria / do-it-yourself).
 - **Milestones end in human review** — with `options.gates` at its `per-milestone` default, items of the next milestone refuse to start until you've tested the finished slice and recorded approval (`forge milestone approve`). Choose `end-only` to run straight through.
+- **Security is part of the gate** — `approve` refuses until a security review of the slice is recorded (`forge milestone security <M> --note`), skipped only explicitly (`--skip-security --reason`, logged) or disabled per project (`options.security off`). Deterministic scanning runs continuously: set `verify.security` and it executes inside every `task verify` like any other check.
 - **Brownfield changes are baseline-guarded in the verification itself** — once a baseline exists, `task verify` runs the comparison automatically; a regression fails the record (deliberate skips need `--skip-baseline --reason`).
 - **State files can only change through the CLI** — direct edits are blocked by a hook; work-item edits go through audited `forge task update`; cancelling an item with live dependents forces an explicit decision about them.
 - **Sessions can't end with silently dangling work** — the stop gate catches in-progress items and failed items parked in TODO.
@@ -99,6 +100,25 @@ session recovers the full picture from disk — the conversation is never the
 memory.
 
 ## Changelog
+
+### v0.8.0 — security in the loop, delegation routing
+- **Security enters through the existing machinery, not a new ceremony.**
+  Deterministic layer: set `verify.security` (gitleaks/semgrep/npm-audit/…)
+  and it runs inside every `task verify` — a finding fails the item;
+  preflight now recommends one in build phase. Judgment layer:
+  `milestone approve` refuses until a fresh-context security review of the
+  slice's cumulative diff is recorded via `forge milestone security <M>
+  --note` (forge-reviewer + security domain pack); deliberate skips are
+  `--skip-security --reason` and land in the decisions log;
+  `options.security off` opts a project out.
+- **Delegation routing.** Field telemetry (79/79 dispatches =
+  forge-implementer; explorer/tester never used) showed the orchestrator
+  absorbing exploration and test-authoring on the most expensive tokens. The
+  contract now routes: codebase questions → forge-explorer before
+  self-reading at scale; test-focused work → forge-tester. Measured by cost
+  per completed item, not delegation percentage.
+
+2 new tests (34 total).
 
 ### v0.7.0 — observability: trace, doctor, verbose debug
 Instrumentation ships BEFORE the next wave of compounding changes, so

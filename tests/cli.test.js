@@ -227,6 +227,7 @@ test('milestone gate blocks next milestone until approved; approve unblocks', ()
   assert.match(blocked.out, /awaits HUMAN approval/);
   const early = forge(['milestone', 'approve', 'M2']);
   assert.notStrictEqual(early.code, 0); // cannot approve an unfinished milestone
+  forge(['milestone', 'security', 'M1', '--note', 'pass clean']); // v0.8: gate requires the security review
   assert.strictEqual(forge(['milestone', 'approve', 'M1', '--note', 'demo ok']).code, 0);
   assert.strictEqual(forge(['task', 'start', 'M2a']).code, 0);
 });
@@ -452,4 +453,36 @@ test('doctor passes on a healthy project and flags orphaned IN_PROGRESS work', (
   fs.writeFileSync(sessFile, JSON.stringify(l));
   const bad = forge(['doctor']);
   assert.match(bad.out, /orphaned work/);
+});
+
+// --- v0.8: security in the gate -------------------------------------------------
+
+test('milestone approve refuses without a security review; passes with one; skip needs a reason', () => {
+  addItem('T1', ['--milestone', 'M1']);
+  forge(['task', 'start', 'T1']); touch('w1');
+  forge(['task', 'verify', 'T1']); forge(['task', 'done', 'T1']);
+  const refused = forge(['milestone', 'approve', 'M1', '--note', 'ok']);
+  assert.notStrictEqual(refused.code, 0);
+  assert.match(refused.out, /no recorded security review/);
+  const badSkip = forge(['milestone', 'approve', 'M1', '--skip-security']);
+  assert.notStrictEqual(badSkip.code, 0);
+  assert.match(badSkip.out, /--reason/);
+  forge(['milestone', 'security', 'M1', '--note', 'reviewer pass clean, no findings']);
+  const ok = forge(['milestone', 'approve', 'M1', '--note', 'demo ok']);
+  assert.strictEqual(ok.code, 0);
+});
+
+test('milestone approve with options.security off needs no review; skip-security is recorded in decisions', () => {
+  forge(['config', 'set', 'options.security', 'off']);
+  addItem('T1', ['--milestone', 'M1']);
+  forge(['task', 'start', 'T1']); touch('w1');
+  forge(['task', 'verify', 'T1']); forge(['task', 'done', 'T1']);
+  assert.strictEqual(forge(['milestone', 'approve', 'M1', '--note', 'ok']).code, 0);
+  // second project path: skip with reason lands in the decisions log
+  freshProject();
+  addItem('T1', ['--milestone', 'M1']);
+  forge(['task', 'start', 'T1']); touch('w1');
+  forge(['task', 'verify', 'T1']); forge(['task', 'done', 'T1']);
+  assert.strictEqual(forge(['milestone', 'approve', 'M1', '--skip-security', '--reason', 'internal prototype']).code, 0);
+  assert.match(fs.readFileSync(path.join(dir, 'forge', 'decisions.md'), 'utf8'), /SECURITY REVIEW SKIPPED: internal prototype/);
 });
