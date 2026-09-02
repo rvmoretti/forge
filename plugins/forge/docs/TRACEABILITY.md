@@ -66,3 +66,32 @@ where it lives in this plugin. Homes:
    proving nothing was dropped silently.
 3. **Usage telemetry and the HTML Control Center are deferred**, per the
    spec's own never-fabricate and simplest-mechanism rules.
+
+---
+
+## Addendum — post-v0 mechanisms (no §-number: added after the original spec)
+
+These were not in FORGE_V0_SPEC; each entered through an observed failure or
+an explicitly recorded external source, and each is covered by tests:
+
+| Mechanism | Version | Origin | Enforcement home |
+|---|---|---|---|
+| Milestone gates (human review per slice) | v0.3.0 | incremental-delivery design session | CLI `milestoneGateBlock` + `milestone approve` |
+| Brownfield spec accretion w/ provenance | v0.3.1 | greenfield/brownfield convergence decision | forge-brownfield §6 + contract |
+| Observed usage/dispatch telemetry | v0.4.x | "is it actually dispatching?" (field) | CLI `usage` (session logs, never estimated) |
+| Orchestrator session lock (edit-war guard) | v0.5.0 | duplicate-orchestrator incident (T27) | PreToolUse/SessionStart/Stop hooks + `session` |
+| Universal spec sync at item close | v0.5.0 | observed greenfield spec drift | contract step 5 + `task done` reminder |
+| Titled decisions/discoveries (refuse untitled) | v0.5.0 | "(untitled)" data-loss incident | CLI `decision/discovery add` |
+| Enforced scope + `options.protect` | v0.6.0 | AI-native SDLC playbook (hooks-as-guardrails) | PreToolUse scope guard |
+| Process metrics (`stats`) | v0.6.0 | playbook measurement framework | CLI `stats` (derived, zero tokens) |
+| Fresh-context review rule | v0.6.0 | playbook verifier-subagent distinction | contract step 4 |
+| Trace / doctor / FORGE_DEBUG | v0.7.0 | compounding-changes debug need | CLI trace plumbing + `trace`/`doctor` |
+| Security in verify + gated security review | v0.8.0 | playbook + missing security layer | `verify.security` + `milestone security/approve` |
+| Delegation routing (explorer/tester) | v0.8.0 | usage telemetry: 79/79 = implementer | contract model-economics |
+| design-ux pack + mocks-as-spec + `--artifact` | v0.9.0 | original METHOD's drawn frontend, restored | pack + method Step 7 + `verify --artifact` |
+| Component registry + dashboard project map | v0.10.0 | user's visual-map requirement | CLI `component` + generated dashboard |
+
+Still deferred, with triggers: the maintain loop (monitoring bands →
+auto-intent) until a Forge project has production traffic; continuous evals
+of agent configuration until an incident class demands one; parallel
+worktree orchestration (would need per-worktree locks).
