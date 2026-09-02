@@ -166,6 +166,12 @@ active, operate read-only and tell the user — never try to work around the
 guard. A dead session's lock is cleared with `forge session takeover --force`
 (then audit any IN_PROGRESS items it left before dispatching new work).
 
+**When Forge itself misbehaves.** If a refusal looks wrong, a hook fires
+unexpectedly, or state seems inconsistent, run `forge doctor` (install/state
+self-check) and `forge trace --refusals` (the flight recorder) BEFORE working
+around anything — and report what they say to the user. Never treat a guard
+as broken without that evidence.
+
 **One memory, one state.** Forge state is the only project memory. Never
 store project facts, discoveries, or decisions in external memory tools
 (knowledge-graph/memory MCP servers, scratch notes outside `forge/`) — a
