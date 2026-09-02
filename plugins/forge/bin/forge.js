@@ -31,8 +31,12 @@ const BASELINE_FILE = path.join(STATE, 'baseline.json');
 const DECISIONS_FILE = path.join(FORGE, 'decisions.md');
 const DISCOVERIES_FILE = path.join(FORGE, 'discoveries.md');
 const SESSION_FILE = path.join(STATE, 'session.json');
+const TRACE_FILE = path.join(STATE, 'trace.jsonl');
 const PLUGIN_ROOT = path.resolve(__dirname, '..');
 const LOCK_TTL_MS = 15 * 60 * 1000; // an orchestrator that hasn't written in 15min is presumed gone
+const DEBUG = process.env.FORGE_DEBUG === '1';
+let VERSION = '?';
+try { VERSION = JSON.parse(fs.readFileSync(path.join(PLUGIN_ROOT, '.claude-plugin', 'plugin.json'), 'utf8')).version; } catch (_) { }
 
 function ts() { return new Date().toISOString(); }
 
@@ -58,7 +62,30 @@ function appendMd(file, header, block) {
   fs.appendFileSync(file, block + '\n');
 }
 
-function die(msg, code = 1) { process.stderr.write(msg + '\n'); process.exit(code); }
+function die(msg, code = 1) {
+  traceEvent({ outcome: 'refused', exit: code, refusal: String(msg).split('\n')[0].slice(0, 240) });
+  process.stderr.write(msg + '\n'); process.exit(code);
+}
+
+// -- trace (v0.7): always-on flight recorder; FORGE_DEBUG=1 adds payloads -----
+const T0 = Date.now();
+let TRACED = false;
+function traceWrite(obj) {
+  try {
+    // never create forge/ as a side effect in an uninitialized directory
+    if (!fs.existsSync(FORGE) && (process.argv[2] || '') !== 'init') return;
+    fs.mkdirSync(STATE, { recursive: true });
+    try { if (fs.statSync(TRACE_FILE).size > 2 * 1024 * 1024) fs.renameSync(TRACE_FILE, TRACE_FILE + '.old'); } catch (_) { }
+    fs.appendFileSync(TRACE_FILE, JSON.stringify(obj) + '\n');
+  } catch (_) { /* tracing never breaks the CLI */ }
+}
+function traceEvent(fields) {
+  if (TRACED) return; TRACED = true;
+  traceWrite(Object.assign(
+    { ts: new Date().toISOString(), v: VERSION, cmd: process.argv.slice(2).join(' ').slice(0, 300), ms: Date.now() - T0 },
+    fields));
+}
+process.on('exit', (code) => traceEvent({ outcome: code === 0 ? 'ok' : 'exit', exit: code }));
 function out(msg) { process.stdout.write(msg + '\n'); }
 
 function loadConfig() { return readJson(CONFIG_FILE, null); }
@@ -851,6 +878,79 @@ const commands = {
     out(`\nLogs: forge/decisions.md · forge/discoveries.md`);
   },
 
+  // -- trace / doctor (v0.7) — the flight recorder and the install self-check ---
+  trace() {
+    const lines = [];
+    for (const f of [TRACE_FILE + '.old', TRACE_FILE]) {
+      try { lines.push(...fs.readFileSync(f, 'utf8').split('\n').filter(Boolean)); } catch (_) { }
+    }
+    if (!lines.length) die('No trace recorded yet (forge/state/trace.jsonl appears after the first traced command).');
+    let evs = lines.map(l => { try { return JSON.parse(l); } catch (_) { return null; } }).filter(Boolean);
+    if (flag('refusals')) evs = evs.filter(e => e.outcome === 'refused' || e.outcome === 'block');
+    if (flag('hooks')) evs = evs.filter(e => e.hook || /^hook /.test(e.cmd || ''));
+    const n = parseInt(opt('last') || '30', 10) || 30;
+    const shown = evs.slice(-n);
+    for (const e of shown)
+      out(`${e.ts}  v${e.v}  [${e.outcome}${e.exit !== undefined && e.outcome !== 'ok' ? ':' + e.exit : ''}]` +
+          `${e.reason ? ` (${e.reason}${e.item ? ' ' + e.item : ''})` : ''}  ${e.cmd}` +
+          `${e.refusal ? `  — ${e.refusal}` : ''}${e.path ? `  — ${e.path}` : ''}`);
+    out(`\n${shown.length} of ${evs.length} matching event(s) · forge/state/trace.jsonl · filters: --refusals --hooks --last N` +
+        (DEBUG ? '' : ' · FORGE_DEBUG=1 records verbose payloads'));
+  },
+
+  doctor() {
+    const rows = [];
+    const check = (name, ok, note, warn) => rows.push({ name, ok, note, warn: !!warn });
+    // runtime
+    const major = parseInt(process.version.slice(1), 10);
+    check('node', major >= 18, process.version);
+    check('git', run('git rev-parse --is-inside-work-tree', { timeout: 10000 }).exit === 0, 'work tree');
+    // which forge is actually running
+    check('running version', VERSION !== '?', `v${VERSION} — ${__filename}`);
+    try {
+      const cacheRoot = path.join(os.homedir(), '.claude', 'plugins', 'cache');
+      const found = [];
+      for (const mp of fs.readdirSync(cacheRoot)) {
+        const pdir = path.join(cacheRoot, mp, 'forge');
+        if (fs.existsSync(pdir)) for (const v of fs.readdirSync(pdir)) found.push(`${mp}/forge/${v}`);
+      }
+      if (found.length) {
+        const stale = found.length > 1;
+        check('plugin cache', !stale, found.join(' · ') + (stale ? ' — multiple cached versions; uninstall/reinstall if the wrong one loads' : ''), stale);
+        const cached = found.some(f => f.endsWith('/' + VERSION));
+        if (!__filename.includes('plugins/cache') && found.length)
+          check('cache vs repo', cached, cached ? 'cache includes this version' : `cache has ${found.map(f => f.split('/').pop()).join(',')} but this repo is v${VERSION} — installed plugin is behind`, !cached);
+      }
+    } catch (_) { /* no cache dir — fine (running from repo without install) */ }
+    // duplicate-hooks regression (v0.4.1 incident)
+    try {
+      const man = JSON.parse(fs.readFileSync(path.join(PLUGIN_ROOT, '.claude-plugin', 'plugin.json'), 'utf8'));
+      check('manifest hooks field', !('hooks' in man), 'hooks' in man ? 'present — causes duplicate-hooks load error on Claude Code ≥2.1' : 'absent (correct — hooks/hooks.json auto-loads)');
+      JSON.parse(fs.readFileSync(path.join(PLUGIN_ROOT, 'hooks', 'hooks.json'), 'utf8'));
+      check('hooks/hooks.json', true, 'parses');
+    } catch (e) { check('hooks/hooks.json', false, e.message); }
+    // project state
+    if (fs.existsSync(CONFIG_FILE)) {
+      try { const c = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')); check('config.json', true, `phase: ${c.phase}`); }
+      catch (e) { check('config.json', false, 'CORRUPT: ' + e.message); }
+      try {
+        const w = JSON.parse(fs.readFileSync(WORK_FILE, 'utf8'));
+        const inProg = w.order.filter(id => w.items[id].status === 'IN_PROGRESS');
+        check('work.json', true, `${w.order.length} items · ${inProg.length} IN_PROGRESS`);
+        const l = loadLock();
+        if (inProg.length && (!l || l.released || !lockFresh(l)))
+          check('orphaned work', false, `${inProg.join(', ')} IN_PROGRESS but no active orchestrator lock — a session likely died mid-item; audit before dispatching`, true);
+        if (l) check('session lock', true, `${String(l.sessionId).slice(0, 8)}… ${l.released ? 'RELEASED' : lockFresh(l) ? 'ACTIVE' : 'STALE'} (${lockAge(l)})`);
+      } catch (e) { check('work.json', false, fs.existsSync(WORK_FILE) ? 'CORRUPT: ' + e.message : 'absent (run forge init)'); }
+      try { fs.accessSync(path.dirname(TRACE_FILE), fs.constants.W_OK); check('trace writable', true, 'forge/state/'); }
+      catch (_) { check('trace writable', false, 'state dir not writable'); }
+    } else check('config.json', true, 'no forge project here (fine if exploring)');
+    let bad = 0;
+    for (const r of rows) { if (!r.ok) bad += r.warn ? 0 : 1; out(`${r.ok ? 'PASS' : r.warn ? 'WARN' : 'FAIL'}  ${r.name}: ${r.note}`); }
+    out(bad ? `\n${bad} check(s) FAILED — fix before trusting any other symptom.` : `\nInstall and state look sane.`);
+    if (bad) process.exit(1);
+  },
+
   // -- stats (v0.6) — process metrics derived from the work graph on disk --------
   stats() {
     const w = loadWork();
@@ -1160,6 +1260,7 @@ const commands = {
       const protectedPaths = [STATE + path.sep, CONFIG_FILE];
       const isProtected = protectedPaths.some(p => p.endsWith(path.sep) ? abs.startsWith(p) : abs === p);
       if (isProtected) {
+        traceEvent({ outcome: 'block', hook: 'pretooluse', reason: 'state-guard', path: fp, input: DEBUG ? JSON.stringify(input).slice(0, 2000) : undefined });
         process.stderr.write(
           `Forge state files are managed exclusively by the forge CLI — direct edits are blocked.\n` +
           `Use: forge task ... | forge config set ... | forge decision add ... | forge discovery add ...\n`);
@@ -1171,6 +1272,7 @@ const commands = {
         if (sid) {
           const l = loadLock();
           if (l && l.sessionId !== sid && lockFresh(l)) {
+            traceEvent({ outcome: 'block', hook: 'pretooluse', reason: 'edit-war', path: fp, holder: String(l.sessionId).slice(0, 8), input: DEBUG ? JSON.stringify(input).slice(0, 2000) : undefined });
             process.stderr.write(
               `EDIT-WAR GUARD: another orchestrator session (${String(l.sessionId).slice(0, 8)}…, last active ${lockAge(l)}) ` +
               `is writing to this project. Two orchestrators editing one tree caused data loss before; this write is blocked.\n` +
@@ -1198,6 +1300,7 @@ const commands = {
         const prot = String(((cfg || {}).options || {}).protect || '').split(',').map(s => s.trim()).filter(Boolean);
         const hitProt = prot.find(p => matches(p));
         if (hitProt) {
+          traceEvent({ outcome: 'block', hook: 'pretooluse', reason: 'protect', path: fp, pattern: hitProt });
           process.stderr.write(
             `PROTECTED PATH: '${rel}' is frozen by config (options.protect: '${hitProt}') — the edit is blocked.\n` +
             `If this change is genuinely intended, the human updates the protection first:\n` +
@@ -1210,6 +1313,7 @@ const commands = {
           if (!it || it.status !== 'IN_PROGRESS') continue;
           const hit = ((it.scope || {}).forbidden || []).find(p => matches(p));
           if (hit) {
+            traceEvent({ outcome: 'block', hook: 'pretooluse', reason: 'scope', path: fp, item: id, pattern: hit });
             process.stderr.write(
               `SCOPE GUARD: '${rel}' is in the FORBIDDEN scope of in-progress item ${id} ('${hit}') — the edit is blocked.\n` +
               `Per the brief: if correctness requires touching excluded areas, STOP and report — never expand scope silently.\n` +
@@ -1246,6 +1350,7 @@ const commands = {
       if (failedTodo.length) msg +=
         `Items with recorded failed attempts are sitting in TODO: ${failedTodo.join(', ')}. ` +
         `State their disposition in your closing summary (queued for escalation / superseded / awaiting decision) so nothing dangles silently.\n`;
+      traceEvent({ outcome: 'block', hook: 'stop', reason: 'dangling-work', inProgress: inProg, failedTodo });
       process.stderr.write(msg + `Then give the user a short status summary.\n`);
       process.exit(2);
 
@@ -1284,6 +1389,8 @@ const commands = {
   usage [--write]                        OBSERVED token/dispatch report from local session logs:
                                          by model, orchestrator vs subagents, dispatches by agent type,
                                          per-item dispatch counts, spend since last state change
+  trace [--refusals|--hooks|--last N]    flight recorder: every CLI call and hook decision (FORGE_DEBUG=1 = verbose)
+  doctor                                 install/state self-check: versions, cache, hooks, lock, orphaned work
   stats                                  process metrics from the work graph: first-pass rate, retries,
                                          escalations, elapsed times, per-milestone health
   session status | takeover [--force]    orchestrator lock: who is allowed to write; takeover clears a dead session's lock

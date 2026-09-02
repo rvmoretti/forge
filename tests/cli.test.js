@@ -411,3 +411,45 @@ test('stats reports first-pass rate, retries and milestone health', () => {
   assert.match(r.out, /T2×1/);
   assert.match(r.out, /M1: 2\/2 done/);
 });
+
+// --- v0.7: trace + doctor ------------------------------------------------------
+
+test('trace records commands, refusals and hook blocks with version stamps', () => {
+  forge(['task', 'add', '--id', 'T1', '--title', 'no criteria']);
+  forge(['task', 'start', 'T1']); // refused: no criteria
+  hook('pretooluse', { session_id: 's1', tool_name: 'Write', tool_input: { file_path: 'forge/state/work.json' } }); // blocked: state-guard
+  const traceFile = path.join(dir, 'forge', 'state', 'trace.jsonl');
+  const evs = fs.readFileSync(traceFile, 'utf8').split('\n').filter(Boolean).map(JSON.parse);
+  assert.ok(evs.length >= 3);
+  assert.ok(evs.every(e => e.v && e.ts && e.cmd !== undefined));
+  assert.ok(evs.some(e => e.outcome === 'refused' && /no acceptance criteria/.test(e.refusal)));
+  assert.ok(evs.some(e => e.outcome === 'block' && e.reason === 'state-guard'));
+  const r = forge(['trace', '--refusals']);
+  assert.strictEqual(r.code, 0);
+  assert.match(r.out, /state-guard/);
+});
+
+test('trace never creates forge/ in an uninitialized directory', () => {
+  const bare = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-bare-'));
+  spawnSync(process.execPath, [CLI, 'task', 'list'], {
+    cwd: bare, encoding: 'utf8',
+    env: Object.assign({}, process.env, { CLAUDE_PROJECT_DIR: bare })
+  });
+  assert.ok(!fs.existsSync(path.join(bare, 'forge')));
+});
+
+test('doctor passes on a healthy project and flags orphaned IN_PROGRESS work', () => {
+  const ok = forge(['doctor']);
+  assert.strictEqual(ok.code, 0);
+  assert.match(ok.out, /look sane/);
+  // orphan an item: start it, then age the lock out
+  addItem('T1');
+  forge(['task', 'start', 'T1']);
+  const sessFile = path.join(dir, 'forge', 'state', 'session.json');
+  hook('pretooluse', { session_id: 'sX', tool_name: 'Write', tool_input: { file_path: 'src/a.js' } });
+  const l = JSON.parse(fs.readFileSync(sessFile, 'utf8'));
+  l.lastBeat = new Date(Date.now() - 20 * 60 * 1000).toISOString();
+  fs.writeFileSync(sessFile, JSON.stringify(l));
+  const bad = forge(['doctor']);
+  assert.match(bad.out, /orphaned work/);
+});

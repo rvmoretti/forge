@@ -7,7 +7,7 @@ agents, machine-verifies every result, and loops until acceptance criteria
 pass. You own WHAT and WHY; Forge owns HOW.
 
 The rules that matter are enforced by code, not prompts — and every claim
-below is covered by a test in `tests/cli.test.js` (`npm test`, 29 tests):
+below is covered by a test in `tests/cli.test.js` (`npm test`, 32 tests):
 
 - **DONE requires a passing verification record for the current tree** — no record, a failed record, or evidence older than the latest edit all refuse.
 - **Checks must prove something** — `start` records each criterion check's pre-work result; if everything was green before work and nothing changed, `done` refuses (vacuous or already-satisfied criteria get flagged, not laundered).
@@ -99,6 +99,27 @@ session recovers the full picture from disk — the conversation is never the
 memory.
 
 ## Changelog
+
+### v0.7.0 — observability: trace, doctor, verbose debug
+Instrumentation ships BEFORE the next wave of compounding changes, so
+failures are attributable to a version, not to a pile:
+
+- **Always-on trace** — every CLI invocation and every hook decision appends
+  one JSON line to `forge/state/trace.jsonl` (timestamp, plugin version,
+  command, outcome or refusal, block reason, duration). Auto-rotates at 2MB.
+  Tracing never breaks the CLI and never creates `forge/` in an
+  uninitialized directory.
+- **`forge trace [--refusals|--hooks|--last N]`** — the reader.
+  `FORGE_DEBUG=1` records verbose payloads (hook stdin, matched patterns).
+- **`forge doctor`** — install/state self-check targeting the failure classes
+  observed in the field: multiple cached plugin versions, installed cache
+  behind the repo, the manifest-hooks duplicate-load regression, corrupt
+  config/work state, stale locks, and orphaned IN_PROGRESS items with no
+  active orchestrator (the edit-war precursor).
+- Operating contract: when Forge misbehaves, run `doctor` + `trace
+  --refusals` and report — never work around a guard without that evidence.
+
+3 new tests (32 total).
 
 ### v0.6.0 — enforced scope, process metrics, unbiased review
 Informed by Anthropic's AI-native SDLC playbook, filtered against what Forge
