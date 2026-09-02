@@ -500,3 +500,21 @@ test('verify records existing artifacts and warns on missing ones', () => {
   const v = w.items.T1.verifications.at(-1);
   assert.deepStrictEqual(v.artifacts, ['shot.png']);
 });
+
+// --- v0.10: component map --------------------------------------------------------
+
+test('components register, auto-register from --component, and render in the dashboard map', () => {
+  forge(['component', 'add', 'listing-detail', '--name', 'Listing detail', '--kind', 'frontend', '--route', '/anuncios/:id']);
+  const dup = forge(['component', 'add', 'listing-detail']);
+  assert.notStrictEqual(dup.code, 0);
+  forge(['task', 'add', '--id', 'T1', '--title', 't', '--criterion', 'ok::node -e "process.exit(0)"', '--component', 'listing-detail']);
+  forge(['task', 'add', '--id', 'T2', '--title', 't', '--criterion', 'ok::node -e "process.exit(0)"', '--component', 'api-core']); // auto-registers
+  const list = forge(['component', 'list']);
+  assert.match(list.out, /listing-detail \(frontend · \/anuncios\/:id\) — 0\/1 items done/);
+  assert.match(list.out, /api-core \(unspecified\)/);
+  const dash = fs.readFileSync(path.join(dir, 'forge', 'dashboard.html'), 'utf8');
+  assert.match(dash, /Project map/);
+  assert.match(dash, /Listing detail/);
+  assert.match(dash, /api-core/);
+  assert.doesNotMatch(dash, /not tagged to any component/); // every item is tagged here
+});

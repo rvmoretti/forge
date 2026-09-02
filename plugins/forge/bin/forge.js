@@ -123,6 +123,7 @@ function run(cmd, opts = {}) {
 // ---------------------------------------------------------------------------
 
 const DASHBOARD_FILE = path.join(FORGE, 'dashboard.html');
+const COMPONENTS_FILE = path.join(STATE, 'components.json');
 
 function esc(s) {
   return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -201,6 +202,41 @@ function generateDashboard() {
       <div class="tblwrap"><table><thead><tr><th>Status</th><th>Item</th><th>Deps</th><th>Criteria</th><th>Attempts</th><th>Last verification</th></tr></thead><tbody>${rows}</tbody></table></div>`;
   }).join('');
 
+  // v0.10: project map — one box per registered component
+  const comps = readJson(COMPONENTS_FILE, { schema: 1, components: {} }).components;
+  let mapBlock = '';
+  if (Object.keys(comps).length) {
+    const kindColor = { frontend: '#3b3f8f', backend: '#0f766e', db: '#b45309', job: '#57606f', integration: '#7c3aed' };
+    const boxes = Object.values(comps).map(c => {
+      const items = w.order.map(id => w.items[id]).filter(t => t.component === c.id);
+      const done = items.filter(t => t.status === 'DONE').length;
+      const inProg = items.filter(t => t.status === 'IN_PROGRESS');
+      const blocked = items.filter(t => t.status === 'BLOCKED');
+      const fails = items.reduce((a, t) => a + t.attempts.filter(x => x.outcome === 'failed').length, 0);
+      // latest image evidence: the component's mock, else the newest screenshot artifact
+      let img = c.mock || null;
+      for (const t of items) for (const v of t.verifications) for (const a of (v.artifacts || []))
+        if (/\.(png|jpe?g|webp|gif)$/i.test(a)) img = a;
+      const imgTag = img && fs.existsSync(path.join(PROJECT, img))
+        ? `<a href="../${esc(img)}"><img src="../${esc(img)}" alt="${esc(c.name)}" style="width:100%;max-height:110px;object-fit:cover;object-position:top;border-radius:8px;border:1px solid #e6e4de;margin-top:8px"></a>` : '';
+      const pctC = items.length ? Math.round(100 * done / items.length) : 0;
+      return `<div class="card" style="min-width:220px;max-width:280px;flex:1">
+        <div style="display:flex;justify-content:space-between;gap:8px;align-items:baseline">
+          <b style="font-size:14px">${esc(c.name)}</b>${chip(c.kind, kindColor[c.kind] || '#57606f')}
+        </div>
+        ${c.route ? `<div class="mut"><code>${esc(c.route)}</code></div>` : ''}
+        <div class="bar" style="margin:8px 0 4px"><div style="width:${pctC}%"></div></div>
+        <div class="mut">${done}/${items.length} done${inProg.length ? ` · <b style="color:#3b3f8f">${inProg.map(t => esc(t.id)).join(',')} in progress</b>` : ''}${blocked.length ? ` · <b style="color:#b91c1c">${blocked.length} blocked</b>` : ''}${fails ? ` · ${fails} failed attempt(s)` : ''}</div>
+        ${c.doc ? `<div class="mut">📄 <code>${esc(c.doc)}</code></div>` : ''}
+        ${imgTag}
+      </div>`;
+    }).join('');
+    const untagged = w.order.filter(id => !w.items[id].component).length;
+    mapBlock = `<h2>Project map <span class="mut" style="font-weight:400">(components — forge component add/update · items tagged via --component)</span></h2>
+      <div class="cards" style="align-items:stretch">${boxes}</div>
+      ${untagged ? `<p class="mut">${untagged} work item(s) not tagged to any component.</p>` : ''}`;
+  }
+
   const logBlock = (entries, empty) => entries.length
     ? entries.map(e => `<div class="log"><b>${esc(e.title)}</b><pre>${esc(e.body)}</pre></div>`).join('')
     : `<p class="mut">${empty}</p>`;
@@ -253,6 +289,7 @@ td{padding:8px 12px;border-bottom:1px solid #f0efe9;vertical-align:top} tr:last-
   <div class="card"><b style="color:${counts.BLOCKED ? '#b91c1c' : 'inherit'}">${counts.BLOCKED}</b><span>blocked</span></div>
   <div class="card"><b>${counts.CANCELLED}</b><span>cancelled</span></div>
 </div>
+${mapBlock}
 <h2>Work graph</h2>
 ${milestoneBlocks || '<p class="mut">No work items yet.</p>'}
 <div class="grid2">
@@ -528,12 +565,22 @@ const commands = {
       w.items[item.id] = Object.assign({
         title: '', objective: '', milestone: null, deps: [], criteria: [],
         scope: { allowed: [], forbidden: [] },
+        component: opt('component') || null,
         status: 'TODO', attempts: [], verifications: [], history: [],
         preState: null, startTree: null,
         blockReason: null, cancelReason: null, created: ts(), updated: ts()
       }, item, { status: 'TODO' });
       w.order.push(item.id);
       saveWork(w);
+      // v0.10: auto-register unknown components so the map never lies by omission
+      if (w.items[item.id].component) {
+        const comps = readJson(COMPONENTS_FILE, { schema: 1, components: {} });
+        if (!comps.components[w.items[item.id].component]) {
+          comps.components[w.items[item.id].component] = { id: w.items[item.id].component, name: w.items[item.id].component, kind: 'unspecified', created: ts() };
+          writeJson(COMPONENTS_FILE, comps);
+          regenDashboard();
+        }
+      }
       out(`Created ${item.id}: ${item.title}`);
 
     } else if (sub === 'list') {
@@ -735,6 +782,7 @@ const commands = {
       }
       if (opt('allowed') !== null) { item.scope.allowed = opt('allowed').split(',').map(s => s.trim()).filter(Boolean); changes.push('scope.allowed updated'); }
       if (opt('forbidden') !== null) { item.scope.forbidden = opt('forbidden').split(',').map(s => s.trim()).filter(Boolean); changes.push('scope.forbidden updated'); }
+      if (opt('component') !== null) { item.component = opt('component') || null; changes.push('component = ' + item.component); }
       for (const idx of optAll('criterion-remove').map(Number).sort((a, b) => b - a)) {
         if (!item.criteria[idx]) die(`No criterion at index ${idx} (use: forge task show ${item.id}).`);
         changes.push(`criterion removed: '${item.criteria[idx].desc}'`);
@@ -805,6 +853,34 @@ const commands = {
       `\n### ${ts()} — ${title}\n- Evidence: ${opt('evidence') || ''}\n- Impact: ${opt('impact') || ''}\n- Affects: ${opt('affects') || '-'}\n`);
     regenDashboard();
     out('Discovery recorded. If it invalidates planned work, update the work graph now (block/cancel/add items) — a logged discovery with unhandled consequences is a failure.');
+  },
+
+  // -- components (v0.10) — the registry behind the dashboard's project map -----
+  component() {
+    const sub = argv[1];
+    const comps = readJson(COMPONENTS_FILE, { schema: 1, components: {} });
+    if (sub === 'add' || sub === 'update') {
+      const id = argv[2];
+      if (!id || id.startsWith('--')) die('Usage: forge component add|update <id> [--name "..."] [--kind frontend|backend|db|job|integration|...] [--route /path] [--mock spec/mocks/x.png] [--doc spec/02-experience.md#...]');
+      if (sub === 'add' && comps.components[id]) die(`Component '${id}' exists — use: forge component update ${id}`);
+      if (sub === 'update' && !comps.components[id]) die(`Unknown component '${id}'. See: forge component list`);
+      const c = comps.components[id] = Object.assign({ id, name: id, kind: 'unspecified', created: ts() }, comps.components[id]);
+      for (const k of ['name', 'kind', 'route', 'mock', 'doc']) if (opt(k) !== null) c[k] = opt(k);
+      c.updated = ts();
+      writeJson(COMPONENTS_FILE, comps);
+      regenDashboard();
+      out(`Component '${id}' ${sub === 'add' ? 'registered' : 'updated'} (${c.kind}${c.route ? ` · ${c.route}` : ''}). Tag work: forge task add ... --component ${id}`);
+    } else if (sub === 'list') {
+      const ids = Object.keys(comps.components);
+      if (!ids.length) { out('No components registered. forge component add <id> --kind ... — or tag items with --component (auto-registers).'); return; }
+      const w = loadWork();
+      for (const id of ids) {
+        const c = comps.components[id];
+        const items = w.order.filter(i => w.items[i].component === id);
+        const done = items.filter(i => w.items[i].status === 'DONE').length;
+        out(`  ${id} (${c.kind}${c.route ? ` · ${c.route}` : ''}) — ${done}/${items.length} items done${c.mock ? ' · mock ✓' : ''}`);
+      }
+    } else die('Usage: forge component add|update <id> [flags] | list');
   },
 
   // -- session lock (v0.5) ------------------------------------------------------
@@ -1423,6 +1499,7 @@ const commands = {
   usage [--write]                        OBSERVED token/dispatch report from local session logs:
                                          by model, orchestrator vs subagents, dispatches by agent type,
                                          per-item dispatch counts, spend since last state change
+  component add|update <id> ... | list   project-map registry (kind/route/mock/doc); items tag via task --component
   trace [--refusals|--hooks|--last N]    flight recorder: every CLI call and hook decision (FORGE_DEBUG=1 = verbose)
   doctor                                 install/state self-check: versions, cache, hooks, lock, orphaned work
   stats                                  process metrics from the work graph: first-pass rate, retries,
