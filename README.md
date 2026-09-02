@@ -7,7 +7,7 @@ agents, machine-verifies every result, and loops until acceptance criteria
 pass. You own WHAT and WHY; Forge owns HOW.
 
 The rules that matter are enforced by code, not prompts — and every claim
-below is covered by a test in `tests/cli.test.js` (`npm test`, 34 tests):
+below is covered by a test in `tests/cli.test.js` (`npm test`, 35 tests):
 
 - **DONE requires a passing verification record for the current tree** — no record, a failed record, or evidence older than the latest edit all refuse.
 - **Checks must prove something** — `start` records each criterion check's pre-work result; if everything was green before work and nothing changed, `done` refuses (vacuous or already-satisfied criteria get flagged, not laundered).
@@ -100,6 +100,24 @@ session recovers the full picture from disk — the conversation is never the
 memory.
 
 ## Changelog
+
+### v0.9.0 — UX layer and the drawn frontend
+- **`design-ux` domain pack** — hierarchy, the five states
+  (empty/loading/error/partial/success), forms, feedback, mobile, language,
+  plus a fresh-context UX review protocol. Every screen brief carries it;
+  a screen whose checks pass but whose UX review fails is a failed item.
+- **Mocks as spec (the drawn frontend, back from the original METHOD).** The
+  spec phase offers a mock per key screen (Claude Design / Figma export /
+  photographed sketch, wireframe fidelity by default) stored at
+  `spec/mocks/<screen>`, referenced from 02-experience, approval recorded as
+  a human decision. Screen items get a mock-fidelity criterion; "actually
+  followed" is the same machinery as everything else — red-first,
+  screenshot at verify, fresh-context reviewer verdict.
+- **`task verify --artifact <path>`** — attach evidence files (screenshots,
+  reports) to the verification record; missing paths warn and are not
+  recorded.
+
+1 new test (35 total).
 
 ### v0.8.0 — security in the loop, delegation routing
 - **Security enters through the existing machinery, not a new ceremony.**

@@ -42,6 +42,11 @@ orientation, baseline capture, scoped mini-spec — then the same loop.
    applicable domain pack (see `forge-domain-packs` skill). Derive the
    allowed-files scope from the dependency closure (use Graphify when
    available: query what depends on what — do not guess blast radius).
+   **Screen work**: the brief additionally carries the `design-ux` pack and
+   the approved mock (`spec/mocks/<screen>.*`) when one exists; the item
+   carries a criterion binding the rendered screen to that mock. A screen
+   without a mock still gets the pack — the five states and the checklist
+   are not optional.
 3. **Dispatch** to a worker agent (`forge-implementer`, `forge-tester`, …) in
    a fresh context, with the brief as the complete task. The dispatch prompt's
    first line must be the brief header (`# Work brief — <id>: <title>`) even
@@ -54,7 +59,12 @@ orientation, baseline capture, scoped mini-spec — then the same loop.
    diffs, dispatch the review to `forge-reviewer` in a fresh context** — you
    briefed this work, so your own read is colored by the assumptions that
    produced it; a fresh context's verdict is not. Machine checks are already
-   unbiased; this rule is about the judgment layer.
+   unbiased; this rule is about the judgment layer. **Screen items get the
+   UX review**: capture the rendered screen (Playwright screenshot), attach
+   it to the evidence (`forge task verify <id> --artifact <path>`), and have
+   a fresh-context reviewer judge it against the approved mock and the
+   `design-ux` pack's review protocol — a screen whose checks pass but whose
+   UX review fails is a failed item, not a nit.
 5. **Close or retry**:
    - Pass and review clean → `forge task done <id>`; then **sync the spec —
      on every project, not just brownfield**: if this item established,

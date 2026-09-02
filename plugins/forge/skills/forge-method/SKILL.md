@@ -51,13 +51,28 @@ At **Step 7** (generate handoff artifacts), in addition to `CLAUDE.md` and
    Then ask one more either/or: stop for their testing after each milestone
    (`per-milestone`, recommended default) or run straight through
    (`end-only`)? Record it: `forge config set options.gates <choice>`.
+   **Mocks (products with a UI).** Offer the user the drawn-frontend path:
+   for each key screen in `02-experience.md`, a mock — Claude Design, a
+   Figma export, or a photographed sketch; wireframe fidelity is enough
+   unless a screen really matters. Approved mocks land in
+   `spec/mocks/<screen>.<ext>`, referenced from `02-experience.md`, with the
+   approval recorded (`forge decision add "Mock approved: <screen>"
+   --authority human`). A mock binds intent (hierarchy, grouping, primary
+   action) — pixel fidelity only if the user says so. Screens the user
+   declines to mock still get the `design-ux` pack at build time. This is an
+   offer, not a gate — record a decision either way so build-phase sessions
+   know which screens have binding mocks.
 3. Convert `PLAN.md` into the work graph: one `forge task add` per task, in
    dependency order, with `--deps`, `--milestone` (from the confirmed cut),
    and **acceptance criteria taken from the spec** (`04-logic.md` criteria
    are mandatory sources). Give every criterion a machine check
    (`--criterion "desc::command"`) wherever one can exist — a criterion
    nobody can run is a weak gate, and the CLI's red-first check will flag
-   vacuous ones.
+   vacuous ones. Screen items whose mock exists get a mock-fidelity
+   criterion ("rendered <route> serves the approved mock
+   spec/mocks/<screen>") — verified at build time by screenshot
+   (`task verify --artifact`) plus the fresh-context UX review from the
+   `design-ux` pack.
 4. Run `forge preflight` and resolve anything it raises (including the
    Graphify install-or-skip question if unset).
 
