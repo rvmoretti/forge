@@ -75,9 +75,18 @@ orientation, baseline capture, scoped mini-spec — then the same loop.
      criteria (`forge task update --reason`), or do it yourself.
 
 6. **Milestone gate** (when `options.gates` is `per-milestone`, the default):
-   when the last item of a milestone goes DONE, stop. Demo the running slice
-   to the user (the milestone's demo criterion says how), collect their
-   verdict, record it: `forge milestone approve <M> --note "..."`. Their
+   when the last item of a milestone goes DONE, stop. First run the
+   **security pass**: dispatch `forge-reviewer` in a fresh context with the
+   security domain pack over the milestone's cumulative diff; its findings
+   become work items in this milestone (fix before the gate) or explicit
+   accepted-risk decisions; record the pass:
+   `forge milestone security <M> --note "<coverage + findings summary>"` —
+   `approve` refuses without it (deliberate skip: `--skip-security
+   --reason`; per-project opt-out: `options.security off`). Deterministic
+   scanning is separate and continuous: `verify.security` runs inside every
+   `task verify`. Then demo the running slice to the user (the milestone's
+   demo criterion says how), collect their verdict, record it:
+   `forge milestone approve <M> --note "..."`. Their
    feedback becomes decisions and work-graph updates BEFORE the next
    milestone starts. The CLI refuses to start later-milestone items until
    the gate is approved — this is the user's early-drift catch; never ask
@@ -125,6 +134,16 @@ mapping/reading, `forge-implementer` / `forge-tester` (sonnet) for bounded
 build/test work, `forge-reviewer` / `forge-architect` (opus) for high-risk
 review and design advice. Escalate tiers on evidence of failure, not on
 anxiety.
+
+**Route by default, don't absorb.** Field telemetry shows orchestrators
+dispatch implementers and do everything else themselves — on the most
+expensive tokens in the system. Before reading more than a handful of files
+to answer a question, dispatch `forge-explorer` with the question. When an
+item's work is primarily writing tests, dispatch `forge-tester`, not the
+implementer. Doing bounded work yourself is the proportionality exception
+for trivial items, not the default. The measure is cost per completed item,
+not delegation percentage — but zero explorer/tester dispatches over a whole
+project means you are absorbing their work.
 
 ## Discoveries
 

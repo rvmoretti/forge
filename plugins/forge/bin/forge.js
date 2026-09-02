@@ -466,6 +466,12 @@ const commands = {
             check(`verify.${k} runs`, r.exit === 0, r.exit === 0 ? 'green' : `exit ${r.exit} — record as pre-existing failure or fix before relying on this gate`, 'warning');
           }
         }
+        // v0.8: deterministic security scanning belongs in the verify path
+        if ((cfg.options || {}).security !== 'off')
+          check('security check', !!(cfg.verify || {}).security,
+            (cfg.verify || {}).security ? `security: ${cfg.verify.security}` :
+            'no verify.security command — add a scanner (e.g. gitleaks/semgrep/npm audit): forge config set verify.security "<cmd>". It runs inside every task verify. (Disable: forge config set options.security off)',
+            'warning');
       } else {
         check('verification commands', true, 'spec phase — not required yet', 'optional');
       }
@@ -1179,15 +1185,38 @@ const commands = {
           : (milestoneComplete(w, m) ? 'COMPLETE — AWAITING HUMAN APPROVAL' : 'in progress');
         out(`  ${m}: ${done}/${items.length} items · ${state}`);
       }
+    } else if (sub === 'security') {
+      // v0.8: record the milestone security review (fresh-context reviewer over the slice's diff)
+      const m = argv[2];
+      if (!m || !milestoneSeq(w).includes(m)) die(`Unknown milestone '${m || ''}'. See: forge milestone list`);
+      if (!opt('note')) die('Usage: forge milestone security <M> --note "<who reviewed, what was covered, findings summary>"');
+      w.gates[m] = Object.assign({}, w.gates[m], { security: { ts: ts(), note: opt('note') } });
+      saveWork(w);
+      out(`Security review recorded for milestone '${m}'. Findings become work items BEFORE the gate is approved.`);
     } else if (sub === 'approve') {
       const m = argv[2];
       if (!m || !milestoneSeq(w).includes(m)) die(`Unknown milestone '${m || ''}'. See: forge milestone list`);
       if (!milestoneComplete(w, m))
         die(`Refused: milestone '${m}' still has unfinished items — approval is for a testable, finished slice.`);
-      w.gates[m] = { approved: true, ts: ts(), note: opt('note') || null };
+      // v0.8: security is part of the gate, not an afterthought
+      const secMode = ((loadConfig() || {}).options || {}).security;
+      const hasSec = ((w.gates[m] || {}).security || {}).ts;
+      let secSkip = null;
+      if (secMode !== 'off' && !hasSec) {
+        if (flag('skip-security')) {
+          if (!opt('reason')) die('--skip-security requires --reason "..." (recorded in the decisions log).');
+          secSkip = opt('reason');
+        } else {
+          die(`Refused: milestone '${m}' has no recorded security review.\n` +
+              `Run the pass first (fresh-context forge-reviewer + security domain pack over the milestone's diff), then:\n` +
+              `  forge milestone security ${m} --note "<findings summary>"\n` +
+              `Or skip deliberately: forge milestone approve ${m} --skip-security --reason "..." — or disable for this project: forge config set options.security off`);
+        }
+      }
+      w.gates[m] = Object.assign({}, w.gates[m], { approved: true, ts: ts(), note: opt('note') || null, securitySkipped: secSkip });
       saveWork(w);
       appendMd(DECISIONS_FILE, '# Decisions log (append-only, via forge CLI)',
-        `\n### ${ts()} — Milestone '${m}' approved\n- Authority: human\n- Decision: milestone gate approved after human review\n- Why: ${opt('note') || '(no note recorded)'}\n`);
+        `\n### ${ts()} — Milestone '${m}' approved\n- Authority: human\n- Decision: milestone gate approved after human review${secSkip ? ` (SECURITY REVIEW SKIPPED: ${secSkip})` : ''}\n- Why: ${opt('note') || '(no note recorded)'}\n`);
       out(`Milestone '${m}' approved — later milestones may now start.`);
     } else if (sub === 'reopen') {
       const m = argv[2];
@@ -1196,7 +1225,7 @@ const commands = {
       w.gates[m] = { approved: false, ts: ts(), note: `REOPENED: ${opt('reason')}` };
       saveWork(w);
       out(`Milestone '${m}' gate reopened: ${opt('reason')} — items in later milestones are blocked again.`);
-    } else die('Usage: forge milestone list | approve <name> [--note "..."] | reopen <name> --reason "..."');
+    } else die('Usage: forge milestone list | security <name> --note "..." | approve <name> [--note "..."] [--skip-security --reason "..."] | reopen <name> --reason "..."');
   },
 
   // -- dashboard ----------------------------------------------------------------
