@@ -19,6 +19,9 @@ Packs (in `references/`):
 
 - `backend.md` — APIs, services, data, external calls (reliability + data discipline)
 - `frontend.md` — UI implementation (accessibility, performance, states)
+- `design-ux.md` — whether the UI is GOOD from a human's point of view: hierarchy,
+  the five states, forms, feedback, mobile, language — plus the fresh-context
+  UX review protocol (screenshot vs approved mock)
 - `testing.md` — test authoring standards (determinism, isolation, pyramid)
 - `security.md` — the AI-generated-code failure modes (secrets, authz, injection)
 

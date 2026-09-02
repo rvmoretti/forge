@@ -486,3 +486,17 @@ test('milestone approve with options.security off needs no review; skip-security
   assert.strictEqual(forge(['milestone', 'approve', 'M1', '--skip-security', '--reason', 'internal prototype']).code, 0);
   assert.match(fs.readFileSync(path.join(dir, 'forge', 'decisions.md'), 'utf8'), /SECURITY REVIEW SKIPPED: internal prototype/);
 });
+
+// --- v0.9: evidence artifacts ---------------------------------------------------
+
+test('verify records existing artifacts and warns on missing ones', () => {
+  addItem('T1');
+  forge(['task', 'start', 'T1']);
+  touch('shot.png');
+  const r = forge(['task', 'verify', 'T1', '--artifact', 'shot.png', '--artifact', 'missing.png']);
+  assert.strictEqual(r.code, 0);
+  assert.match(r.out, /missing.png does not exist/);
+  const w = JSON.parse(fs.readFileSync(path.join(dir, 'forge', 'state', 'work.json'), 'utf8'));
+  const v = w.items.T1.verifications.at(-1);
+  assert.deepStrictEqual(v.artifacts, ['shot.png']);
+});

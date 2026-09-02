@@ -608,7 +608,12 @@ const commands = {
         }
       }
       const passed = results.every(r => r.exit === 0);
-      item.verifications.push({ ts: ts(), passed, results, tree: treeState(), skippedBaseline });
+      // v0.9: attach evidence artifacts (screenshots, reports) to the record
+      const artifacts = optAll('artifact').filter(a => {
+        if (fs.existsSync(path.resolve(PROJECT, a))) return true;
+        out(`WARNING: --artifact ${a} does not exist — not recorded.`); return false;
+      });
+      item.verifications.push({ ts: ts(), passed, results, tree: treeState(), skippedBaseline, artifacts: artifacts.length ? artifacts : undefined });
       item.updated = ts();
       saveWork(w);
       for (const r of results) out(`${r.exit === 0 ? 'PASS' : 'FAIL'}  [${r.kind}] ${r.cmd}${r.note ? `  (${r.note})` : ''}${r.exit !== 0 ? '\n' + r.tail : ''}`);
