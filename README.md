@@ -7,7 +7,7 @@ agents, machine-verifies every result, and loops until acceptance criteria
 pass. You own WHAT and WHY; Forge owns HOW.
 
 The rules that matter are enforced by code, not prompts — and every claim
-below is covered by a test in `tests/cli.test.js` (`npm test`, 35 tests):
+below is covered by a test in `tests/cli.test.js` (`npm test`, 36 tests):
 
 - **DONE requires a passing verification record for the current tree** — no record, a failed record, or evidence older than the latest edit all refuse.
 - **Checks must prove something** — `start` records each criterion check's pre-work result; if everything was green before work and nothing changed, `done` refuses (vacuous or already-satisfied criteria get flagged, not laundered).
@@ -100,6 +100,18 @@ session recovers the full picture from disk — the conversation is never the
 memory.
 
 ## Changelog
+
+### v0.10.0 — the project map
+The dashboard gains a visual component map: one box per component (route,
+kind, progress bar, in-progress/blocked/failed rollups, spec doc link, and
+the mock or latest screenshot evidence as a thumbnail). Components live in a
+CLI-managed registry (`forge component add|update|list` →
+`state/components.json`, hook-protected like all state); work items tag
+themselves with `--component` on add/update, and an unknown component
+auto-registers so the map never lies by omission. Untagged items are counted
+visibly. Still a zero-token generated projection — state wins, never edit it.
+
+1 new test (36 total).
 
 ### v0.9.0 — UX layer and the drawn frontend
 - **`design-ux` domain pack** — hierarchy, the five states
