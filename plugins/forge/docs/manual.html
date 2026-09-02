@@ -202,11 +202,23 @@ graphify install</span>
         <h3>D · When something feels off</h3>
         <p class="mtag">The usual fixes, in order of likelihood.</p>
         <ul>
+          <li><strong>First move, always:</strong> <code>forge doctor</code> (install/state self-check: versions, cache, hooks, locks, orphaned work) and <code>forge trace --refusals</code> (the flight recorder — every CLI call and hook decision, version-stamped). Diagnose before working around anything.</li>
           <li><strong>A skill didn't trigger?</strong> Name it: <em>"run the forge method"</em> / <em>"use forge-brownfield"</em>.</li>
           <li><strong>Hooks not firing?</strong> Run <code>/hooks</code> to inspect; after a Claude Code update, reinstall or update the plugin. Hook config formats occasionally shift between releases.</li>
           <li><strong>Session got bounced at the end?</strong> That's the stop gate working — items were still IN_PROGRESS. Let Forge settle them; it happens at most once per stop.</li>
           <li><strong>Told "state files are managed by the forge CLI"?</strong> Also by design — work state changes only through <code>forge task …</code> commands, never hand-edits.</li>
           <li><strong>Forge's behavior needs tuning?</strong> Edit <code>core/OPERATING.md</code> in the plugin — it's deliberately ~130 lines so process changes land in one reviewable place. The full design rationale lives in <code>docs/TRACEABILITY.md</code>.</li>
+        </ul>
+      </div>
+
+      <div class="mbox wide">
+        <h3>E · The safety nets <span style="font-weight:400;color:var(--muted);font-size:13px">(all enforced in code — added v0.5–v0.10)</span></h3>
+        <ul>
+          <li><strong>One orchestrator per project.</strong> A session lock (heartbeat on every write) blocks a second session's edits while the first is active — no more edit wars. Dead session? <code>forge session takeover --force</code>. Status: <code>forge session status</code>.</li>
+          <li><strong>Scope is enforced.</strong> While an item is in progress, edits to its forbidden paths are refused by the hook; <code>options.protect</code> freezes paths always (generated code, migrations).</li>
+          <li><strong>Security is part of the gate.</strong> Set <code>verify.security</code> (e.g. gitleaks) and it runs inside every verification; <code>milestone approve</code> refuses until a fresh-context security review of the slice is recorded (<code>forge milestone security &lt;M&gt; --note</code>) — skips are explicit and logged.</li>
+          <li><strong>The spec stays true.</strong> Every completed item that touched product behavior updates the spec layers in the same close, on every project — the spec is the source your docs generate from.</li>
+          <li><strong>Screens are designed, not defaulted.</strong> Mocks live in <code>spec/mocks/</code> as approved intent; screen items carry a mock-fidelity criterion, screenshots attach to evidence (<code>task verify --artifact</code>), and a fresh-context UX review judges against the design-ux checklist.</li>
         </ul>
       </div>
 
@@ -217,7 +229,7 @@ graphify install</span>
     <div>
       <h3>Your input</h3>
       <p class="big">Natural language.</p>
-      <p>No prompts, no model picking, no agent wrangling. You talk product. Slash commands (<code>/forge:build</code>, <code>/forge:status</code>, <code>/forge:preflight</code>) are shortcuts — plain words always work too.</p>
+      <p>No prompts, no model picking, no agent wrangling. You talk product. Slash commands (<code>/forge:build</code>, <code>/forge:status</code>, <code>/forge:preflight</code>, <code>/forge:dashboard</code>, <code>/forge:usage</code>, <code>/forge:stats</code>) are shortcuts — plain words always work too.</p>
     </div>
     <div>
       <h3>The only three reasons you get interrupted</h3>
@@ -230,7 +242,7 @@ graphify install</span>
     <div>
       <h3>Your output</h3>
       <p class="big">Ask <em>"where are we?"</em> — or <code>/forge:status</code></p>
-      <p>Phase, preflight, work graph counts, in-progress and blocked items, latest discovery. <span class="v0">v0</span> rich text; HTML dashboard comes after the loop is proven.</p>
+      <p>Phase, preflight, work graph counts, in-progress and blocked items, latest discovery. For the visual picture open <code>forge/dashboard.html</code> in a browser — progress, the work graph, and the <b>project map</b> (one box per component: route, progress, mock/screenshot) — regenerated on every state change, zero tokens, just reload. <code>/forge:usage</code> = observed token/dispatch telemetry; <code>/forge:stats</code> = process health (first-pass rate, retries, elapsed times).</p>
     </div>
   </div>
 
@@ -259,7 +271,7 @@ claude</span>
       <div class="step"><span class="dot d-gate">3</span>
         <div class="who w-gate">Gate</div>
         <h4>Spec gates → the work graph is born</h4>
-        <p><span class="pill-auto">AUTO</span> At METHOD Step 7, alongside <code>CLAUDE.md</code> and <code>PLAN.md</code>, Forge sets the verify commands (<code>forge config set verify.test …</code>), flips <code>phase build</code>, and converts PLAN.md into work items — <strong>each with acceptance criteria carrying a machine check</strong>. Then preflight runs (yours to trigger anytime: say <em>"run preflight"</em> or <code>/forge:preflight</code>); if Graphify isn't installed it asks you once — install, or proceed without — and remembers your answer.</p>
+        <p><span class="pill-auto">AUTO</span> At METHOD Step 7, alongside <code>CLAUDE.md</code> and <code>PLAN.md</code>, Forge sets the verify commands (<code>forge config set verify.test …</code>), flips <code>phase build</code>, and converts PLAN.md into work items — <strong>each with acceptance criteria carrying a machine check</strong>. For products with a UI it also offers the drawn-frontend path: a mock per key screen (Claude Design, Figma export, or a photographed sketch) approved by you into <code>spec/mocks/</code> — screens with mocks get a mock-fidelity criterion. Then preflight runs (yours to trigger anytime: say <em>"run preflight"</em> or <code>/forge:preflight</code>); if Graphify isn't installed it asks you once — install, or proceed without — and remembers your answer.</p>
       </div>
 
       <div class="step"><span class="dot d-you">4</span>
@@ -278,7 +290,7 @@ claude</span>
       <div class="step"><span class="dot d-you">6</span>
         <div class="who w-you">You</div>
         <h4>Milestone review</h4>
-        <span class="say"><b>forge:</b> "Auth + family accounts verified end-to-end. Try it."<br><b>you:</b> "Invites should also work by link, not just email."</span>
+        <span class="say"><b>forge:</b> "Auth + family accounts verified end-to-end. Security pass recorded — no findings. Try it."<br><b>you:</b> "Invites should also work by link, not just email."</span>
         <p style="margin-top:6px">Your feedback becomes a recorded decision → spec updated → work graph replanned. The loop continues.</p>
       </div>
 
@@ -351,11 +363,11 @@ claude</span>
       <div class="arrow">→</div>
       <div class="node n-team"><h5>2 · Worker executes</h5><p>Cheap model, fresh context, bounded task. Stops and reports on any spec hole or scope conflict — never invents, never expands scope.</p></div>
       <div class="arrow">→</div>
-      <div class="node n-gate"><h5>3 · Machine verification</h5><p><code>forge task verify</code> runs project checks + criterion checks, records real output as evidence. The worker's "it works" counts for nothing.</p></div>
+      <div class="node n-gate"><h5>3 · Machine verification</h5><p><code>forge task verify</code> runs project checks (incl. <code>verify.security</code>) + criterion checks + the baseline guard, records real output as evidence — screenshots attach via <code>--artifact</code>. The worker's "it works" counts for nothing.</p></div>
       <div class="arrow">→</div>
-      <div class="node n-cto"><h5>4 · Review evidence</h5><p>Diff + test output + report. Risky items get the opus reviewer with the security lens. Deep code reads only where evidence is ambiguous.</p></div>
+      <div class="node n-cto"><h5>4 · Review evidence</h5><p>Diff + test output + report. High-risk diffs go to a <b>fresh-context</b> opus reviewer (the author's own read is biased); screens get the UX review against the approved mock. Deep code reads only where evidence is ambiguous.</p></div>
       <div class="arrow">→</div>
-      <div class="node n-ok"><h5>5 · Done — proven</h5><p><code>forge task done</code> — refused without a passing verification record. Docs synced, next item picked up.</p></div>
+      <div class="node n-ok"><h5>5 · Done — proven</h5><p><code>forge task done</code> — refused without a passing verification record for the current tree. Spec + docs synced in the same close, next item picked up.</p></div>
     </div>
     <div class="retry">
       <span class="rlab">On failure</span>
@@ -386,7 +398,7 @@ claude</span>
     </div>
   </div>
 
-  <p class="note">State on disk, always: <code>forge/config.json</code> (phase, verify commands), <code>forge/state/</code> (work graph, preflight, baseline — hook-protected, CLI-only), <code>forge/decisions.md</code> and <code>forge/discoveries.md</code> (append-only). All plain JSON/markdown, git-versioned. Deferred beyond v0 by design: HTML dashboard, per-agent token telemetry, deep audit — see <code>docs/TRACEABILITY.md</code> in the plugin for the full spec-to-implementation map.</p>
+  <p class="note">State on disk, always: <code>forge/config.json</code> (phase, verify commands, options), <code>forge/state/</code> (work graph, preflight, baseline, session lock, components, trace — hook-protected, CLI-only), <code>forge/decisions.md</code> and <code>forge/discoveries.md</code> (append-only, titled), <code>forge/dashboard.html</code> (generated projection). All plain JSON/markdown, git-versioned. See <code>docs/architecture.html</code> for the functional diagrams and <code>docs/TRACEABILITY.md</code> for the spec-to-implementation map.</p>
 
 </div>
 

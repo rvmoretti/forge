@@ -70,12 +70,12 @@ plugins/forge/
 │                          forge-tester (sonnet) · forge-reviewer (opus)
 │                          forge-architect (opus)
 ├── skills/
-│   ├── forge-method/      the spec-first METHOD (verbatim) + work-graph handoff
+│   ├── forge-method/      the spec-first METHOD (verbatim) + mocks + work-graph handoff
 │   ├── forge-brownfield/  orientation, baseline, mini-spec protocol
-│   └── forge-domain-packs/ backend · frontend · testing · security checklists
-│                          (curated from msitarzewski/agency-agents)
+│   └── forge-domain-packs/ backend · frontend · design-ux · testing · security
+│                          checklists (curated from msitarzewski/agency-agents)
 ├── commands/              /forge:status /forge:preflight /forge:build
-│                          /forge:dashboard /forge:usage
+│                          /forge:dashboard /forge:usage /forge:stats
 └── docs/
     ├── manual.html        the user manual — setup + greenfield/brownfield
     │                      walkthroughs; open in any browser, give to newcomers
@@ -89,10 +89,13 @@ plugins/forge/
 
 ```
 forge/
-├── config.json        phase, verify commands, options   (CLI-managed)
-├── state/             work.json, preflight, baseline    (CLI-managed, hook-protected)
-├── decisions.md       append-only, human/forge authority tagged
-└── discoveries.md     append-only, consequence-tracked
+├── config.json        phase, verify commands, options    (CLI-managed)
+├── state/             work.json · preflight · baseline · session.json (lock)
+│                      components.json (map) · trace.jsonl (flight recorder)
+│                      (CLI-managed, hook-protected)
+├── decisions.md       append-only, titled, human/forge authority tagged
+├── discoveries.md     append-only, titled, consequence-tracked
+└── dashboard.html     generated projection incl. the project map — never edited
 ```
 
 Everything is plain JSON/markdown, git-versioned, human-inspectable. A fresh
