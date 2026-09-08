@@ -194,6 +194,109 @@
     browser, say what's right and wrong, and approve the gate — nothing later starts until you do.</div>
   </div>
 
+  <figure style="padding:10px">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 640" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" role="img" aria-label="How Forge works: you give intent to the Forge CTO on a frontier model, which briefs cheap worker models; every result passes gates enforced in code before counting as done; outcomes are reliability, token optimization, efficiency and control.">
+  <defs>
+    <marker id="ar" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#8b93a7"/>
+    </marker>
+    <marker id="arA" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#f59e0b"/>
+    </marker>
+  </defs>
+
+  <!-- card -->
+  <rect x="0" y="0" width="1200" height="640" rx="26" fill="#0b0d11"/>
+  <rect x="0.75" y="0.75" width="1198.5" height="638.5" rx="25.5" fill="none" stroke="#232837" stroke-width="1.5"/>
+
+  <!-- header -->
+  <text x="48" y="58" font-size="21" font-weight="800" fill="#eceef4" letter-spacing="3">HOW FORGE WORKS</text>
+  <text x="48" y="84" font-size="14" fill="#8b93a7">one Claude Code session, run like an engineering organization — with the rules enforced in code</text>
+
+  <!-- ============ ROW 1: the three roles ============ -->
+  <!-- YOU -->
+  <rect x="48" y="122" width="250" height="128" rx="14" fill="#191309" stroke="#7c5518" stroke-width="1.5"/>
+  <text x="173" y="152" text-anchor="middle" font-size="16" font-weight="800" fill="#e8a04c">YOU — product owner</text>
+  <text x="173" y="176" text-anchor="middle" font-size="12.5" fill="#cfd3dd">plain language · decides WHAT &amp; WHY</text>
+  <text x="173" y="204" text-anchor="middle" font-size="11.5" fill="#8b93a7">interrupted for 3 things only:</text>
+  <text x="173" y="222" text-anchor="middle" font-size="11.5" fill="#8b93a7">decisions · risk · milestone demos</text>
+
+  <!-- FORGE CTO -->
+  <rect x="452" y="122" width="290" height="128" rx="14" fill="#12142a" stroke="#43478f" stroke-width="1.5"/>
+  <text x="597" y="152" text-anchor="middle" font-size="16" font-weight="800" fill="#a3a8ee">FORGE — the CTO</text>
+  <text x="597" y="176" text-anchor="middle" font-size="12.5" fill="#cfd3dd">frontier model · decides HOW</text>
+  <text x="597" y="204" text-anchor="middle" font-size="11.5" fill="#8b93a7">writes the spec with you · briefs every task</text>
+  <text x="597" y="222" text-anchor="middle" font-size="11.5" fill="#8b93a7">reviews every result — judgment, not typing</text>
+
+  <!-- WORKERS -->
+  <rect x="900" y="122" width="252" height="128" rx="14" fill="#0d1f1d" stroke="#25635b" stroke-width="1.5"/>
+  <text x="1026" y="152" text-anchor="middle" font-size="16" font-weight="800" fill="#5cc4ba">WORKER AGENTS</text>
+  <text x="1026" y="176" text-anchor="middle" font-size="12.5" fill="#cfd3dd">cheaper models · fresh context each</text>
+  <text x="1026" y="204" text-anchor="middle" font-size="11.5" fill="#8b93a7">one bounded task per worker</text>
+  <text x="1026" y="222" text-anchor="middle" font-size="11.5" fill="#8b93a7">they do the typing</text>
+
+  <!-- arrows row 1 -->
+  <line x1="298" y1="168" x2="446" y2="168" stroke="#8b93a7" stroke-width="1.6" marker-end="url(#ar)"/>
+  <text x="372" y="158" text-anchor="middle" font-size="11.5" fill="#8b93a7">your idea, your answers</text>
+  <line x1="446" y1="212" x2="298" y2="212" stroke="#8b93a7" stroke-width="1.6" marker-end="url(#ar)"/>
+  <text x="372" y="234" text-anchor="middle" font-size="11.5" fill="#8b93a7">either/or questions · demos</text>
+  <line x1="742" y1="168" x2="894" y2="168" stroke="#8b93a7" stroke-width="1.6" marker-end="url(#ar)"/>
+  <text x="818" y="158" text-anchor="middle" font-size="11.5" fill="#8b93a7">brief: one bounded task</text>
+  <line x1="894" y1="212" x2="742" y2="212" stroke="#8b93a7" stroke-width="1.6" marker-end="url(#ar)"/>
+  <text x="818" y="234" text-anchor="middle" font-size="11.5" fill="#8b93a7">result + diff</text>
+
+  <!-- ============ THE GATES band ============ -->
+  <line x1="597" y1="250" x2="597" y2="298" stroke="#f59e0b" stroke-width="1.8" marker-end="url(#arA)"/>
+  <text x="612" y="280" font-size="11.5" fill="#f59e0b">every state change</text>
+  <line x1="1026" y1="250" x2="1026" y2="298" stroke="#f59e0b" stroke-width="1.8" marker-end="url(#arA)"/>
+  <text x="1041" y="280" font-size="11.5" fill="#f59e0b">every result</text>
+
+  <rect x="48" y="302" width="1104" height="128" rx="14" fill="#1a1206" stroke="#f59e0b" stroke-width="2"/>
+  <text x="72" y="334" font-size="15" font-weight="800" fill="#f59e0b" letter-spacing="1.5">THE GATES — ENFORCED IN CODE, NOT PROMPTS</text>
+  <text x="72" y="362" font-size="12.5" fill="#e8dfc9">✓ tests actually run — the output is kept as evidence      ✓ "done" is refused without passing evidence for the current code      ✓ a 3rd identical retry is refused</text>
+  <text x="72" y="386" font-size="12.5" fill="#e8dfc9">✓ next milestone refuses to start until the human tried this one      ✓ security review required at every gate      ✓ out-of-scope edits blocked</text>
+  <text x="72" y="412" font-size="11.5" fill="#a89d82">the AI can drift — the gates cannot · fail → written diagnosis → fresh retry · everything recorded on disk, git-versioned</text>
+
+  <!-- loop back -->
+  <path d="M 48,366 C 8,366 8,186 42,168" fill="none" stroke="#8b93a7" stroke-width="1.6" stroke-dasharray="5 5" marker-end="url(#ar)"/>
+  <text x="30" y="106" font-size="11.5" fill="#8b93a7">milestone verified →</text>
+  <text x="30" y="122" font-size="11.5" fill="#8b93a7" >you try it &amp; steer</text>
+
+  <!-- ============ OUTCOMES ============ -->
+  <text x="48" y="474" font-size="13" font-weight="800" fill="#8b93a7" letter-spacing="2.5">WHAT YOU GET</text>
+
+  <rect x="48" y="490" width="258" height="110" rx="12" fill="#12141b" stroke="#2a2f3e" stroke-width="1.4"/>
+  <rect x="48" y="490" width="4" height="110" rx="2" fill="#6fce89"/>
+  <text x="68" y="518" font-size="13.5" font-weight="800" fill="#6fce89">RELIABILITY</text>
+  <text x="68" y="540" font-size="11.5" fill="#cfd3dd">nothing is "done" on the AI's word —</text>
+  <text x="68" y="557" font-size="11.5" fill="#cfd3dd">every item carries real test output,</text>
+  <text x="68" y="574" font-size="11.5" fill="#cfd3dd">tied to the exact code it proves</text>
+
+  <rect x="330" y="490" width="258" height="110" rx="12" fill="#12141b" stroke="#2a2f3e" stroke-width="1.4"/>
+  <rect x="330" y="490" width="4" height="110" rx="2" fill="#f59e0b"/>
+  <text x="350" y="518" font-size="13.5" font-weight="800" fill="#f59e0b">TOKEN OPTIMIZATION</text>
+  <text x="350" y="540" font-size="11.5" fill="#cfd3dd">the expensive model only thinks —</text>
+  <text x="350" y="557" font-size="11.5" fill="#cfd3dd">the bulk of generation runs on cheaper</text>
+  <text x="350" y="574" font-size="11.5" fill="#cfd3dd">tiers, all of it frontier-reviewed</text>
+
+  <rect x="612" y="490" width="258" height="110" rx="12" fill="#12141b" stroke="#2a2f3e" stroke-width="1.4"/>
+  <rect x="612" y="490" width="4" height="110" rx="2" fill="#a3a8ee"/>
+  <text x="632" y="518" font-size="13.5" font-weight="800" fill="#a3a8ee">EFFICIENCY</text>
+  <text x="632" y="540" font-size="11.5" fill="#cfd3dd">failures need a diagnosis before any</text>
+  <text x="632" y="557" font-size="11.5" fill="#cfd3dd">retry, and the same mistake is never</text>
+  <text x="632" y="574" font-size="11.5" fill="#cfd3dd">paid for three times</text>
+
+  <rect x="894" y="490" width="258" height="110" rx="12" fill="#12141b" stroke="#2a2f3e" stroke-width="1.4"/>
+  <rect x="894" y="490" width="4" height="110" rx="2" fill="#e8a04c"/>
+  <text x="914" y="518" font-size="13.5" font-weight="800" fill="#e8a04c">CONTROL</text>
+  <text x="914" y="540" font-size="11.5" fill="#cfd3dd">built for the non-technical founder:</text>
+  <text x="914" y="557" font-size="11.5" fill="#cfd3dd">no prompts, no model-picking — just</text>
+  <text x="914" y="574" font-size="11.5" fill="#cfd3dd">decisions, and a dashboard that's honest</text>
+</svg>
+    <figcaption>The whole system on one card: you supply intent, the CTO supplies judgment, workers
+    supply typing — and nothing counts as done until it passes the gates.</figcaption>
+  </figure>
+
   <details><summary>How it works under the hood (the one idea)</summary><div class="inner">
     <p>Forge splits the organization across two substrates. <b>Judgment lives in the model</b>: the
     main Claude session operates as CTO under an operating contract loaded at every session start —
