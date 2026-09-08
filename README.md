@@ -1,13 +1,34 @@
 # Forge — spec-first engineering orchestration for Claude Code
 
-Forge turns a Claude Code session into an engineering organization: the main
-agent (on the strongest available model) acts as CTO — it runs your spec
-methodology, converts the plan into a work graph, briefs cheaper worker
-agents, machine-verifies every result, and loops until acceptance criteria
-pass. You own WHAT and WHY; Forge owns HOW.
+Forge is a Claude Code plugin that turns one session into an engineering
+organization. The main agent (on the strongest available model) operates as
+CTO: it interviews you until your idea is a precise spec, converts the plan
+into a work graph, briefs cheaper worker agents, **machine-verifies every
+result** (it runs the tests and keeps the output — a worker saying "done"
+counts for nothing), and stops at each milestone so you can try the running
+slice and steer. You own WHAT and WHY; Forge owns HOW. You are interrupted
+for exactly three things: a product decision, a high-risk approval, and a
+milestone review.
 
-The rules that matter are enforced by code, not prompts — and every claim
-below is covered by a test in `tests/cli.test.js` (`npm test`, 36 tests):
+## Why it exists
+
+Agentic coding fails in predictable ways: work marked complete on the
+model's say-so, the same failed fix retried until the budget dies,
+"helpful" edits outside the task's scope, documentation drifting from the
+code within a week, and two sessions silently overwriting each other. The
+usual answer is better prompting. Forge's answer is that **prompts are
+advice and advice gets ignored under pressure — so every rule that matters
+is enforced in code**: a zero-dependency state CLI that refuses illegal
+transitions, and hooks that fence the session. The model supplies judgment;
+the gates supply discipline. Everything recoverable lives in plain
+git-versioned files, so the conversation is never the memory and any fresh
+session resumes exactly where things stood.
+
+## What makes it different
+
+Every claim below is a refusal in code, not an instruction in a prompt —
+and every one is covered by a test in `tests/cli.test.js` (`npm test`,
+36 tests):
 
 - **DONE requires a passing verification record for the current tree** — no record, a failed record, or evidence older than the latest edit all refuse.
 - **Checks must prove something** — `start` records each criterion check's pre-work result; if everything was green before work and nothing changed, `done` refuses (vacuous or already-satisfied criteria get flagged, not laundered).
@@ -26,11 +47,31 @@ Development discipline: **every field failure becomes a permanent test** —
 the session lock, the untitled-log refusal, and the dispatch-tie fallbacks
 all began as observed failures and stay in the suite as regressions.
 
+Beyond the gates, Forge carries the full lifecycle: a layered spec method
+(vision → domain → experience → API → logic → foundation) with mocks-as-spec
+for UI work, a brownfield mode that baselines before touching anything and
+grows a provenance-tagged spec as work happens, security folded into both
+verification and the milestone gate, observed token/dispatch telemetry and
+process metrics (never estimated), a zero-token generated dashboard with a
+visual project map, and a flight recorder + `doctor` self-check for when
+anything looks off. Start with `docs/manual.html` — the interactive
+companion — and `docs/architecture.html` for the diagrams.
+
+## Disclaimer
+
+I built Forge for myself, to run my own projects, encoding my own
+methodology and opinions about how AI-driven engineering should be
+disciplined. I'm sharing it because it works well for me, not because it's a
+product: expect opinionated defaults, a solo-developer perspective, versions
+that move fast, and no support guarantees. It has been exercised on real
+projects but is young — read the changelog, run `forge doctor`, and judge
+for yourself. Issues and ideas are welcome; my own projects come first.
+
 ## Install
 
 ```
-/plugin marketplace add <this-repo-url-or-path>
-/plugin install forge@forge-marketplace
+/plugin marketplace add https://github.com/rvmoretti/forge
+/plugin install forge@forge-marketplace --scope project
 ```
 
 Requires Node ≥ 18 (which Claude Code already requires) and git.
@@ -319,7 +360,14 @@ CTO operating contract, state CLI with enforced gates, tiered agents, METHOD
 
 ## v0 scope notes
 
-Deferred by design (see docs/TRACEABILITY.md for rationale): HTML Control
-Center (`forge status` covers observability), per-agent token telemetry,
-deep audit, formal eval suite. The original 333-section behavioral spec
-remains the design contract; the traceability map is the proof of coverage.
+Deferred by design (see docs/TRACEABILITY.md for rationale and the addendum
+mapping every post-spec mechanism to its origin): the production maintain
+loop (monitoring bands → auto-intent), continuous evals of the agent
+configuration, parallel worktree orchestration. The original 333-section
+behavioral spec remains the design contract; the traceability map is the
+proof of coverage.
+
+## License
+
+MIT — see [LICENSE](LICENSE). The spec methodology embedded in the
+`forge-method` skill is released under the same terms.
