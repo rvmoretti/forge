@@ -4,3 +4,4 @@ node_modules/
 _to_delete/
 *.tmp
 Claude outputs/
+.claude/
