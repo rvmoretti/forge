@@ -77,8 +77,9 @@ plugins/forge/
 ├── commands/              /forge:status /forge:preflight /forge:build
 │                          /forge:dashboard /forge:usage /forge:stats
 └── docs/
-    ├── manual.html        the user manual — setup + greenfield/brownfield
-    │                      walkthroughs; open in any browser, give to newcomers
+    ├── manual.html        the interactive companion — install → daily use →
+    │                      every refusal decoded; open in any browser
+    ├── manual.md          the same manual as plain markdown, for AI consumption
     ├── architecture.html  functional diagrams — who talks to whom, where the
     │                      truth lives, the work-item state machine with its
     │                      refusal edges

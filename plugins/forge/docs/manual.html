@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Forge User Journey</title>
+<title>Forge Companion</title>
 <style>
   :root{
     --ink:#1a1d27; --muted:#6b7080; --paper:#faf9f6; --card:#ffffff; --line:#e6e4de;
@@ -12,7 +12,8 @@
     --team:#0f766e; --team-bg:#e4f4f2; --team-line:#b5dedb;
     --gate:#57606f; --gate-bg:#eef0f3; --gate-line:#d5d9e0;
     --ok:#15803d; --ok-bg:#e9f6ec; --ok-line:#bfe3c8;
-    --code-bg:#f4f3ef; --warn-bg:#fdf6ec; --warn-line:#e3c98f; --warn-ink:#5a5142; --warn-lab:#a16207;
+    --bad:#b91c1c; --bad-bg:#fdecec;
+    --code-bg:#f4f3ef; --accent:#3b3f8f;
   }
   @media (prefers-color-scheme: dark){
     :root:not([data-theme="light"]){
@@ -22,7 +23,8 @@
       --team:#5cc4ba; --team-bg:#16302d; --team-line:#265a54;
       --gate:#aab2c0; --gate-bg:#242731; --gate-line:#393e4b;
       --ok:#6fce89; --ok-bg:#1a2f20; --ok-line:#2c5238;
-      --code-bg:#252730; --warn-bg:#2b2517; --warn-line:#5c4a1e; --warn-ink:#cfc4a8; --warn-lab:#d9a441;
+      --bad:#f47c7c; --bad-bg:#33201f;
+      --code-bg:#252730; --accent:#a3a8ee;
     }
   }
   :root[data-theme="dark"]{
@@ -32,375 +34,760 @@
     --team:#5cc4ba; --team-bg:#16302d; --team-line:#265a54;
     --gate:#aab2c0; --gate-bg:#242731; --gate-line:#393e4b;
     --ok:#6fce89; --ok-bg:#1a2f20; --ok-line:#2c5238;
-    --code-bg:#252730; --warn-bg:#2b2517; --warn-line:#5c4a1e; --warn-ink:#cfc4a8; --warn-lab:#d9a441;
+    --bad:#f47c7c; --bad-bg:#33201f;
+    --code-bg:#252730; --accent:#a3a8ee;
   }
   *{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-behavior:smooth;scroll-padding-top:64px}
   body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
-       background:var(--paper);color:var(--ink);line-height:1.5;padding:48px 24px 80px}
-  .wrap{max-width:1180px;margin:0 auto}
-  h1{font-size:30px;letter-spacing:-.02em;margin-bottom:6px;text-wrap:balance}
-  .sub{color:var(--muted);font-size:16px;max-width:740px}
-  .sub b{color:var(--ink)}
-  code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.9em;background:var(--code-bg);
+       background:var(--paper);color:var(--ink);line-height:1.55;padding-bottom:90px}
+  .wrap{max-width:920px;margin:0 auto;padding:0 22px}
+  h1{font-size:29px;letter-spacing:-.02em}
+  h2{font-size:21px;margin:0 0 4px;letter-spacing:-.01em;scroll-margin-top:64px}
+  h3{font-size:15.5px;margin:20px 0 6px}
+  p{margin:8px 0;max-width:76ch}
+  code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.88em;background:var(--code-bg);
        border:1px solid var(--line);border-radius:5px;padding:1px 5px}
-
-  .legend{display:flex;gap:10px;flex-wrap:wrap;margin:26px 0 8px}
-  .chip{display:inline-flex;align-items:center;gap:8px;font-size:13px;font-weight:600;
-        padding:6px 12px;border-radius:99px;border:1px solid}
+  ul,ol{margin:8px 0 8px 22px} li{margin:5px 0;max-width:74ch}
+  a{color:var(--accent)}
+  /* top nav */
+  nav{position:sticky;top:0;z-index:50;background:var(--paper);border-bottom:1px solid var(--line);
+      display:flex;gap:2px;overflow-x:auto;padding:0 12px}
+  nav a{flex:none;text-decoration:none;color:var(--muted);font-size:12.5px;font-weight:600;
+        padding:12px 10px;border-bottom:2px solid transparent;white-space:nowrap}
+  nav a:hover{color:var(--ink)} nav a.on{color:var(--accent);border-bottom-color:var(--accent)}
+  /* sections */
+  section{padding:34px 0 8px;border-bottom:1px solid var(--line)}
+  .lead{color:var(--muted);font-size:15px;max-width:76ch}
+  /* role chips */
+  .chips{display:flex;gap:8px;flex-wrap:wrap;margin:14px 0}
+  .chip{display:inline-flex;align-items:center;gap:7px;font-size:12.5px;font-weight:600;
+        padding:5px 11px;border-radius:99px;border:1px solid}
   .chip small{font-weight:400;color:var(--muted)}
   .c-you{color:var(--you);background:var(--you-bg);border-color:var(--you-line)}
   .c-cto{color:var(--cto);background:var(--cto-bg);border-color:var(--cto-line)}
   .c-team{color:var(--team);background:var(--team-bg);border-color:var(--team-line)}
   .c-gate{color:var(--gate);background:var(--gate-bg);border-color:var(--gate-line)}
-
-  .manual{margin:34px 0 8px}
-  .manual > h2{font-size:21px;margin-bottom:4px}
-  .manual > .tag{font-size:13.5px;color:var(--muted);margin-bottom:18px;max-width:760px}
-  .mgrid{display:grid;grid-template-columns:1fr 1fr;gap:22px}
-  @media(max-width:900px){.mgrid{grid-template-columns:1fr}}
-  .mbox{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:20px 22px}
-  .mbox.wide{grid-column:1 / -1}
-  .mbox h3{font-size:15.5px;margin-bottom:2px}
-  .mbox .mtag{font-size:12.5px;color:var(--muted);margin-bottom:12px}
-  .mbox ol{list-style:none;counter-reset:s;display:flex;flex-direction:column;gap:9px}
-  .mbox ol li{counter-increment:s;font-size:13.5px;position:relative;padding-left:28px;color:var(--muted)}
-  .mbox ol li strong{color:var(--ink)}
-  .mbox ol li::before{content:counter(s);position:absolute;left:0;top:1px;width:19px;height:19px;border-radius:50%;
-        background:var(--gate-bg);border:1px solid var(--gate-line);color:var(--gate);
-        font-size:11px;font-weight:800;display:flex;align-items:center;justify-content:center}
-  .mbox ul{list-style:none;display:flex;flex-direction:column;gap:8px}
-  .mbox ul li{font-size:13.5px;position:relative;padding-left:18px;color:var(--muted)}
-  .mbox ul li strong{color:var(--ink)}
-  .mbox ul li::before{content:"›";position:absolute;left:2px;color:var(--cto);font-weight:800}
-  .cmd{display:block;margin-top:5px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
-       font-size:12px;background:var(--code-bg);border:1px solid var(--line);border-radius:7px;
-       padding:6px 9px;color:var(--ink);overflow-x:auto;white-space:pre}
-  .pill-you{display:inline-block;font-size:10px;font-weight:800;letter-spacing:.05em;padding:1px 7px;border-radius:99px;
-       background:var(--you-bg);border:1px solid var(--you-line);color:var(--you);vertical-align:1px}
-  .pill-auto{display:inline-block;font-size:10px;font-weight:800;letter-spacing:.05em;padding:1px 7px;border-radius:99px;
-       background:var(--team-bg);border:1px solid var(--team-line);color:var(--team);vertical-align:1px}
-
-  .iface{margin:14px 0 40px;background:var(--card);border:1px solid var(--line);border-radius:14px;
-         padding:22px 24px;display:grid;grid-template-columns:1fr 1.4fr 1fr;gap:24px}
-  .iface h3{font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin-bottom:8px}
-  .iface p{font-size:14px}
-  .iface .big{font-size:15px;font-weight:600}
-  .interrupts{display:flex;flex-direction:column;gap:6px}
-  .interrupts span{font-size:13.5px;padding:5px 10px;border-radius:8px;background:var(--you-bg);
-                   border:1px solid var(--you-line);color:var(--you)}
-  .interrupts em{font-style:normal;font-weight:700}
-
-  .journeys{display:grid;grid-template-columns:1fr 1fr;gap:28px;align-items:start}
-  @media(max-width:900px){.journeys{grid-template-columns:1fr}.iface{grid-template-columns:1fr}}
-  .col{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:26px 24px}
-  .col > h2{font-size:19px;margin-bottom:2px}
-  .col > .tag{font-size:13px;color:var(--muted);margin-bottom:20px}
-
-  .step{position:relative;padding:0 0 18px 30px;border-left:2px solid var(--line);margin-left:9px}
-  .step:last-child{padding-bottom:0;border-left-color:transparent}
-  .dot{position:absolute;left:-10px;top:0;width:18px;height:18px;border-radius:50%;
-       border:2px solid;background:var(--card);display:flex;align-items:center;justify-content:center;
-       font-size:9px;font-weight:800}
-  .d-you{border-color:var(--you);color:var(--you)}
-  .d-cto{border-color:var(--cto);color:var(--cto)}
-  .d-team{border-color:var(--team);color:var(--team)}
-  .d-gate{border-color:var(--gate);color:var(--gate)}
-  .who{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;margin-bottom:2px}
-  .w-you{color:var(--you)} .w-cto{color:var(--cto)} .w-team{color:var(--team)} .w-gate{color:var(--gate)}
-  .step h4{font-size:15px;margin-bottom:3px}
-  .step p{font-size:13.5px;color:var(--muted)}
-  .step p strong{color:var(--ink)}
-  .say{display:block;margin-top:6px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
-       font-size:12.5px;background:var(--code-bg);border:1px solid var(--line);border-radius:8px;
-       padding:7px 10px;color:var(--ink)}
+  /* who-pills inside steps */
+  .pill{display:inline-block;font-size:10px;font-weight:800;letter-spacing:.06em;padding:1px 7px;
+        border-radius:99px;vertical-align:2px;margin-right:4px}
+  .p-you{color:var(--you);background:var(--you-bg);border:1px solid var(--you-line)}
+  .p-auto{color:var(--team);background:var(--team-bg);border:1px solid var(--team-line)}
+  /* command blocks with copy */
+  .cmd{position:relative;display:block;font-family:ui-monospace,Menlo,monospace;font-size:12.5px;
+       background:var(--code-bg);border:1px solid var(--line);border-radius:8px;
+       padding:9px 84px 9px 12px;margin:8px 0;white-space:pre-wrap;word-break:break-word;line-height:1.6}
+  .cmd button{position:absolute;top:6px;right:6px;font-size:11px;font-weight:600;color:var(--muted);
+       background:var(--card);border:1px solid var(--line);border-radius:6px;padding:3px 9px;cursor:pointer}
+  .cmd button:hover{color:var(--ink)}
+  /* say bubbles */
+  .say{display:block;background:var(--card);border:1px solid var(--line);border-left:3px solid var(--you-line);
+       border-radius:8px;padding:8px 12px;margin:8px 0;font-size:13.5px}
   .say b{color:var(--you)}
-  .loopref{margin-top:6px;font-size:12.5px;color:var(--cto);font-weight:600}
-
-  .loop{margin-top:44px;background:var(--card);border:1px solid var(--line);border-radius:16px;padding:28px 26px}
-  .loop h2{font-size:19px;margin-bottom:4px}
-  .loop .tag{font-size:13.5px;color:var(--muted);margin-bottom:24px;max-width:780px}
-  .flow{display:flex;align-items:stretch;gap:0;flex-wrap:wrap}
-  .node{flex:1;min-width:150px;border-radius:12px;border:1.5px solid;padding:13px 14px}
-  .node h5{font-size:13.5px;margin-bottom:3px}
-  .node p{font-size:12px;color:var(--muted)}
-  .node code{font-size:11px}
-  .n-cto{background:var(--cto-bg);border-color:var(--cto-line)}
-  .n-cto h5{color:var(--cto)}
-  .n-team{background:var(--team-bg);border-color:var(--team-line)}
-  .n-team h5{color:var(--team)}
-  .n-gate{background:var(--gate-bg);border-color:var(--gate-line)}
-  .n-gate h5{color:var(--gate)}
-  .n-ok{background:var(--ok-bg);border-color:var(--ok-line)}
-  .n-ok h5{color:var(--ok)}
-  .arrow{display:flex;align-items:center;justify-content:center;width:34px;color:var(--muted);font-size:18px;flex:none}
-  .retry{margin-top:18px;display:flex;gap:14px;align-items:flex-start;background:var(--warn-bg);
-         border:1px dashed var(--warn-line);border-radius:12px;padding:14px 16px}
-  .retry .rlab{font-size:11px;font-weight:800;letter-spacing:.07em;color:var(--warn-lab);text-transform:uppercase;flex:none;padding-top:2px}
-  .retry p{font-size:13px;color:var(--warn-ink)}
-
-  .foot{margin-top:40px;display:grid;grid-template-columns:1fr 1fr;gap:28px}
-  @media(max-width:900px){.foot{grid-template-columns:1fr}}
-  .foot .box{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:20px 22px}
-  .foot h3{font-size:15px;margin-bottom:10px}
-  .foot ul{list-style:none}
-  .foot li{font-size:13.5px;padding:4px 0 4px 22px;position:relative;color:var(--muted)}
-  .no li::before{content:"✕";position:absolute;left:0;color:#c25050;font-weight:700}
-  .yes li::before{content:"✓";position:absolute;left:0;color:var(--ok);font-weight:700}
-  .note{margin-top:26px;font-size:13px;color:var(--muted);max-width:880px}
-  .v0{display:inline-block;font-size:10.5px;font-weight:800;letter-spacing:.06em;padding:2px 7px;border-radius:6px;
-      background:var(--gate-bg);border:1px solid var(--gate-line);color:var(--gate);vertical-align:2px}
+  .say.forge b{color:var(--cto)} .say.forge{border-left-color:var(--cto-line)}
+  /* details = the hidden depth */
+  details{background:var(--card);border:1px solid var(--line);border-radius:10px;
+          margin:10px 0;overflow:hidden}
+  details>summary{cursor:pointer;padding:10px 14px;font-size:13.5px;font-weight:600;color:var(--accent);
+          list-style:none;user-select:none}
+  details>summary::before{content:"▸ ";font-size:11px}
+  details[open]>summary::before{content:"▾ "}
+  details>summary:hover{background:var(--code-bg)}
+  details .inner{padding:2px 16px 12px;border-top:1px solid var(--line);font-size:13.5px}
+  details .inner p, details .inner li{max-width:76ch}
+  /* callouts */
+  .note{font-size:13.5px;background:var(--card);border:1px solid var(--line);border-left:3px solid var(--ok-line);
+        border-radius:8px;padding:9px 13px;margin:10px 0}
+  .warn{font-size:13.5px;background:var(--you-bg);border:1px solid var(--you-line);
+        border-radius:8px;padding:9px 13px;margin:10px 0}
+  .warn b:first-child{color:var(--you)}
+  /* step cards */
+  .step{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:13px 16px;margin:12px 0}
+  .step h4{font-size:14.5px;margin-bottom:4px}
+  .step .n{display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;
+        border-radius:99px;background:var(--cto-bg);color:var(--cto);border:1px solid var(--cto-line);
+        font-size:12px;font-weight:800;margin-right:8px;vertical-align:-4px}
+  /* tables */
+  .tblwrap{overflow-x:auto;background:var(--card);border:1px solid var(--line);border-radius:12px;margin:10px 0}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th{font-size:10.5px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);text-align:left;
+     padding:8px 12px;border-bottom:1px solid var(--line)}
+  td{padding:8px 12px;border-bottom:1px solid var(--code-bg);vertical-align:top}
+  tr:last-child td{border-bottom:none}
+  /* interruption cards */
+  .i3{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px;margin:12px 0}
+  .i3>div{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px;font-size:13.5px}
+  .i3 b.t{display:block;font-size:14px;margin-bottom:4px;color:var(--cto)}
+  /* figures */
+  figure{margin:14px 0;background:var(--card);border:1px solid var(--line);border-radius:12px;
+         padding:16px 12px 8px;overflow-x:auto}
+  figure svg{max-width:100%;height:auto;display:block;margin:0 auto;color:var(--ink)}
+  figcaption{font-size:12.5px;color:var(--muted);padding:8px 6px 4px;max-width:80ch}
+  .lbl{font-size:12px;fill:currentColor}.lbl-m{font-size:11px;fill:var(--muted)}
+  .lbl-b{font-size:13px;font-weight:600;fill:currentColor}
+  .edge{stroke:currentColor;stroke-width:1.3;fill:none}
+  .b-you{fill:var(--you-bg);stroke:var(--you-line)} .t-you{fill:var(--you)}
+  .b-cto{fill:var(--cto-bg);stroke:var(--cto-line)} .t-cto{fill:var(--cto)}
+  .b-team{fill:var(--team-bg);stroke:var(--team-line)} .t-team{fill:var(--team)}
+  .b-gate{fill:var(--gate-bg);stroke:var(--gate-line)} .t-gate{fill:var(--gate)}
+  .b-ok{fill:var(--ok-bg);stroke:var(--ok-line)} .t-ok{fill:var(--ok)}
+  .b-card{fill:var(--card);stroke:var(--line)}
+  /* refusal table styling */
+  .ref-msg{font-family:ui-monospace,Menlo,monospace;font-size:11.5px;color:var(--bad)}
+  /* search box */
+  .search{width:100%;max-width:420px;font-size:13.5px;padding:8px 12px;border:1px solid var(--line);
+          border-radius:8px;background:var(--card);color:var(--ink);margin:8px 0}
+  .hero{padding:38px 0 8px}
+  .kbd-note{font-size:12px;color:var(--muted)}
 </style>
 </head>
 <body>
 
+<nav id="nav">
+  <a href="#what">What is Forge</a>
+  <a href="#install">Install</a>
+  <a href="#greenfield">New project</a>
+  <a href="#brownfield">Existing project</a>
+  <a href="#daily">Daily driving</a>
+  <a href="#progress">Watching progress</a>
+  <a href="#safety">Safety nets</a>
+  <a href="#trouble">When it says no</a>
+  <a href="#reference">Reference</a>
+</nav>
+
 <div class="wrap">
 
-  <h1>Forge — how you use it</h1>
-  <p class="sub">You describe <b>what</b> should exist, at product level. Forge — the main agent operating as your CTO — runs your METHOD to spec it, turns the plan into an enforced work graph, briefs cheaper worker agents, machine-verifies every result, and loops until acceptance criteria pass. The gates are code (a state CLI plus hooks), not promises: <b>DONE requires a passing verification record, no item starts without criteria, a third identical retry is refused, and a session can't end with silently dangling work.</b> All state lives on disk — close the laptop anytime; any new session resumes from <code>forge status</code>.</p>
+<div class="hero">
+  <h1>⚙️ Forge Companion</h1>
+  <p class="lead">Forge turns one Claude Code session into an engineering organization that builds
+  your product while you keep every product decision. This is the day-to-day companion: what to do,
+  what to expect, and what every message means. The deeper "why and how it works" lives in the
+  collapsible panels — open them when curious, skip them when working.</p>
+  <div class="chips">
+    <span class="chip c-you">YOU <small>product owner — decides WHAT &amp; WHY</small></span>
+    <span class="chip c-cto">FORGE <small>the CTO — decides HOW</small></span>
+    <span class="chip c-team">TEAM <small>worker agents on cheaper models</small></span>
+    <span class="chip c-gate">GATE <small>enforced in code — cannot be skipped</small></span>
+  </div>
+</div>
 
-  <div class="legend">
-    <span class="chip c-you">YOU <small>product owner — decides WHAT</small></span>
-    <span class="chip c-cto">FORGE <small>CTO / main agent — decides HOW</small></span>
-    <span class="chip c-team">TEAM <small>worker agents: explorer (haiku) · implementer, tester (sonnet) · reviewer, architect (opus)</small></span>
-    <span class="chip c-gate">GATE <small>enforced by the forge CLI + hooks — can't be skipped</small></span>
+<!-- ======================================================= WHAT -->
+<section id="what">
+  <h2>What is Forge?</h2>
+  <p>You describe a product in plain language. Forge interviews you until the idea is precise,
+  writes the specification, breaks it into work items, sends each item to a cheaper worker agent,
+  <b>machine-verifies</b> every result (it runs the tests itself — a worker saying "done" counts
+  for nothing), and stops at each milestone so you can try the running product and steer. You are
+  interrupted for exactly three things; everything else happens without you.</p>
+
+  <div class="i3">
+    <div><b class="t">1 · A product decision</b>The spec has a hole ("should deleting a group keep
+    its expenses?"). You get an either/or with a recommendation. Your answer is recorded forever.</div>
+    <div><b class="t">2 · A high-risk approval</b>Something destructive or sensitive needs your
+    explicit yes before it runs.</div>
+    <div><b class="t">3 · A milestone review</b>A working slice is ready. You try it in your
+    browser, say what's right and wrong, and approve the gate — nothing later starts until you do.</div>
   </div>
 
-  <div class="manual">
-    <h2>📖 The manual</h2>
-    <p class="tag">Setup, daily use, and troubleshooting. The full project walkthroughs are the two journeys below — steps tagged <span class="pill-you">YOU</span> are yours; steps tagged <span class="pill-auto">AUTO</span> happen on their own. Everything works in plain language; slash commands are shortcuts, never requirements. Prerequisites: Claude Code installed and logged in, git. Node comes with Claude Code.</p>
+  <details><summary>How it works under the hood (the one idea)</summary><div class="inner">
+    <p>Forge splits the organization across two substrates. <b>Judgment lives in the model</b>: the
+    main Claude session operates as CTO under an operating contract loaded at every session start —
+    it runs the spec method, writes worker briefs, reviews results, decides how. <b>Enforcement
+    lives in code</b>: a small CLI owns every state change and <i>refuses</i> the moves that
+    historically go wrong — completing work without passing evidence, retrying the same failure a
+    third time, starting the next milestone before you approved the last, two sessions editing the
+    same project at once. The model can drift; the gates cannot.</p>
+    <p>Everything recoverable lives in plain files under <code>forge/</code> in your project,
+    versioned in git. The conversation is never the memory — close every window, restart your
+    machine, and the next session picks up exactly where things stood.</p>
+    <figure>
+      <svg viewBox="0 0 900 300" role="img" aria-label="You exchange intent and verdicts with the Forge CTO; the CTO briefs workers and receives reports; every state change passes through the forge CLI into files on disk.">
+        <defs><marker id="a1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+        <rect x="30" y="40" width="170" height="74" rx="10" class="b-you" stroke-width="1.4"/>
+        <text x="115" y="70" text-anchor="middle" class="lbl-b t-you">You</text>
+        <text x="115" y="90" text-anchor="middle" class="lbl-m">intent · decisions · verdicts</text>
+        <rect x="360" y="30" width="200" height="94" rx="10" class="b-cto" stroke-width="1.4"/>
+        <text x="460" y="58" text-anchor="middle" class="lbl-b t-cto">Forge (CTO)</text>
+        <text x="460" y="78" text-anchor="middle" class="lbl-m">spec · briefs · review</text>
+        <text x="460" y="94" text-anchor="middle" class="lbl-m">strongest model</text>
+        <rect x="700" y="30" width="170" height="94" rx="10" class="b-team" stroke-width="1.4"/>
+        <text x="785" y="58" text-anchor="middle" class="lbl-b t-team">Workers</text>
+        <text x="785" y="78" text-anchor="middle" class="lbl-m">cheaper models</text>
+        <text x="785" y="94" text-anchor="middle" class="lbl-m">one bounded task each</text>
+        <line x1="200" y1="66" x2="356" y2="66" class="edge" marker-end="url(#a1)"/>
+        <line x1="356" y1="92" x2="200" y2="92" class="edge" marker-end="url(#a1)"/>
+        <text x="278" y="58" text-anchor="middle" class="lbl-m">what to build</text>
+        <text x="278" y="108" text-anchor="middle" class="lbl-m">spec holes · demos</text>
+        <line x1="560" y1="66" x2="696" y2="66" class="edge" marker-end="url(#a1)"/>
+        <line x1="696" y1="92" x2="560" y2="92" class="edge" marker-end="url(#a1)"/>
+        <text x="628" y="58" text-anchor="middle" class="lbl-m">brief</text>
+        <text x="628" y="108" text-anchor="middle" class="lbl-m">result + diff</text>
+        <line x1="460" y1="124" x2="460" y2="182" class="edge" marker-end="url(#a1)"/>
+        <text x="474" y="158" class="lbl-m">every state change</text>
+        <rect x="330" y="186" width="260" height="44" rx="10" class="b-ok" stroke-width="1.4"/>
+        <text x="460" y="213" text-anchor="middle" class="lbl-b t-ok">forge CLI — the gatekeeper</text>
+        <line x1="460" y1="230" x2="460" y2="258" class="edge" marker-end="url(#a1)"/>
+        <rect x="240" y="262" width="440" height="30" rx="8" class="b-card"/>
+        <text x="460" y="282" text-anchor="middle" class="lbl-m">forge/ — plain files, git-versioned: the only memory</text>
+      </svg>
+      <figcaption>The shape of every Forge project. Money-saving detail: the expensive model only
+      thinks (briefs, reviews, decisions); the typing happens on cheaper models.</figcaption>
+    </figure>
+  </div></details>
 
-    <div class="mgrid">
+  <details><summary>What you stop doing, what you keep owning</summary><div class="inner">
+    <p><b>You stop:</b> writing implementation prompts, picking models per task, checking whether
+    the AI really ran the tests (the CLI ran them and kept the output), re-explaining the project
+    every session, and babysitting retries — a third identical attempt is refused by code.</p>
+    <p><b>You keep:</b> what the product is and who it serves, every user-visible behavior decision
+    (recorded with your name in <code>forge/decisions.md</code>), approvals on risky operations,
+    and milestone judgment — "this is right, continue" or "change course".</p>
+  </div></details>
+</section>
 
-      <div class="mbox wide">
-        <h3>0 · One-time setup <span style="font-weight:400;color:var(--muted);font-size:13px">(once per machine, ~5 minutes)</span></h3>
-        <p class="mtag">The plugin activates in every Claude Code session after this — nothing to repeat per project.</p>
-        <ol>
-          <li><strong>Get the plugin repo.</strong> <span class="pill-you">YOU</span> You received the <code>forge-plugin</code> folder (or zip). Push it to a git repo your team can reach — or use the shared URL if someone already did.</li>
-          <li><strong>Install it in Claude Code.</strong> <span class="pill-you">YOU</span> In any Claude Code session:
-            <span class="cmd">/plugin marketplace add &lt;repo-url&gt;
-/plugin install forge@forge-marketplace</span></li>
-          <li><strong>Verify.</strong> <span class="pill-you">YOU</span> Start a new session (<code>claude</code>). You should see the Forge operating contract load at session start, and <code>/forge:status</code> should respond. If hooks seem silent, check <code>/hooks</code> in Claude Code.</li>
-          <li><strong>Recommended extras.</strong> <span class="pill-you">YOU</span> Install <b>Graphify</b> (deterministic code graph — makes orientation and scoping near-free):
-            <span class="cmd">uv tool install graphifyy   # or: pipx install graphifyy
+<!-- ======================================================= INSTALL -->
+<section id="install">
+  <h2>Install &amp; one-time setup</h2>
+  <p class="lead">Once per machine, ~5 minutes. After this, Forge is available to any project you
+  choose to enable it in.</p>
+
+  <div class="step"><h4><span class="n">1</span>Prerequisites</h4>
+    <p>Claude Code installed and logged in, and git. That's all — Node comes with Claude Code.</p>
+    <details><summary>Never used a terminal? Read this first</summary><div class="inner">
+      <p>The terminal is a text window where you type commands. On macOS open <b>Terminal</b>
+      (⌘-space, type "terminal"). Commands in this manual appear in boxes with a <b>Copy</b>
+      button — click it, paste into the terminal, press Enter. <code>cd some/folder</code> means
+      "go into that folder"; everything else is one command per line. You cannot break anything by
+      typing a command wrong — you'll just get an error message you can paste back to Claude.</p>
+    </div></details>
+  </div>
+
+  <div class="step"><h4><span class="n">2</span>Add the Forge marketplace and install the plugin</h4>
+    <p>Open a Claude Code session anywhere (<code>claude</code> in a terminal) and run:</p>
+    <span class="cmd">/plugin marketplace add &lt;your-forge-repo-url&gt;
+/plugin install forge@forge-marketplace --scope project</span>
+    <p><b>Use <code>--scope project</code></b> and run it inside each project that should use
+    Forge. This pins the Forge version per project, so upgrading one project never changes another
+    mid-flight.</p>
+    <details><summary>Why per-project scope matters</summary><div class="inner">
+      <p>A user-scope install is one shared version for everything: update it for a new project and
+      every in-flight project silently jumps versions too — gate behavior can change mid-milestone.
+      Project scope gives each repo its own record. Multiple Forge versions coexist peacefully in
+      the plugin cache; each project loads its own.</p>
+    </div></details>
+  </div>
+
+  <div class="step"><h4><span class="n">3</span>Verify the install</h4>
+    <p>Start a fresh session in the project (<code>claude</code>). You should see the Forge
+    operating contract load at session start. Then run the self-check:</p>
+    <span class="cmd">/forge:status</span>
+    <p>and in any terminal (no AI, no tokens):</p>
+    <span class="cmd">node ~/.claude/plugins/cache/forge-marketplace/forge/&lt;version&gt;/bin/forge.js doctor</span>
+    <p><code>doctor</code> prints PASS/WARN/FAIL for the whole install: Node and git, which Forge
+    version is actually running, whether the plugin cache is clean, whether hooks parse, and the
+    project's state health. <b>"Install and state look sane"</b> means go.</p>
+  </div>
+
+  <div class="step"><h4><span class="n">4</span>Recommended extras (optional)</h4>
+    <p><b>Graphify</b> — a deterministic code map that makes orientation and scoping nearly free:</p>
+    <span class="cmd">uv tool install graphifyy
 graphify install</span>
-            For web projects, keep <b>Playwright</b> as a dev dependency so E2E criteria can be machine-verified. Skipping either is fine — preflight detects what's missing and asks you once (install, or proceed without); your answer is remembered per project.</li>
-        </ol>
-      </div>
-
-      <div class="mbox">
-        <h3>C · Every day after</h3>
-        <p class="mtag">The disk is the memory; sessions are disposable.</p>
-        <ul>
-          <li><strong>Resume:</strong> open <code>claude</code> in the project and say <em>"continue"</em>. The session-start hook loads the operating contract plus a live state digest — no re-explaining, ever.</li>
-          <li><strong>Check:</strong> ask <em>"where are we?"</em> — or <code>/forge:status</code>. Phase, work counts, in-progress, blocked, latest discovery.</li>
-          <li><strong>Pause:</strong> just say stop. The stop gate makes Forge settle every open item first: done, blocked-with-reason, or failed-with-diagnosis. Nothing dangles silently.</li>
-          <li><strong>New machine or teammate:</strong> clone the project repo (state travels in git), do the one-time plugin install, open <code>claude</code>. Same picture, same rules.</li>
-        </ul>
-      </div>
-
-      <div class="mbox">
-        <h3>D · When something feels off</h3>
-        <p class="mtag">The usual fixes, in order of likelihood.</p>
-        <ul>
-          <li><strong>First move, always:</strong> <code>forge doctor</code> (install/state self-check: versions, cache, hooks, locks, orphaned work) and <code>forge trace --refusals</code> (the flight recorder — every CLI call and hook decision, version-stamped). Diagnose before working around anything.</li>
-          <li><strong>A skill didn't trigger?</strong> Name it: <em>"run the forge method"</em> / <em>"use forge-brownfield"</em>.</li>
-          <li><strong>Hooks not firing?</strong> Run <code>/hooks</code> to inspect; after a Claude Code update, reinstall or update the plugin. Hook config formats occasionally shift between releases.</li>
-          <li><strong>Session got bounced at the end?</strong> That's the stop gate working — items were still IN_PROGRESS. Let Forge settle them; it happens at most once per stop.</li>
-          <li><strong>Told "state files are managed by the forge CLI"?</strong> Also by design — work state changes only through <code>forge task …</code> commands, never hand-edits.</li>
-          <li><strong>Forge's behavior needs tuning?</strong> Edit <code>core/OPERATING.md</code> in the plugin — it's deliberately ~130 lines so process changes land in one reviewable place. The full design rationale lives in <code>docs/TRACEABILITY.md</code>.</li>
-        </ul>
-      </div>
-
-      <div class="mbox wide">
-        <h3>E · The safety nets <span style="font-weight:400;color:var(--muted);font-size:13px">(all enforced in code — added v0.5–v0.10)</span></h3>
-        <ul>
-          <li><strong>One orchestrator per project.</strong> A session lock (heartbeat on every write) blocks a second session's edits while the first is active — no more edit wars. Dead session? <code>forge session takeover --force</code>. Status: <code>forge session status</code>.</li>
-          <li><strong>Scope is enforced.</strong> While an item is in progress, edits to its forbidden paths are refused by the hook; <code>options.protect</code> freezes paths always (generated code, migrations).</li>
-          <li><strong>Security is part of the gate.</strong> Set <code>verify.security</code> (e.g. gitleaks) and it runs inside every verification; <code>milestone approve</code> refuses until a fresh-context security review of the slice is recorded (<code>forge milestone security &lt;M&gt; --note</code>) — skips are explicit and logged.</li>
-          <li><strong>The spec stays true.</strong> Every completed item that touched product behavior updates the spec layers in the same close, on every project — the spec is the source your docs generate from.</li>
-          <li><strong>Screens are designed, not defaulted.</strong> Mocks live in <code>spec/mocks/</code> as approved intent; screen items carry a mock-fidelity criterion, screenshots attach to evidence (<code>task verify --artifact</code>), and a fresh-context UX review judges against the design-ux checklist.</li>
-        </ul>
-      </div>
-
-    </div>
+    <p><b>Playwright</b> — for web projects, keep it as a dev dependency so end-to-end checks and
+    screen screenshots can be machine-verified. Skipping either is fine: preflight detects what's
+    missing, asks you once, and remembers your answer per project.</p>
   </div>
 
-  <div class="iface">
-    <div>
-      <h3>Your input</h3>
-      <p class="big">Natural language.</p>
-      <p>No prompts, no model picking, no agent wrangling. You talk product. Slash commands (<code>/forge:build</code>, <code>/forge:status</code>, <code>/forge:preflight</code>, <code>/forge:dashboard</code>, <code>/forge:usage</code>, <code>/forge:stats</code>) are shortcuts — plain words always work too.</p>
-    </div>
-    <div>
-      <h3>The only three reasons you get interrupted</h3>
-      <div class="interrupts">
-        <span><em>1 · Product decision</em> — a spec hole was found; answered as an either/or, recorded to the decisions log</span>
-        <span><em>2 · Approval gate</em> — a high-risk operation needs your sign-off</span>
-        <span><em>3 · Milestone review</em> — something works end-to-end; try it, redirect</span>
-      </div>
-    </div>
-    <div>
-      <h3>Your output</h3>
-      <p class="big">Ask <em>"where are we?"</em> — or <code>/forge:status</code></p>
-      <p>Phase, preflight, work graph counts, in-progress and blocked items, latest discovery. For the visual picture open <code>forge/dashboard.html</code> in a browser — progress, the work graph, and the <b>project map</b> (one box per component: route, progress, mock/screenshot) — regenerated on every state change, zero tokens, just reload. <code>/forge:usage</code> = observed token/dispatch telemetry; <code>/forge:stats</code> = process health (first-pass rate, retries, elapsed times).</p>
-    </div>
-  </div>
+  <details><summary>Updating Forge later (and why you do it between projects, not during)</summary><div class="inner">
+    <ol>
+      <li>Pull/receive the new plugin version in the marketplace repo, then in a session:
+        <span class="cmd">/plugin marketplace update forge-marketplace</span></li>
+      <li>Update the plugin when the UI offers it — or the reliable route when the cache is
+        stubborn: uninstall, clear cache, reinstall:
+        <span class="cmd">claude plugin uninstall forge
+rm -rf ~/.claude/plugins/cache/forge-marketplace
+claude plugin install forge@forge-marketplace --scope project</span></li>
+      <li>Run <code>doctor</code> — it flags a cache that's behind the repo and multiple cached
+        versions.</li>
+    </ol>
+    <p>Update at project boundaries (a finished project, or at worst a milestone gate). Never
+    mid-milestone: if behavior then changes, you can't tell whether the new version or the new work
+    caused it.</p>
+  </div></details>
+</section>
 
-  <div class="journeys">
+<!-- ======================================================= GREENFIELD -->
+<section id="greenfield">
+  <h2>🌱 Starting a new project</h2>
+  <p class="lead">From an idea in your head to a verified product. You talk; Forge structures.</p>
 
-    <!-- GREENFIELD -->
-    <div class="col">
-      <h2>🌱 Greenfield — new project</h2>
-      <p class="tag">From idea to verified product</p>
-
-      <div class="step"><span class="dot d-you">1</span>
-        <div class="who w-you">You</div>
-        <h4>Create the project, open Claude Code, say what you want</h4>
-        <span class="cmd">mkdir my-app && cd my-app && git init
+  <div class="step"><h4><span class="n">1</span><span class="pill p-you">YOU</span>Create the project and say what you want</h4>
+    <span class="cmd">mkdir my-app && cd my-app && git init
 claude</span>
-        <span class="say"><b>you:</b> "New project — an app where families plan and split holiday budgets."</span>
-        <p style="margin-top:6px">The session-start hook has already loaded the operating contract. The spec skill triggers on its own — if it doesn't, say <em>"run the forge method"</em> — and <code>forge init</code> creates the project state. <span class="pill-auto">AUTO</span></p>
-      </div>
-
-      <div class="step"><span class="dot d-cto">2</span>
-        <div class="who w-cto">Forge</div>
-        <h4>Runs the METHOD interview, layer by layer</h4>
-        <p>Vision → Domain → Experience → API → Logic → Foundation — METHOD.md verbatim, shipped inside the plugin. You answer either/or questions one at a time and approve each layer's gate; you never write spec documents yourself. Confirmed decisions land in <code>decisions.md</code>; nothing reaches a deliverable file before you confirm it. <span class="pill-you">YOU</span></p>
-      </div>
-
-      <div class="step"><span class="dot d-gate">3</span>
-        <div class="who w-gate">Gate</div>
-        <h4>Spec gates → the work graph is born</h4>
-        <p><span class="pill-auto">AUTO</span> At METHOD Step 7, alongside <code>CLAUDE.md</code> and <code>PLAN.md</code>, Forge sets the verify commands (<code>forge config set verify.test …</code>), flips <code>phase build</code>, and converts PLAN.md into work items — <strong>each with acceptance criteria carrying a machine check</strong>. For products with a UI it also offers the drawn-frontend path: a mock per key screen (Claude Design, Figma export, or a photographed sketch) approved by you into <code>spec/mocks/</code> — screens with mocks get a mock-fidelity criterion. Then preflight runs (yours to trigger anytime: say <em>"run preflight"</em> or <code>/forge:preflight</code>); if Graphify isn't installed it asks you once — install, or proceed without — and remembers your answer.</p>
-      </div>
-
-      <div class="step"><span class="dot d-you">4</span>
-        <div class="who w-you">You</div>
-        <h4>Say the word</h4>
-        <span class="say"><b>you:</b> "Build it."  <span style="color:var(--muted)">(or /forge:build)</span></span>
-      </div>
-
-      <div class="step"><span class="dot d-team">5</span>
-        <div class="who w-team">Team + Gates</div>
-        <h4>The build loop runs — mostly without you</h4>
-        <p>Brief → worker → <code>forge task verify</code> → review → done or fail-with-diagnosis. Item after item, in dependency order. Check progress anytime — ask <em>"where are we?"</em> or <code>/forge:status</code> — and walk away whenever you like: state lives on disk.</p>
-        <p class="loopref">↳ see "The build loop" below</p>
-      </div>
-
-      <div class="step"><span class="dot d-you">6</span>
-        <div class="who w-you">You</div>
-        <h4>Milestone review</h4>
-        <span class="say"><b>forge:</b> "Auth + family accounts verified end-to-end. Security pass recorded — no findings. Try it."<br><b>you:</b> "Invites should also work by link, not just email."</span>
-        <p style="margin-top:6px">Your feedback becomes a recorded decision → spec updated → work graph replanned. The loop continues.</p>
-      </div>
-
-      <div class="step"><span class="dot d-gate">7</span>
-        <div class="who w-gate">Gate</div>
-        <h4>Done means proven</h4>
-        <p>Every DONE item has a verification record with real command output attached. Nothing was completed by claim — the CLI refuses <code>task done</code> without passing evidence.</p>
-      </div>
-    </div>
-
-    <!-- BROWNFIELD -->
-    <div class="col">
-      <h2>🏗️ Brownfield — existing codebase <span class="v0">v0: serviceable</span></h2>
-      <p class="tag">From "add this feature" to a baseline-guarded, verified change</p>
-
-      <div class="step"><span class="dot d-you">1</span>
-        <div class="who w-you">You</div>
-        <h4>Open the repo, ask for the change</h4>
-        <span class="cmd">cd existing-repo && claude</span>
-        <span class="say"><b>you:</b> "Add CSV export to the reports page."</span>
-        <p style="margin-top:6px">The brownfield skill triggers on its own — if it doesn't, say <em>"use forge-brownfield"</em> — and <code>forge init</code> creates state if it's the first time. <span class="pill-auto">AUTO</span></p>
-      </div>
-
-      <div class="step"><span class="dot d-team">2</span>
-        <div class="who w-team">Team</div>
-        <h4>Orientation — Graphify first, Explorer second</h4>
-        <p>Structural questions (entry points, dependency closure of what will change) go to the code graph for ~zero tokens; a haiku Explorer reads only what the graph can't answer, reporting OBSERVED vs INFERRED vs UNKNOWN. No full-repo archaeology for a bounded change.</p>
-      </div>
-
-      <div class="step"><span class="dot d-gate">3</span>
-        <div class="who w-gate">Gate</div>
-        <h4>Verify commands confirmed, baseline captured — before any change</h4>
-        <p>Forge finds the project's real test/lint/typecheck commands (package.json, CI config) and asks you to confirm them <span class="pill-you">YOU</span> — they become the verification gate. Then <span class="pill-auto">AUTO</span> <code>forge baseline capture</code> runs them and records the result: RED items are logged as <strong>pre-existing</strong> — new work must not worsen them and isn't obliged to fix them (say if you want follow-up items). A project with no runnable checks gets told so plainly: the first work items build the harness.</p>
-      </div>
-
-      <div class="step"><span class="dot d-cto">4</span>
-        <div class="who w-cto">Forge</div>
-        <h4>Asks you only what the code can't answer</h4>
-        <span class="say"><b>forge:</b> "Export all rows or respect current filters? All roles or admins only?"</span>
-        <p style="margin-top:6px">A scoped mini-spec: acceptance criteria with machine checks, work items whose allowed-files scope is derived from the dependency closure.</p>
-      </div>
-
-      <div class="step"><span class="dot d-team">5</span>
-        <div class="who w-team">Team + Gates</div>
-        <h4>The same build loop — plus the baseline guard</h4>
-        <p>Verification includes <code>forge baseline check</code>: a regression against the baseline fails the item even if its own criteria pass.</p>
-        <p class="loopref">↳ see "The build loop" below</p>
-      </div>
-
-      <div class="step"><span class="dot d-cto">6</span>
-        <div class="who w-cto">Forge</div>
-        <h4>Surprises become discoveries, not detours</h4>
-        <p>"Reports has an undocumented Stripe dependency" → <code>forge discovery add</code> with evidence and impact → work graph updated, or escalated to you if it touches what users experience.</p>
-      </div>
-
-      <div class="step"><span class="dot d-you">7</span>
-        <div class="who w-you">You</div>
-        <h4>Receive the finished change</h4>
-        <span class="say"><b>forge:</b> "Done. 6 files, 9 new tests passing, baseline unchanged, docs updated. Export respects filters, admins only — as you decided."</span>
-      </div>
-    </div>
+    <span class="say"><b>you:</b> "New project — an app where families plan and split holiday budgets."</span>
+    <p>The spec skill triggers on its own; if it doesn't, say <i>"run the forge method"</i>.</p>
   </div>
 
-  <!-- THE LOOP -->
-  <div class="loop">
-    <h2>⚙️ The build loop — what runs while you're away</h2>
-    <p class="tag">Per work item. The gray gates are the forge CLI — the orchestrator couldn't skip them if it drifted: state files are hook-protected, and every transition below is checked in code. Top-tier tokens go to thinking (briefs, reviews, decisions); the team's cheap tokens go to typing.</p>
-    <div class="flow">
-      <div class="node n-cto"><h5>1 · Start + brief</h5><p><code>forge task start</code> (refused without criteria or with unmet deps) → <code>forge brief</code> skeleton + spec excerpts, decisions, domain pack, Graphify-derived scope.</p></div>
-      <div class="arrow">→</div>
-      <div class="node n-team"><h5>2 · Worker executes</h5><p>Cheap model, fresh context, bounded task. Stops and reports on any spec hole or scope conflict — never invents, never expands scope.</p></div>
-      <div class="arrow">→</div>
-      <div class="node n-gate"><h5>3 · Machine verification</h5><p><code>forge task verify</code> runs project checks (incl. <code>verify.security</code>) + criterion checks + the baseline guard, records real output as evidence — screenshots attach via <code>--artifact</code>. The worker's "it works" counts for nothing.</p></div>
-      <div class="arrow">→</div>
-      <div class="node n-cto"><h5>4 · Review evidence</h5><p>Diff + test output + report. High-risk diffs go to a <b>fresh-context</b> opus reviewer (the author's own read is biased); screens get the UX review against the approved mock. Deep code reads only where evidence is ambiguous.</p></div>
-      <div class="arrow">→</div>
-      <div class="node n-ok"><h5>5 · Done — proven</h5><p><code>forge task done</code> — refused without a passing verification record for the current tree. Spec + docs synced in the same close, next item picked up.</p></div>
-    </div>
-    <div class="retry">
-      <span class="rlab">On failure</span>
-      <p><b><code>forge task fail --note "diagnosis"</code></b> — the diagnosis is required thinking, and it rides into the next brief. <b>Retry</b> = fresh worker, never the failed context. <b>After 2 failures</b> the CLI refuses to start again without <code>--escalate stronger-model | decompose | self</code>. <b>Spec hole found:</b> the loop stops guessing and brings you an either/or. And if a session tries to end with work still IN_PROGRESS, the stop gate bounces it once: done, blocked-with-reason, or failed-with-diagnosis — nothing dangles silently.</p>
-    </div>
+  <div class="step"><h4><span class="n">2</span><span class="pill p-you">YOU</span>Answer the interview, one question at a time</h4>
+    <p>Forge walks six layers — Vision → Domain → Experience → API → Logic → Foundation — asking
+    either/or questions with a recommendation each time. You never write spec documents; you answer
+    and approve each layer's gate. Every confirmed choice lands in <code>forge/decisions.md</code>
+    with your authority.</p>
+    <details><summary>Why an interview instead of "just build it"?</summary><div class="inner">
+      <p>Ambiguity is where AI projects go wrong: the model fills gaps with plausible inventions.
+      The layered interview drains the ambiguity <i>before</i> code exists, when changing course
+      costs a sentence instead of a rewrite. The output is a spec folder that stays the single
+      source of intent for the whole project — and later, the source your user documentation is
+      generated from.</p>
+    </div></details>
   </div>
 
-  <div class="foot">
-    <div class="box no">
-      <h3>What you stop doing</h3>
-      <ul>
-        <li>Writing and tuning implementation prompts — briefs are Forge's job now</li>
-        <li>Choosing agents and models per task — tiers live in the agent definitions</li>
-        <li>Checking whether the agent really ran the tests — the CLI ran them and kept the output</li>
-        <li>Re-explaining the project after every session — state loads at session start</li>
-        <li>Babysitting retries that repeat the same mistake — the third one is refused</li>
-      </ul>
-    </div>
-    <div class="box yes">
-      <h3>What you keep owning</h3>
-      <ul>
-        <li>What the product is and who it serves — the spec stays the source of intent</li>
-        <li>Every user-visible behavior decision, recorded with your authority in decisions.md</li>
-        <li>Approvals on destructive / high-risk operations</li>
-        <li>Milestone judgment: "this is right — continue" or "change course"</li>
-        <li>The METHOD — it runs verbatim inside the plugin, unmodified</li>
-      </ul>
-    </div>
+  <div class="step"><h4><span class="n">3</span><span class="pill p-you">YOU</span>Approve the milestone cut — and mocks, if your product has screens</h4>
+    <p>Forge proposes milestones: phases that each end in something <i>you can personally try</i>
+    (never "database schema" — always a runnable slice). You confirm or adjust the cut, and choose
+    the gating mode: stop for your testing after each milestone (recommended) or run straight
+    through.</p>
+    <p>For products with a UI, Forge also offers the <b>drawn frontend</b>: one mock per key screen
+    — made in Claude Design, exported from Figma, or a photographed hand sketch. Approved mocks are
+    stored in <code>spec/mocks/</code> and become binding: the built screen is verified against
+    them.</p>
+    <details><summary>What a mock binds (and what it doesn't)</summary><div class="inner">
+      <p>A wireframe-fidelity mock binds <i>intent</i>: what's on the screen, how it's grouped,
+      what the primary action is. It does not bind pixels unless you say so. Screens you decline to
+      mock still get the design-UX checklist at build time (empty/loading/error states, mobile,
+      form rules) — the five states are never optional.</p>
+    </div></details>
   </div>
 
-  <p class="note">State on disk, always: <code>forge/config.json</code> (phase, verify commands, options), <code>forge/state/</code> (work graph, preflight, baseline, session lock, components, trace — hook-protected, CLI-only), <code>forge/decisions.md</code> and <code>forge/discoveries.md</code> (append-only, titled), <code>forge/dashboard.html</code> (generated projection). All plain JSON/markdown, git-versioned. See <code>docs/architecture.html</code> for the functional diagrams and <code>docs/TRACEABILITY.md</code> for the spec-to-implementation map.</p>
+  <div class="step"><h4><span class="n">4</span><span class="pill p-auto">AUTO</span>The spec gates — the work graph is born</h4>
+    <p>Forge writes <code>CLAUDE.md</code> and <code>PLAN.md</code>, sets the verification commands,
+    and converts the plan into work items — each with acceptance criteria that carry a
+    <b>machine check</b> (a command that must pass). Preflight runs and reports anything missing.</p>
+  </div>
+
+  <div class="step"><h4><span class="n">5</span><span class="pill p-you">YOU</span>Say the word</h4>
+    <span class="say"><b>you:</b> "Build it." <span class="kbd-note">(or /forge:build)</span></span>
+    <p>The build loop runs — see <a href="#daily">Daily driving</a>. Walk away whenever you like;
+    everything lives on disk.</p>
+  </div>
+
+  <div class="step"><h4><span class="n">6</span><span class="pill p-you">YOU</span>Milestone reviews until done</h4>
+    <span class="say forge"><b>forge:</b> "Auth + family accounts verified end-to-end. Security pass
+    recorded — no findings. Here's how to try it."</span>
+    <span class="say"><b>you:</b> "Invites should also work by link, not just email."</span>
+    <p>Your feedback becomes recorded decisions and new work items <i>before</i> you approve the
+    gate — then the next milestone starts. "Done" at the end means every item has a passing
+    verification record; nothing was completed by claim.</p>
+  </div>
+</section>
+
+<!-- ======================================================= BROWNFIELD -->
+<section id="brownfield">
+  <h2>🏗️ Working on an existing codebase</h2>
+  <p class="lead">From "add this feature" to a baseline-guarded, verified change — without Forge
+  needing to understand your whole system first.</p>
+
+  <div class="step"><h4><span class="n">1</span><span class="pill p-you">YOU</span>Open the repo, ask for the change</h4>
+    <span class="cmd">cd existing-repo && claude</span>
+    <span class="say"><b>you:</b> "Add CSV export to the reports page."</span>
+    <p>The brownfield skill triggers (say <i>"use forge-brownfield"</i> if not) and
+    <code>forge init</code> creates the project state.</p>
+  </div>
+
+  <div class="step"><h4><span class="n">2</span><span class="pill p-auto">AUTO</span>Orientation — scoped to your request only</h4>
+    <p>Forge maps just the affected area (with Graphify when installed, or a cheap explorer agent):
+    entry points, what depends on what, what the change might break. It never reverse-engineers the
+    whole system for a bounded change.</p>
+  </div>
+
+  <div class="step"><h4><span class="n">3</span><span class="pill p-auto">AUTO</span>Baseline — before any change, no exceptions</h4>
+    <p>Forge finds your project's real test/lint commands (asking you if needed) and runs
+    <code>forge baseline capture</code>: a snapshot of what already passes and what was already
+    broken.</p>
+    <details><summary>Why the baseline is non-negotiable</summary><div class="inner">
+      <p>It's the difference between "the tests fail" and "the tests fail <i>because of us</i>".
+      Pre-existing failures are recorded as pre-existing: new work must not worsen them and is not
+      blamed for them. From here on, every verification automatically includes the baseline
+      comparison — a regression fails the work item even when its own checks pass. If your project
+      has no runnable checks at all, Forge says so plainly: the first work items build a minimal
+      harness, because unverifiable change is gambling.</p>
+    </div></details>
+  </div>
+
+  <div class="step"><h4><span class="n">4</span><span class="pill p-you">YOU</span>Mini-spec — only the questions code can't answer</h4>
+    <p>Forge asks you the product questions for this change (as either/ors) and writes acceptance
+    criteria. Then the same build loop as greenfield runs, with the baseline guard active.</p>
+  </div>
+
+  <div class="step"><h4><span class="n">5</span><span class="pill p-auto">AUTO</span>The spec grows as work happens</h4>
+    <p>After each completed change, what it established is merged into a spec folder — so over
+    months, your undocumented codebase converges on the same documented shape as a greenfield
+    project, along the paths where work actually happened.</p>
+    <details><summary>The provenance tags — intent vs reality</summary><div class="inner">
+      <p>Brownfield specs tag every statement: <b>[CONFIRMED]</b> = you decided it (it's in the
+      decisions log — this is intent). <b>[OBSERVED]</b> = derived from code (this is reality, and
+      it is never silently promoted to intent — if a later change needs it to be intentional, you
+      get asked). <b>_TBD_</b> = known gap, deliberately open. Contradictions between OBSERVED and
+      CONFIRMED are recorded as discoveries, not silently resolved. Dead corners staying
+      undocumented is honest, not failure.</p>
+    </div></details>
+  </div>
+</section>
+
+<!-- ======================================================= DAILY -->
+<section id="daily">
+  <h2>⚙️ Daily driving — the build loop and your part in it</h2>
+  <p class="lead">What runs while you're away, and the few moments that are yours.</p>
+
+  <figure>
+    <svg viewBox="0 0 900 210" role="img" aria-label="The build loop: start and brief, worker executes, machine verification, review of evidence, done. Failures loop back through a mandatory diagnosis; the third identical attempt is refused.">
+      <defs><marker id="a2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+      <rect x="20" y="30" width="150" height="66" rx="10" class="b-cto" stroke-width="1.3"/>
+      <text x="95" y="56" text-anchor="middle" class="lbl-b t-cto">1 · Brief</text>
+      <text x="95" y="76" text-anchor="middle" class="lbl-m">spec excerpts · scope</text>
+      <rect x="205" y="30" width="150" height="66" rx="10" class="b-team" stroke-width="1.3"/>
+      <text x="280" y="56" text-anchor="middle" class="lbl-b t-team">2 · Worker</text>
+      <text x="280" y="76" text-anchor="middle" class="lbl-m">bounded · fresh context</text>
+      <rect x="390" y="30" width="160" height="66" rx="10" class="b-gate" stroke-width="1.3"/>
+      <text x="470" y="56" text-anchor="middle" class="lbl-b">3 · Verify</text>
+      <text x="470" y="76" text-anchor="middle" class="lbl-m">tests run · output kept</text>
+      <rect x="585" y="30" width="150" height="66" rx="10" class="b-cto" stroke-width="1.3"/>
+      <text x="660" y="56" text-anchor="middle" class="lbl-b t-cto">4 · Review</text>
+      <text x="660" y="76" text-anchor="middle" class="lbl-m">diff + evidence</text>
+      <rect x="770" y="30" width="110" height="66" rx="10" class="b-ok" stroke-width="1.3"/>
+      <text x="825" y="56" text-anchor="middle" class="lbl-b t-ok">5 · Done</text>
+      <text x="825" y="76" text-anchor="middle" class="lbl-m">spec synced</text>
+      <line x1="170" y1="63" x2="201" y2="63" class="edge" marker-end="url(#a2)"/>
+      <line x1="355" y1="63" x2="386" y2="63" class="edge" marker-end="url(#a2)"/>
+      <line x1="550" y1="63" x2="581" y2="63" class="edge" marker-end="url(#a2)"/>
+      <line x1="735" y1="63" x2="766" y2="63" class="edge" marker-end="url(#a2)"/>
+      <path d="M 470,96 C 470,160 300,160 285,100" class="edge" marker-end="url(#a2)"/>
+      <text x="380" y="172" text-anchor="middle" class="lbl-m">on failure: diagnosis required → fresh worker · 3rd identical attempt REFUSED (must escalate)</text>
+    </svg>
+    <figcaption>Per work item. Step 3 is code, not opinion: the CLI runs the project checks
+    (including the security scanner if configured) plus each acceptance criterion, and stores the
+    real output as evidence bound to the exact state of the code.</figcaption>
+  </figure>
+
+  <h3>Your three interruptions, and how to answer them</h3>
+  <div class="i3">
+    <div><b class="t">Spec hole</b>Forge asks an either/or with a recommendation. Just answer in
+    plain language — it's recorded automatically. If you're unsure, ask "what would each option
+    mean for users?" before choosing.</div>
+    <div><b class="t">Risk approval</b>Say yes or no. If no, say what would make it acceptable.</div>
+    <div><b class="t">Milestone gate</b>Forge tells you how to run the slice. Actually try it —
+    click around, break it. Then: say your verdict and feedback in plain language. Fixes happen
+    <i>before</i> the gate closes. Approval is recorded with
+    <code>forge milestone approve M2 --note "..."</code> (Forge runs it when you give the verdict).</div>
+  </div>
+
+  <div class="warn"><b>The security pass at every gate.</b> Before the demo, Forge must run a
+  fresh-context security review of everything the milestone changed and record it — the CLI
+  refuses to approve the gate without it. If Forge presents findings, they become fix-items or
+  your explicitly accepted risks; either way it's on the record.</div>
+
+  <h3>Session habits that keep everything sharp</h3>
+  <ul>
+    <li><b>Resume anytime:</b> open <code>claude</code> in the project and say <i>"continue"</i>.
+      The session start loads the contract plus a live state digest — no re-explaining, ever.</li>
+    <li><b>Restart at gates:</b> when a milestone closes, end the session and start a fresh one.
+      Long conversations degrade; the disk doesn't. Forge will suggest this itself.</li>
+    <li><b>Pause anytime:</b> just say stop. The stop gate makes Forge settle every open item first
+      — done, blocked-with-reason, or failed-with-diagnosis. Nothing dangles silently.</li>
+    <li><b>New machine or teammate:</b> clone the repo (state travels in git), install the plugin,
+      open <code>claude</code>. Same picture, same rules.</li>
+  </ul>
+  <details><summary>Why fresh sessions beat long ones</summary><div class="inner">
+    <p>A model's attention degrades as a conversation grows — review gets subtly sloppier before it
+    gets visibly wrong. Because Forge keeps all memory on disk, a session is disposable by design:
+    restarting costs ~30 seconds and buys back full sharpness. The rule of thumb enforced by the
+    contract: fresh session at every milestone gate, or whenever the conversation passes roughly a
+    third of the context window.</p>
+  </div></details>
+</section>
+
+<!-- ======================================================= PROGRESS -->
+<section id="progress">
+  <h2>📊 Watching progress</h2>
+  <p class="lead">Four windows into the same truth — pick by mood. None of them cost tokens except
+  asking in the chat.</p>
+
+  <div class="tblwrap"><table>
+    <thead><tr><th>You want…</th><th>Use</th><th>What you get</th></tr></thead>
+    <tbody>
+      <tr><td>A quick answer in chat</td><td><i>"where are we?"</i> or <code>/forge:status</code></td>
+        <td>Phase, work counts, what's in progress or blocked, what needs you.</td></tr>
+      <tr><td>The visual picture</td><td>open <code>forge/dashboard.html</code> in a browser</td>
+        <td>Progress bar, the work graph by milestone, decisions, discoveries — and the
+        <b>project map</b>: one box per component (a screen, an API, the database…) with its route,
+        progress, blockers, and its mock or latest screenshot. Regenerates on every change; just
+        reload the tab.</td></tr>
+      <tr><td>Process health</td><td><code>/forge:stats</code></td>
+        <td>First-pass rate, retries, escalations, how long items take, per-milestone health.
+        Falling first-pass rate = briefs or criteria degrading.</td></tr>
+      <tr><td>Cost &amp; delegation truth</td><td><code>/forge:usage</code></td>
+        <td>Observed tokens by model, orchestrator vs workers, every dispatch tied to its work
+        item, and tokens spent since the last state change (the "is it spinning without producing?"
+        detector). Read from Claude Code's own logs — never estimated.</td></tr>
+    </tbody>
+  </table></div>
+
+  <details><summary>How the project map gets its boxes</summary><div class="inner">
+    <p>Components live in a small registry Forge maintains (<code>forge component add/update/list</code>);
+    work items are tagged to components, and tagging an unknown component auto-registers it so the
+    map never lies by omission. Untagged items are counted visibly at the bottom. The dashboard
+    itself is a <b>generated projection</b> — a rendering of the state files, rebuilt on every
+    change. Never edit it and never treat it as the source of truth: the files win.</p>
+  </div></details>
+</section>
+
+<!-- ======================================================= SAFETY -->
+<section id="safety">
+  <h2>🛡️ The safety nets</h2>
+  <p class="lead">All enforced in code. You'll mostly notice them as things that <i>refuse</i> —
+  that's them working. What each one protects you from:</p>
+
+  <div class="tblwrap"><table>
+    <thead><tr><th>Net</th><th>What it prevents</th></tr></thead>
+    <tbody>
+      <tr><td><b>Evidence-or-nothing</b></td><td>Work marked complete by claim. DONE requires a
+        passing verification record for the <i>current</i> code — edit anything after a green run
+        and it demands a re-verify.</td></tr>
+      <tr><td><b>Red-first checks</b></td><td>Vacuous tests. If every check already passed before
+        work started and nothing changed, completion is refused — a check that can't fail proves
+        nothing.</td></tr>
+      <tr><td><b>Retry ladder</b></td><td>Burning money on the same mistake. Each failure requires
+        a written diagnosis; the third identical attempt is refused until the approach explicitly
+        changes (stronger model, different decomposition, revised criteria, or do-it-directly).</td></tr>
+      <tr><td><b>Milestone gates</b></td><td>Building three floors on a cracked foundation. Nothing
+        in milestone N+1 can start until you tested milestone N and approved it — with the security
+        review recorded first.</td></tr>
+      <tr><td><b>Baseline guard</b></td><td>"The fix broke something else." Every verification
+        compares against the recorded baseline; regressions fail the item automatically.</td></tr>
+      <tr><td><b>One orchestrator</b></td><td>Two sessions editing the same project at once (this
+        caused real data loss once). A session lock blocks the second session's writes; a dead
+        session's lock ages out or is cleared with <code>forge session takeover --force</code>.</td></tr>
+      <tr><td><b>Scope guard</b></td><td>A worker "helpfully" editing files it was told not to
+        touch. Forbidden paths are refused by the hook while the item runs; paths in
+        <code>options.protect</code> (generated code, migrations) are frozen always.</td></tr>
+      <tr><td><b>Stop gate</b></td><td>Sessions ending with work silently half-done. Every open
+        item must be settled — done, blocked-with-reason, or failed-with-diagnosis.</td></tr>
+      <tr><td><b>Living spec</b></td><td>Documentation drift. Every completed item that touched
+        product behavior updates the spec in the same closing step, on every project — so the spec
+        is always ready to generate user docs from.</td></tr>
+    </tbody>
+  </table></div>
+
+  <details><summary>Where each net lives (for the curious)</summary><div class="inner">
+    <p>Three hooks fence the session: <b>SessionStart</b> injects the operating contract, a live
+    state digest, and the lock status; <b>PreToolUse</b> guards every file edit (state files,
+    edit-war, scope, protected paths); <b>Stop</b> refuses to end with dangling work. Everything
+    else is refusals inside the CLI itself. The full mechanism diagrams are in
+    <code>docs/architecture.html</code>, and every net has a regression test —
+    the standing rule is that every field failure becomes a permanent test.</p>
+  </div></details>
+</section>
+
+<!-- ======================================================= TROUBLE -->
+<section id="trouble">
+  <h2>🔍 When it says no — every refusal decoded</h2>
+  <p class="lead">Refusals are the product working, not breaking. Find the message, read what it
+  means, do the one thing it asks. Type below to filter.</p>
+  <input class="search" id="refsearch" type="search" placeholder="Filter messages… (e.g. 'scope', 'security', 'lock')" aria-label="Filter refusal messages">
+
+  <div class="tblwrap"><table id="reftable">
+    <thead><tr><th>The message says…</th><th>It means</th><th>What to do</th></tr></thead>
+    <tbody>
+      <tr><td class="ref-msg">no acceptance criteria</td><td>An item was started before defining
+        how success is checked.</td><td>Let Forge write criteria first — this is automatic; you
+        only see it if something was rushed.</td></tr>
+      <tr><td class="ref-msg">unfinished dependencies</td><td>The item depends on work that isn't
+        done.</td><td>Nothing — the loop picks a ready item instead.</td></tr>
+      <tr><td class="ref-msg">already IN_PROGRESS</td><td>Someone tried to start an item that's
+        mid-flight.</td><td>Resolve it first: done, failed-with-diagnosis, or blocked.</td></tr>
+      <tr><td class="ref-msg">requires --escalate</td><td>Two failed attempts recorded; a third
+        identical one is banned.</td><td>Forge must change approach (stronger model, decompose,
+        revise criteria, or do it directly) and say so explicitly. If you're watching: ask what the
+        diagnosis was.</td></tr>
+      <tr><td class="ref-msg">no passing verification record</td><td>Completion was attempted
+        without evidence.</td><td>Run the verification. DONE is granted by evidence, not claim.</td></tr>
+      <tr><td class="ref-msg">tree changed since the passing verification</td><td>The code was
+        edited <i>after</i> the green run — the evidence is stale.</td><td>Re-verify. Takes
+        seconds; keeps evidence honest.</td></tr>
+      <tr><td class="ref-msg">checks … prove nothing</td><td>Every check was green before work
+        began and nothing changed — the item was already satisfied or the checks are vacuous.</td>
+        <td>Cancel the item with a reason, or fix the criteria. Never wave it through.</td></tr>
+      <tr><td class="ref-msg">baseline … regression</td><td>The change broke something that worked
+        before it.</td><td>The item stays failed until the regression is fixed. Deliberate
+        exceptions need <code>--skip-baseline --reason</code>, which is recorded.</td></tr>
+      <tr><td class="ref-msg">milestone … awaits HUMAN approval</td><td>The previous milestone is
+        finished but you haven't reviewed it.</td><td>This one's yours: try the slice, give your
+        verdict, approve the gate.</td></tr>
+      <tr><td class="ref-msg">no recorded security review</td><td>Gate approval attempted before
+        the milestone's security pass.</td><td>Forge runs the fresh-context security review and
+        records it (<code>forge milestone security M --note</code>). To skip deliberately:
+        <code>--skip-security --reason</code> (logged). Per-project opt-out:
+        <code>options.security off</code>.</td></tr>
+      <tr><td class="ref-msg">state files are managed exclusively by the forge CLI</td><td>Something
+        tried to hand-edit <code>forge/state/</code> or <code>forge/config.json</code>.</td>
+        <td>By design — those change only through forge commands, so the audit trail stays true.</td></tr>
+      <tr><td class="ref-msg">EDIT-WAR GUARD</td><td>A second Claude session tried to write while
+        another session is actively working this project.</td><td>Close one of the two sessions.
+        If the "other session" is actually dead:
+        <code>forge session takeover --force</code>.</td></tr>
+      <tr><td class="ref-msg">SCOPE GUARD</td><td>An edit targeted a file the current work item is
+        forbidden to touch.</td><td>The worker must stop and report — correct behavior. If the
+        scope itself is wrong, it's revised explicitly with
+        <code>forge task update --forbidden … --reason …</code>.</td></tr>
+      <tr><td class="ref-msg">PROTECTED PATH</td><td>An edit targeted a path frozen for the whole
+        project (<code>options.protect</code> — generated code, migrations…).</td><td>If truly
+        intended, a human changes the protection list first. Otherwise: working as designed.</td></tr>
+      <tr><td class="ref-msg">Open work items are still IN_PROGRESS</td><td>The session tried to
+        end with work dangling.</td><td>Let Forge settle each item — happens at most once per
+        stop.</td></tr>
+      <tr><td class="ref-msg">needs a title — nothing was recorded</td><td>A decision/discovery was
+        logged without a title.</td><td>Re-run with a title. Untitled log entries used to lose
+        data silently; now they're refused.</td></tr>
+      <tr><td class="ref-msg">cancelling … dependents</td><td>Cancelling this item would strand
+        items that depend on it.</td><td>Decide their fate explicitly:
+        <code>--dependents drop</code> (they proceed without it) or <code>cancel</code> (they go
+        too).</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>The two debugging instruments</h3>
+  <p>When behavior seems wrong — a refusal that shouldn't fire, state that looks off, anything
+  confusing — the standing rule (for you <i>and</i> for Forge itself) is: diagnose before working
+  around. Both commands are free — no AI, no tokens:</p>
+  <ul>
+    <li><b><code>forge doctor</code></b> — the install &amp; state self-check. Catches the boring
+      real causes: an outdated plugin cache, multiple cached versions, corrupt state, a stale
+      session lock, work orphaned by a dead session.</li>
+    <li><b><code>forge trace --refusals</code></b> — the flight recorder. Every command and every
+      hook decision, timestamped and stamped with the Forge version that made it. Filters:
+      <code>--refusals</code>, <code>--hooks</code>, <code>--last 50</code>. Set
+      <code>FORGE_DEBUG=1</code> before a command to record verbose payloads.</li>
+  </ul>
+  <details><summary>Other things that occasionally happen</summary><div class="inner">
+    <ul>
+      <li><b>A skill didn't trigger?</b> Name it: <i>"run the forge method"</i> /
+        <i>"use forge-brownfield"</i>.</li>
+      <li><b>Hooks silent after a Claude Code update?</b> Run <code>/hooks</code> to inspect;
+        reinstall/update the plugin — hook config formats occasionally shift between Claude Code
+        releases. <code>doctor</code> checks the known failure modes.</li>
+      <li><b>Want different Forge behavior?</b> The process lives in one reviewable file:
+        <code>core/OPERATING.md</code> in the plugin (~150 lines). The design rationale for every
+        rule is in <code>docs/TRACEABILITY.md</code>.</li>
+    </ul>
+  </div></details>
+</section>
+
+<!-- ======================================================= REFERENCE -->
+<section id="reference">
+  <h2>📚 Reference</h2>
+  <p class="lead">Everything speakable in plain language; commands are the precise form. Type to
+  filter.</p>
+  <input class="search" id="cmdsearch" type="search" placeholder="Filter commands… (e.g. 'milestone', 'verify', 'trace')" aria-label="Filter commands">
+
+  <h3>In the chat (slash commands — plain words always work too)</h3>
+  <div class="tblwrap"><table id="cmdtable">
+    <tbody>
+      <tr><td><code>/forge:status</code></td><td>Where are we? What needs me?</td></tr>
+      <tr><td><code>/forge:build</code></td><td>Run the build loop.</td></tr>
+      <tr><td><code>/forge:preflight</code></td><td>Environment &amp; readiness check.</td></tr>
+      <tr><td><code>/forge:dashboard</code></td><td>Regenerate <code>forge/dashboard.html</code> (it also auto-regenerates on every change).</td></tr>
+      <tr><td><code>/forge:usage</code></td><td>Observed token/dispatch telemetry from session logs.</td></tr>
+      <tr><td><code>/forge:stats</code></td><td>Process health: first-pass rate, retries, elapsed times, milestone status.</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>The forge CLI (any terminal — zero tokens)</h3>
+  <p class="kbd-note">There is no installed <code>forge</code> binary — the real form is
+  <code>node &lt;plugin-path&gt;/bin/forge.js &lt;command&gt;</code> run from the project root.
+  Inside a Claude session, just say what you want; Forge runs these itself.</p>
+  <div class="tblwrap"><table id="clitable">
+    <thead><tr><th>Command</th><th>Does</th></tr></thead>
+    <tbody>
+      <tr><td><code>init</code></td><td>Create the project's <code>forge/</code> state.</td></tr>
+      <tr><td><code>config get [path] · set &lt;path&gt; &lt;value&gt;</code></td><td>Read/write project settings (see options below).</td></tr>
+      <tr><td><code>preflight [--full]</code></td><td>Readiness checks; <code>--full</code> also executes the verify commands.</td></tr>
+      <tr><td><code>task add · list · show · start · verify · done · fail · block · cancel · update</code></td><td>The work-item lifecycle. <code>verify --artifact &lt;file&gt;</code> attaches evidence (screenshots); <code>fail --note</code> requires a diagnosis; <code>update</code> is the audited way to change an item.</td></tr>
+      <tr><td><code>brief &lt;id&gt;</code></td><td>Generate the worker-brief skeleton for an item.</td></tr>
+      <tr><td><code>milestone list · security &lt;M&gt; --note · approve &lt;M&gt; · reopen &lt;M&gt; --reason</code></td><td>Gate lifecycle. <code>approve</code> refuses without the security review (or explicit <code>--skip-security --reason</code>).</td></tr>
+      <tr><td><code>decision add "title" · discovery add "title"</code></td><td>Append to the project logs (title required; <code>--authority human|forge</code>, <code>--evidence</code>, <code>--impact</code>…).</td></tr>
+      <tr><td><code>baseline capture · check</code></td><td>Record / compare the pre-change state (brownfield).</td></tr>
+      <tr><td><code>component add|update &lt;id&gt; · list</code></td><td>The project-map registry: <code>--name --kind --route --mock --doc</code>. Items tag via <code>task … --component</code>.</td></tr>
+      <tr><td><code>status · dashboard · stats · usage</code></td><td>The four progress views.</td></tr>
+      <tr><td><code>session status · takeover [--force]</code></td><td>The orchestrator lock: who may write; clear a dead session's lock.</td></tr>
+      <tr><td><code>trace [--refusals|--hooks|--last N] · doctor</code></td><td>Flight recorder and install/state self-check.</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>Project options (set via <code>forge config set</code>)</h3>
+  <div class="tblwrap"><table>
+    <tbody>
+      <tr><td><code>verify.test / lint / typecheck / security / …</code></td><td>The commands run inside every verification. Add <code>verify.security</code> (e.g. gitleaks, semgrep, npm audit) and security scanning becomes continuous.</td></tr>
+      <tr><td><code>options.gates</code></td><td><code>per-milestone</code> (default — stop for your testing) or <code>end-only</code>.</td></tr>
+      <tr><td><code>options.security</code></td><td><code>off</code> disables the gate's security-review requirement for this project.</td></tr>
+      <tr><td><code>options.protect</code></td><td>Comma-separated always-frozen paths, e.g. <code>"src/gen/,migrations/"</code>.</td></tr>
+      <tr><td><code>specDir</code></td><td>Where the spec folder lives.</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>What lives in your project</h3>
+  <div class="tblwrap"><table>
+    <tbody>
+      <tr><td><code>forge/config.json</code></td><td>Phase, verify commands, options. CLI-managed.</td></tr>
+      <tr><td><code>forge/state/</code></td><td>work graph · preflight · baseline · session lock · component registry · trace log. CLI-managed, hook-protected.</td></tr>
+      <tr><td><code>forge/decisions.md · discoveries.md</code></td><td>Append-only, titled logs — the project's institutional memory.</td></tr>
+      <tr><td><code>forge/dashboard.html</code></td><td>Generated projection incl. the project map. Never edit.</td></tr>
+      <tr><td><code>spec/</code> (or your <code>specDir</code>)</td><td>The layered spec + <code>mocks/</code> — the source of intent, kept in sync at every item close.</td></tr>
+    </tbody>
+  </table></div>
+
+  <p class="kbd-note" style="margin-top:18px">Companions: <code>docs/architecture.html</code>
+  (functional diagrams, the work-item state machine) · <code>docs/TRACEABILITY.md</code> (why every
+  rule exists) · <code>docs/manual.md</code> (this manual in plain markdown, for AI consumption).</p>
+</section>
 
 </div>
 
+<script>
+(function(){
+  // copy buttons on every command block
+  document.querySelectorAll('.cmd').forEach(function(el){
+    var b=document.createElement('button'); b.type='button'; b.textContent='Copy';
+    b.addEventListener('click',function(){
+      var t=el.textContent.replace(/Copy$/,'').trim();
+      try{ navigator.clipboard.writeText(t).then(function(){ b.textContent='Copied ✓'; setTimeout(function(){b.textContent='Copy';},1200); }); }
+      catch(_){ b.textContent='Select & ⌘C'; }
+    });
+    el.appendChild(b);
+  });
+  // nav highlight on scroll
+  var links=[].slice.call(document.querySelectorAll('#nav a'));
+  var secs=links.map(function(a){ return document.querySelector(a.getAttribute('href')); });
+  function onScroll(){
+    var y=window.scrollY+90, on=0;
+    secs.forEach(function(s,i){ if(s && s.offsetTop<=y) on=i; });
+    links.forEach(function(a,i){ a.classList.toggle('on', i===on); });
+  }
+  window.addEventListener('scroll', onScroll, {passive:true}); onScroll();
+  // table filters
+  function wireFilter(inputId, tableIds){
+    var inp=document.getElementById(inputId); if(!inp) return;
+    inp.addEventListener('input', function(){
+      var q=inp.value.toLowerCase();
+      tableIds.forEach(function(tid){
+        var t=document.getElementById(tid); if(!t) return;
+        [].slice.call(t.tBodies[0].rows).forEach(function(r){
+          r.style.display = r.textContent.toLowerCase().indexOf(q)>=0 ? '' : 'none';
+        });
+      });
+    });
+  }
+  wireFilter('refsearch',['reftable']);
+  wireFilter('cmdsearch',['cmdtable','clitable']);
+})();
+</script>
 </body>
 </html>
