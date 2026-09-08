@@ -1,3 +1,10 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="plugins/forge/icons/logo_white_nobg.png">
+    <img src="plugins/forge/icons/logo_black_nobg.png" alt="FORGE" width="420">
+  </picture>
+</p>
+
 # Forge — spec-first engineering orchestration for Claude Code
 
 Forge is a Claude Code plugin that turns one session into an engineering
