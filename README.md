@@ -17,6 +17,10 @@ slice and steer. You own WHAT and WHY; Forge owns HOW. You are interrupted
 for exactly three things: a product decision, a high-risk approval, and a
 milestone review.
 
+<p align="center">
+  <img src="plugins/forge/icons/how-forge-works.svg" alt="How Forge works: you give intent to the Forge CTO on a frontier model, which briefs cheaper worker agents; every result passes gates enforced in code before counting as done. Outcomes: reliability, token optimization, efficiency, control." width="1040">
+</p>
+
 ## Why it exists
 
 Agentic coding fails in predictable ways: work marked complete on the
