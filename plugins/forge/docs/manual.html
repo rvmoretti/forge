@@ -492,7 +492,39 @@ claude</span>
 <section id="brownfield">
   <h2>🏗️ Working on an existing codebase</h2>
   <p class="lead">From "add this feature" to a baseline-guarded, verified change — without Forge
-  needing to understand your whole system first.</p>
+  needing to understand your whole system first. There are <b>two ways in</b>: one change at a
+  time (the steps below), or arriving with a whole feature set and mockups (the kickoff panel —
+  same steps, run once for everything, plus a milestone plan).</p>
+
+  <details><summary>Arriving with a feature set + mockups? Do one kickoff, not a drip-feed</summary><div class="inner">
+    <p>If you have several features in mind (some existing, some half-done, some missing) and
+    mockups (some improving current screens, some brand new), give Forge <b>everything at the
+    start</b>. It plans better when it sees the whole intent: milestones get sequenced across
+    features, and feature A won't get built in a way that fights feature C. Prepare two things —
+    intent at bullet level, never specs (writing specs is Forge's job):</p>
+    <ol>
+      <li><b>A feature brief</b> — for each feature: what it is in a sentence or two, its honest
+        current state (<i>works / half-done / doesn't exist</i>), and what "good" looks like to
+        you. The status matters: half-done items are handled against the gap, with the existing
+        partial code recorded as observed reality.</li>
+      <li><b>A mocks folder</b> — any format (Figma exports, screenshots of current screens,
+        photographed sketches). Annotate each with which screen it belongs to and whether it's
+        <i>improve this existing screen</i> or <i>new screen</i>. For improvements, a note on what
+        should change beats a pixel-perfect redo.</li>
+    </ol>
+    <p>Then open the repo, start <code>claude</code>, and say:</p>
+    <span class="cmd">Brownfield project. Here's my full feature set and mockups: [brief + folder].
+Orient and baseline first, then interview me on what's ambiguous,
+propose the spec and a milestone cut across all of it, and we'll build
+milestone by milestone. Also set a verify.security command for this
+stack and protect [generated/migration folders, if any].</span>
+    <p>Forge runs the same steps below once for the whole set, moves approved mocks into
+    <code>spec/mocks/</code> (each approval recorded as your decision), then proposes a
+    <b>milestone cut</b> for you to confirm. Two judgment calls are yours at that moment: put the
+    walking skeleton among the <i>missing</i> features first (integration risk surfaces early),
+    and keep half-done features in early milestones (finishing them tests the messiest code
+    first). Then say "build it".</p>
+  </div></details>
 
   <div class="step"><h4><span class="n">1</span><span class="pill p-you">YOU</span>Open the repo, ask for the change</h4>
     <span class="cmd">cd existing-repo && claude</span>
