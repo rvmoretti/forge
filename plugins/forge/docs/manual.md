@@ -50,17 +50,18 @@ stale/multiple cached versions.
 
 ## Brownfield flow (existing codebase)
 
-Two entry modes. (A) One change at a time — steps below. (B) Arriving with a feature SET and
-mockups (features may be done/half-done/missing; mocks may improve existing screens or define new
-ones): do ONE kickoff, not a drip-feed — Forge plans milestones across features and avoids
-building A in a way that fights C. User prepares intent at bullet level (never specs): a feature
-brief (per feature: what it is, honest status works/half-done/missing, what "good" looks like)
-and an annotated mocks folder (which screen; improve-existing vs new). Kickoff message: point at
-both, ask Forge to orient + baseline first, interview on ambiguity, propose spec + milestone cut
-across everything, set verify.security and options.protect in the same breath. Same steps below
-run once for the whole set; approved mocks land in spec/mocks/ with decisions recorded; user
-confirms the milestone cut (walking skeleton among the MISSING features first; half-done features
-in early milestones). No special commands — natural language drives it.
+Two entry modes — the forge-brownfield skill ASKS which (§0 entry fork) unless obvious:
+(A) a bounded change → steps below. (B) a DESTINATION — the user has a vision: a feature/change
+set (each item honestly statused works/half-done/missing) and possibly mockups (improve-existing
+vs new). Mode B = roadmap intake (skill §7), the brownfield equivalent of the greenfield spec
+interview: goals collected (or elicited via a light goals interview — bullet-level intent, never
+user-written specs) → scoped orientation per goal → baseline → GAP ANALYSIS per goal (already
+satisfied / half-done: items against the gap / missing: items as greenfield / conflict:
+discovery + either/or, never silently resolved) → spec seeded from confirmed goals ([CONFIRMED])
+and observed reality ([OBSERVED]), mocks into spec/mocks/ with recorded approvals →
+forge-method Step 7 machinery for the milestone cut (walking skeleton among MISSING features
+first; half-done features early) + verify.security + options.protect set unprompted. The fork
+changes how intent is gathered, never which gates apply. No special commands.
 
 1. Open repo, ask for the change. forge-brownfield skill orients — scoped to the affected
    subsystem only (Graphify or forge-explorer); never whole-system reverse-engineering.
