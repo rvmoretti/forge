@@ -30,8 +30,12 @@ from the spec — every criterion with a machine check wherever possible).
 
 **Build phase**: run the loop below, item by item, milestone by milestone.
 
-**Brownfield** (existing codebase): run the `forge-brownfield` skill first —
-orientation, baseline capture, scoped mini-spec — then the same loop.
+**Brownfield** (existing codebase): run the `forge-brownfield` skill first.
+It has two entry modes — ask the user which unless obvious: (A) a bounded
+change → orientation, baseline, scoped mini-spec; (B) a destination (a
+feature/change set, possibly with mockups) → the roadmap intake: goals
+collected or elicited, gap analysis of desired vs observed, spec seeded
+from confirmed goals, milestone cut across everything. Then the same loop.
 
 ## The build loop (per work item)
 

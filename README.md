@@ -97,12 +97,13 @@ experience → API → logic → foundation). When the spec gates, say "build it
 
 **Brownfield:** open your repo, ask for the change. The `forge-brownfield`
 skill orients (Graphify-first), captures a baseline, asks you only the
-product questions the code can't answer, then runs the same loop. Arriving
-with a whole feature set and mockups instead of one change? Give Forge
-everything in one kickoff — a bullet-level feature brief (with each
-feature's honest status: works / half-done / missing) and an annotated
-mocks folder — and it proposes the spec and a milestone cut across all of
-it. The manual's brownfield section has the exact kickoff message.
+product questions the code can't answer, then runs the same loop. Forge
+asks which of two doors you're entering through: **a bounded change**
+("just start working") or **a destination** — you have a vision of where
+the project should be, as a feature/change set and possibly mockups. The
+destination mode is the brownfield equivalent of the greenfield spec
+interview: your goals supply intent, the code supplies reality, and Forge
+plans the gap — spec, mocks, and a milestone cut across everything.
 
 **Commands:** `/forge:status` · `/forge:preflight` · `/forge:build` · `/forge:dashboard` · `/forge:usage` · `/forge:stats`
 
@@ -161,6 +162,21 @@ session recovers the full picture from disk — the conversation is never the
 memory.
 
 ## Changelog
+
+### v0.11.0 — brownfield gets two doors
+The forge-brownfield skill now opens with an entry fork it asks the user
+about: **(A) a bounded change** — the existing flow — or **(B) a
+destination** — the user has a vision for the project (features honestly
+statused works/half-done/missing, possibly mockups). Mode B is the roadmap
+intake: goals collected or elicited (bullet-level intent, never user-written
+specs), scoped orientation per goal, baseline as always, then a **gap
+analysis** classifying each goal (already satisfied / half-done → items
+against the gap / missing / conflict → discovery + either/or), the spec
+seeded from confirmed goals with provenance, mocks approved into
+`spec/mocks/`, and the forge-method milestone-cut machinery applied across
+the whole set. Compensates brownfield's missing greenfield-interview intent
+without weakening any gate — the fork changes how intent is gathered, never
+which rules apply. Skill + contract + docs; no CLI change.
 
 ### v0.10.0 — the project map
 The dashboard gains a visual component map: one box per component (route,
