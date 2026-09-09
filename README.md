@@ -97,7 +97,12 @@ experience → API → logic → foundation). When the spec gates, say "build it
 
 **Brownfield:** open your repo, ask for the change. The `forge-brownfield`
 skill orients (Graphify-first), captures a baseline, asks you only the
-product questions the code can't answer, then runs the same loop.
+product questions the code can't answer, then runs the same loop. Arriving
+with a whole feature set and mockups instead of one change? Give Forge
+everything in one kickoff — a bullet-level feature brief (with each
+feature's honest status: works / half-done / missing) and an annotated
+mocks folder — and it proposes the spec and a milestone cut across all of
+it. The manual's brownfield section has the exact kickoff message.
 
 **Commands:** `/forge:status` · `/forge:preflight` · `/forge:build` · `/forge:dashboard` · `/forge:usage` · `/forge:stats`
 

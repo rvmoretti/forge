@@ -50,6 +50,18 @@ stale/multiple cached versions.
 
 ## Brownfield flow (existing codebase)
 
+Two entry modes. (A) One change at a time — steps below. (B) Arriving with a feature SET and
+mockups (features may be done/half-done/missing; mocks may improve existing screens or define new
+ones): do ONE kickoff, not a drip-feed — Forge plans milestones across features and avoids
+building A in a way that fights C. User prepares intent at bullet level (never specs): a feature
+brief (per feature: what it is, honest status works/half-done/missing, what "good" looks like)
+and an annotated mocks folder (which screen; improve-existing vs new). Kickoff message: point at
+both, ask Forge to orient + baseline first, interview on ambiguity, propose spec + milestone cut
+across everything, set verify.security and options.protect in the same breath. Same steps below
+run once for the whole set; approved mocks land in spec/mocks/ with decisions recorded; user
+confirms the milestone cut (walking skeleton among the MISSING features first; half-done features
+in early milestones). No special commands — natural language drives it.
+
 1. Open repo, ask for the change. forge-brownfield skill orients — scoped to the affected
    subsystem only (Graphify or forge-explorer); never whole-system reverse-engineering.
 2. Baseline before ANY change: real verify commands into config, `forge baseline capture`
