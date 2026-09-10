@@ -89,8 +89,58 @@ process.on('exit', (code) => traceEvent({ outcome: code === 0 ? 'ok' : 'exit', e
 function out(msg) { process.stdout.write(msg + '\n'); }
 
 function loadConfig() { return readJson(CONFIG_FILE, null); }
-function loadWork() { return readJson(WORK_FILE, { schema: 1, items: {}, order: [] }); }
+function loadWork() { if (MUTATING) acquireWorkLock(); return readJson(WORK_FILE, { schema: 1, items: {}, order: [] }); }
 function saveWork(w) { writeJson(WORK_FILE, w); regenDashboard(); }
+
+// -- state-write lock (v0.12): serialise load→mutate→save across processes ---
+// Two concurrent forge invocations doing read-modify-write on work.json would
+// silently lose one update (writeJson is atomic per write, not per transaction).
+// Mutating commands take this lock at first loadWork() and hold it to exit.
+const WORK_LOCK = path.join(STATE, 'work.lock');
+const LOCK_WAIT_MS = parseInt(process.env.FORGE_LOCK_WAIT_MS || '', 10) || 5000;
+const LOCK_STALE_MS = parseInt(process.env.FORGE_LOCK_STALE_MS || '', 10) || 10 * 60 * 1000;
+let LOCK_HELD = false;
+const MUTATING = (() => {
+  const c = process.argv[2] || '', s = process.argv[3] || '';
+  if (c === 'init') return true;
+  if (c === 'task') return !['list', 'show', ''].includes(s);
+  if (c === 'milestone') return ['security', 'approve', 'reopen'].includes(s);
+  if (c === 'component') return ['add', 'update'].includes(s);
+  return false;
+})();
+function pidAlive(pid) { try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; } }
+function sleepMs(ms) {
+  try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); }
+  catch (_) { const end = Date.now() + ms; while (Date.now() < end) { /* spin fallback */ } }
+}
+function acquireWorkLock() {
+  if (LOCK_HELD) return;
+  try { fs.mkdirSync(STATE, { recursive: true }); } catch (_) { }
+  const deadline = Date.now() + LOCK_WAIT_MS;
+  for (;;) {
+    try {
+      fs.writeFileSync(WORK_LOCK, JSON.stringify({ pid: process.pid, ts: ts(), cmd: process.argv.slice(2).join(' ').slice(0, 160) }), { flag: 'wx' });
+      LOCK_HELD = true; return;
+    } catch (e) {
+      if (e.code !== 'EEXIST') { LOCK_HELD = true; return; } // fs oddity — fail open; never brick the CLI on its own guard
+      let holder = null; try { holder = JSON.parse(fs.readFileSync(WORK_LOCK, 'utf8')); } catch (_) { }
+      const age = holder && Number.isFinite(Date.parse(holder.ts)) ? Date.now() - Date.parse(holder.ts) : Infinity;
+      if (!holder || !pidAlive(holder.pid) || age > LOCK_STALE_MS) {
+        try { fs.unlinkSync(WORK_LOCK); } catch (_) { }
+        traceWrite({ ts: new Date().toISOString(), v: VERSION, cmd: process.argv.slice(2).join(' ').slice(0, 300),
+          outcome: 'lock-break', holder: holder || 'unreadable' });
+        continue;
+      }
+      if (Date.now() >= deadline)
+        die(`Refused: forge state is write-locked by another forge process (pid ${holder.pid}: '${holder.cmd}', since ${holder.ts}).\n` +
+            `Two concurrent state writes would silently lose one — this refusal is the alternative.\n` +
+            `Wait for it to finish and retry. (A dead process's lock breaks automatically; stale ceiling: ${Math.round(LOCK_STALE_MS / 60000)}min.)`);
+      sleepMs(100);
+    }
+  }
+}
+function releaseWorkLock() { if (LOCK_HELD) { try { fs.unlinkSync(WORK_LOCK); } catch (_) { } LOCK_HELD = false; } }
+process.on('exit', releaseWorkLock);
 
 // -- orchestrator session lock (v0.5): one active orchestrator per project ----
 function loadLock() { try { return JSON.parse(fs.readFileSync(SESSION_FILE, 'utf8')); } catch (_) { return null; } }
@@ -156,7 +206,7 @@ function generateDashboard() {
   for (const id of w.order) {
     const t = w.items[id];
     counts[t.status] = (counts[t.status] || 0) + 1;
-    const isReady = t.status === 'TODO' && t.deps.every(d => !w.items[d] || w.items[d].status === 'DONE') && t.criteria.length > 0;
+    const isReady = t.status === 'TODO' && t.deps.every(d => !w.items[d] || w.items[d].status === 'DONE') && t.criteria.length > 0 && ((t.scope || {}).allowed || []).length > 0;
     if (isReady) ready++;
     const m = t.milestone || '(no milestone)';
     (byMilestone[m] = byMilestone[m] || []).push({ t, isReady });
@@ -191,7 +241,7 @@ function generateDashboard() {
       const lastV = t.verifications.length ? t.verifications[t.verifications.length - 1] : null;
       return `<tr>
         <td>${chip(isReady ? 'READY' : t.status, sColor[isReady ? 'READY' : t.status] || '#57606f')}</td>
-        <td><b>${esc(t.id || '')}</b> ${esc(t.title)}${t.status === 'BLOCKED' ? `<div class="mut">⛔ ${esc(t.blockReason)}</div>` : ''}${t.status === 'CANCELLED' ? `<div class="mut">✕ ${esc(t.cancelReason)}</div>` : ''}</td>
+        <td><b>${esc(t.id || '')}</b> ${esc(t.title)}${t.status === 'BLOCKED' ? `<div class="mut">⛔ ${esc(t.blockReason)}</div>` : ''}${t.status === 'CANCELLED' ? `<div class="mut">✕ ${esc(t.cancelReason)}</div>` : ''}${!((t.scope || {}).allowed || []).length && !['DONE', 'CANCELLED'].includes(t.status) ? `<div class="mut" style="color:#b45309">⚠ no file scope — start will refuse (task update --allowed)</div>` : ''}</td>
         <td class="mut">${t.deps.length ? t.deps.map(esc).join(', ') : '—'}</td>
         <td class="mut">${t.criteria.length}${t.criteria.some(c => c.check) ? ' ✓' : ''}</td>
         <td>${fails ? chip(fails + ' failed', '#b45309') : '<span class="mut">—</span>'}</td>
@@ -382,6 +432,18 @@ function failedAttempts(item) {
 
 function lastVerification(item) {
   return item.verifications.length ? item.verifications[item.verifications.length - 1] : null;
+}
+
+// v0.12: conservative glob-overlap test — two scopes overlap when either's
+// literal prefix (up to the first '*') contains the other's. '**' overlaps all,
+// so deliberately whole-tree items are serial by construction.
+function scopesOverlap(a, b) {
+  const root = g => String(g).replace(/\\/g, '/').replace(/^\.\//, '').split('*')[0];
+  for (const ga of a || []) for (const gb of b || []) {
+    const ra = root(ga), rb = root(gb);
+    if (ra.startsWith(rb) || rb.startsWith(ra)) return `'${ga}' vs '${gb}'`;
+  }
+  return null;
 }
 
 function depsSatisfied(w, item) {
@@ -589,8 +651,10 @@ const commands = {
       for (const id of w.order) {
         const t = w.items[id];
         if (filter && t.status !== filter) continue;
-        const ready = t.status === 'TODO' && depsSatisfied(w, t).length === 0 && t.criteria.length > 0;
+        const noScope = !((t.scope || {}).allowed || []).length;
+        const ready = t.status === 'TODO' && depsSatisfied(w, t).length === 0 && t.criteria.length > 0 && !noScope;
         out(`${t.status.padEnd(11)} ${id.padEnd(8)} ${t.title}${ready ? '  [READY]' : ''}` +
+            (noScope && !['DONE', 'CANCELLED'].includes(t.status) ? '  [NO SCOPE — start will refuse]' : '') +
             (t.deps.length ? `  deps: ${t.deps.join(',')}` : '') +
             (failedAttempts(t) ? `  failed-attempts: ${failedAttempts(t)}` : ''));
       }
@@ -617,6 +681,40 @@ const commands = {
             `(A CANCELLED dependency must be dropped or re-pointed: forge task update ${item.id} --deps ...)`);
       const gateMsg = milestoneGateBlock(w, loadConfig(), item.milestone);
       if (gateMsg) die(`Refused: ${gateMsg}`);
+      // v0.12: scope is part of the item's definition — no declared file scope, no start.
+      // Field evidence (project-b, 87 items): scope derived only into brief prose is unenforceable.
+      if (!(item.scope.allowed || []).length) {
+        if (flag('whole-tree')) {
+          if (!opt('reason')) die(`--whole-tree requires --reason "..." — a deliberately unbounded item is recorded, and it is serial by nature (its scope overlaps everything).`);
+          item.scope.allowed = ['**'];
+          (item.history = item.history || []).push({ ts: ts(), change: `scope.allowed = ['**'] (whole tree, at start)`, reason: opt('reason') });
+        } else {
+          die(`Refused: '${item.id}' has no allowed file scope (scope.allowed is empty).\n` +
+              `Scope is what bounds the work and makes the guard (and any parallelism) real — derive it from the\n` +
+              `dependency closure and record it BEFORE starting:\n` +
+              `  forge task update ${item.id} --allowed "src/feature/,src/shared/types.ts"\n` +
+              `Genuinely whole-tree work (rare): forge task start ${item.id} --whole-tree --reason "..."`);
+        }
+      }
+      // v0.12: concurrency cap (options.concurrency, default 1 = serial) + disjoint-scope check.
+      // What used to be convention ("one item in flight") is now a gate.
+      {
+        const cfgC = loadConfig() || {};
+        const cap = parseInt((cfgC.options || {}).concurrency, 10) || 1;
+        const others = w.order.filter(id2 => id2 !== item.id && w.items[id2].status === 'IN_PROGRESS');
+        if (others.length >= cap)
+          die(`Refused: concurrency cap reached — ${others.length} item(s) already IN_PROGRESS (options.concurrency=${cap}): ${others.join(', ')}.\n` +
+              `Resolve one first (done / fail / block), or raise the cap deliberately:\n` +
+              `  forge config set options.concurrency ${cap + 1}\n` +
+              `(Parallel dispatch is only safe with disjoint scopes and the OPERATING.md parallel-dispatch rules.)`);
+        for (const id2 of others) {
+          const clash = scopesOverlap(item.scope.allowed, (w.items[id2].scope || {}).allowed || []);
+          if (clash)
+            die(`Refused: '${item.id}' overlaps the scope of in-progress item '${id2}' (${clash}).\n` +
+                `Two concurrent workers writing the same territory race each other and contaminate each other's evidence.\n` +
+                `Serialize them, or narrow one scope: forge task update ${item.id} --allowed "..."`);
+        }
+      }
       const fails = failedAttempts(item);
       if (fails >= 2 && !opt('escalate'))
         die(`Refused: '${item.id}' has failed ${fails} attempts. A third identical attempt is not allowed.\n` +
@@ -800,7 +898,24 @@ const commands = {
       saveWork(w);
       out(`${item.id} updated:\n` + changes.map(c => `  - ${c}`).join('\n'));
 
-    } else die('Usage: forge task add|list|show|start|verify|done|fail|block|cancel|update ...');
+    } else if (sub === 'dispatch') {
+      // v0.12: the handoff to a worker is a state event, not transcript archaeology.
+      // Called immediately before launching a worker (kind=launch), and again for any
+      // mid-flight message to a running worker (kind=message) — clarification is fine,
+      // an unchanged-brief retry through chat is not, and both must be auditable.
+      const item = getItem(w, argv[2]);
+      if (item.status !== 'IN_PROGRESS')
+        die(`Refused: '${item.id}' is not IN_PROGRESS — dispatch records a handoff to a worker; start the item first.`);
+      const kind = opt('kind') || 'launch';
+      if (!['launch', 'message'].includes(kind))
+        die(`--kind must be 'launch' (handing the brief to a worker) or 'message' (mid-flight message to a running worker).`);
+      item.dispatches = item.dispatches || [];
+      item.dispatches.push({ ts: ts(), agent: opt('agent') || null, kind, note: opt('note') || null });
+      item.updated = ts();
+      saveWork(w);
+      out(`${item.id} dispatch recorded${opt('agent') ? ` → ${opt('agent')}` : ''}${kind === 'message' ? ' (mid-flight message)' : ''} (${item.dispatches.length} total on this item)`);
+
+    } else die('Usage: forge task add|list|show|start|dispatch|verify|done|fail|block|cancel|update ...');
   },
 
   // -- brief ------------------------------------------------------------------
@@ -1223,6 +1338,26 @@ const commands = {
         (tied.length ? Object.entries(perItem).map(([k, v]) => `${k}×${v}`).join(' · ') : 'none') +
         (agg.dispatches.length - tied.length ? ` · ${agg.dispatches.length - tied.length} dispatch(es) could not be tied to any work item` : ''));
 
+    // v0.12: dispatch records from state (forge task dispatch) — authoritative
+    // when present; the transcript inference above remains the fallback for old logs.
+    try {
+      const wU = readJson(WORK_FILE, { items: {}, order: [] });
+      const dByAgent = {}; let dTotal = 0, dMsg = 0, dItems = 0;
+      for (const id of wU.order) {
+        const ds = wU.items[id].dispatches || [];
+        if (ds.length) dItems++;
+        for (const d3 of ds) {
+          dTotal++; if (d3.kind === 'message') dMsg++;
+          const a = d3.agent || '(agent not named)';
+          dByAgent[a] = (dByAgent[a] || 0) + 1;
+        }
+      }
+      if (dTotal)
+        out(`  Dispatch records in state (forge task dispatch — authoritative): ${dTotal} across ${dItems} item(s)` +
+            (dMsg ? ` · ${dMsg} mid-flight message(s)` : '') + ` — ` +
+            Object.entries(dByAgent).map(([k, v]) => `${k}×${v}`).join(' · '));
+    } catch (_) { /* no work file */ }
+
     // drift: tokens spent after the last forge state change
     try {
       const stateM = fs.statSync(WORK_FILE).mtime.toISOString();
@@ -1432,6 +1567,35 @@ const commands = {
             process.exit(2);
           }
         }
+        // v0.12: scope.allowed enforced as a WHITELIST (union across in-progress items).
+        // Only active when every in-progress item declares a scope (pre-v0.12 state stays
+        // blacklist-only). Exempt: forge/, the spec dir, docs/, and *.md (briefs, CLAUDE.md,
+        // PLAN.md — orchestrator housekeeping); options.scopeExempt overrides the dir list.
+        {
+          const inProg2 = [];
+          for (const id of (w && w.order) || []) {
+            const it = w.items[id];
+            if (it && it.status === 'IN_PROGRESS') inProg2.push({ id, it });
+          }
+          if (inProg2.length && inProg2.every(x => ((x.it.scope || {}).allowed || []).length)) {
+            const exempt = String((((cfg || {}).options || {}).scopeExempt) || 'forge/,spec/,docs/')
+              .split(',').map(s => s.trim()).filter(Boolean);
+            if (cfg && cfg.specDir) exempt.push(String(cfg.specDir).replace(/\/?$/, '/'));
+            const isExempt = /\.md$/i.test(rel) || exempt.some(p => matches(p));
+            if (!isExempt) {
+              const union = [];
+              for (const x of inProg2) union.push(...x.it.scope.allowed);
+              if (!union.some(p => matches(p))) {
+                traceEvent({ outcome: 'block', hook: 'pretooluse', reason: 'scope-allowed', path: fp, items: inProg2.map(x => x.id) });
+                process.stderr.write(
+                  `SCOPE GUARD: '${rel}' is OUTSIDE the allowed scope of every in-progress item (${inProg2.map(x => x.id).join(', ')}) — the edit is blocked.\n` +
+                  `Work stays inside its declared territory. If this path genuinely belongs to the work, widen the scope\n` +
+                  `deliberately first: forge task update <id> --allowed "..." — never work around the guard.\n`);
+                process.exit(2);
+              }
+            }
+          }
+        }
       } catch (_) { /* hooks never crash */ }
       process.exit(0);
 
@@ -1477,9 +1641,15 @@ const commands = {
            [--criterion "desc::check-cmd"]... [--allowed glob,..] [--forbidden glob,..]
            (or: task add --json '{...}')
   task list [--status S] | show <id>
-  task start <id> [--agent forge-implementer] [--escalate strategy --note why]
+  task start <id> [--agent forge-implementer] [--escalate strategy --note why] [--whole-tree --reason r]
                                          refuses: no criteria, unmet deps, unapproved earlier milestone,
-                                         already IN_PROGRESS, 3rd attempt w/o --escalate; records pre-work check state
+                                         already IN_PROGRESS, 3rd attempt w/o --escalate, EMPTY scope.allowed
+                                         (set it: task update --allowed; deliberate: --whole-tree --reason),
+                                         concurrency cap reached (options.concurrency, default 1 = serial),
+                                         scope overlap with an in-progress item; records pre-work check state
+  task dispatch <id> [--agent name] [--kind launch|message] [--note n]
+                                         record the handoff to a worker (state, not transcript inference);
+                                         kind=message audits a mid-flight message to a running worker
   task verify <id> [--skip-baseline --reason r]
                                          project checks + criterion checks + baseline (when captured); records evidence + tree state
   task done <id>                         refuses: no passing verification, tree changed since verification,
@@ -1506,7 +1676,14 @@ const commands = {
   stats                                  process metrics from the work graph: first-pass rate, retries,
                                          escalations, elapsed times, per-milestone health
   session status | takeover [--force]    orchestrator lock: who is allowed to write; takeover clears a dead session's lock
-  hook session-start|pretooluse|stop     (used by plugin hooks)`);
+  hook session-start|pretooluse|stop     (used by plugin hooks)
+
+  config keys: verify.* · options.gates per-milestone|end-only · options.security off · options.protect "p1/,p2/"
+               options.concurrency N     max items IN_PROGRESS at once (default 1 = serial; raise only with
+                                         disjoint scopes — see OPERATING.md parallel dispatch)
+               options.scopeExempt "a/,b/"  dirs exempt from the scope whitelist (default forge/,spec/,docs/; *.md always exempt)
+  state writes are serialised by forge/state/work.lock (concurrent forge processes wait, then refuse;
+  a dead process's lock breaks automatically and is recorded in trace.jsonl)`);
   }
 };
 

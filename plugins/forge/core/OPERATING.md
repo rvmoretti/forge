@@ -39,24 +39,34 @@ from confirmed goals, milestone cut across everything. Then the same loop.
 
 ## The build loop (per work item)
 
-1. **Pick** the next READY item (`forge task list`). Start it
+1. **Pick** the next READY item (`forge task list`). Before starting, derive
+   its allowed-files scope from the dependency closure (use Graphify when
+   available: query what depends on what — do not guess blast radius) and
+   **record it in state** (`forge task update <id> --allowed "..."`) — scope
+   in brief prose is unenforceable; `start` refuses an unscoped item
+   (genuinely whole-tree work: `start --whole-tree --reason`). Then start it
    (`forge task start <id>`).
 2. **Brief**: generate the skeleton (`forge brief <id>`), then complete it —
    prepend the relevant spec excerpts, decisions, discoveries, and the
-   applicable domain pack (see `forge-domain-packs` skill). Derive the
-   allowed-files scope from the dependency closure (use Graphify when
-   available: query what depends on what — do not guess blast radius).
+   applicable domain pack (see `forge-domain-packs` skill).
    **Screen work**: the brief additionally carries the `design-ux` pack and
    the approved mock (`spec/mocks/<screen>.*`) when one exists; the item
    carries a criterion binding the rendered screen to that mock. A screen
    without a mock still gets the pack — the five states and the checklist
    are not optional.
 3. **Dispatch** to a worker agent (`forge-implementer`, `forge-tester`, …) in
-   a fresh context, with the brief as the complete task. The dispatch prompt's
-   first line must be the brief header (`# Work brief — <id>: <title>`) even
-   when the brief body is passed by file path — `forge usage` ties dispatches
-   to work items through it. Delegate one bounded task per worker. Workers
-   never delegate further.
+   a fresh context, with the brief as the complete task. **Record the handoff
+   first**: `forge task dispatch <id> --agent <worker>` immediately before
+   launching — the agent mix and brief-vs-execution timing then live in
+   state, not in transcript archaeology. The dispatch prompt's first line
+   must still be the brief header (`# Work brief — <id>: <title>`) even when
+   the brief body is passed by file path — `forge usage` ties old logs
+   through it. Delegate one bounded task per worker. Workers never delegate
+   further. **Messaging a running worker mid-flight** (a clarification, a
+   corrected path) is allowed but audited: record it too —
+   `forge task dispatch <id> --kind message --note "<what>"`. A failed
+   worker is never resumed through chat; that path is retry-by-fresh-brief,
+   nothing else.
 4. **Verify**: `forge task verify <id>` — machine evidence, not the worker's
    claim. Then review the diff and the worker's report yourself; read code
    deeply only where evidence is ambiguous or risk is high. **For high-risk
@@ -125,12 +135,24 @@ from confirmed goals, milestone cut across everything. Then the same loop.
 - Cancelling an item with live dependents forces you to decide their fate
   (`--dependents drop|cancel`); revising an item is `forge task update`,
   audited, with `--reason` required when criteria change after failures.
-- Scope is enforced, not advisory: while an item is IN_PROGRESS, edits to its
-  `scope.forbidden` paths are blocked by the hook, as are paths frozen in
-  config (`options.protect` — use it for generated code, migrations, vendored
-  packages). A blocked edit means stop and report, or deliberately revise the
-  scope (`forge task update --forbidden ... --reason ...`) — never work
-  around the guard.
+- Scope is enforced, not advisory — in both directions. While an item is
+  IN_PROGRESS, edits to its `scope.forbidden` paths are blocked by the hook,
+  as are paths frozen in config (`options.protect` — use it for generated
+  code, migrations, vendored packages). And when every in-progress item
+  declares an allowed scope, edits OUTSIDE the union of those scopes are
+  blocked too (whitelist; `forge/`, the spec dir, `docs/` and `*.md` are
+  exempt as orchestrator housekeeping — `options.scopeExempt` adjusts the
+  dirs). A blocked edit means stop and report, or deliberately revise the
+  scope (`forge task update --allowed/--forbidden ... --reason ...`) —
+  never work around the guard.
+- One item in flight is a gate, not a convention: `task start` refuses while
+  another item is IN_PROGRESS (`options.concurrency`, default 1). An orphaned
+  IN_PROGRESS item from a dead session therefore blocks new starts — that is
+  deliberate: audit and settle it (done/fail/block) before dispatching new
+  work.
+- State writes are serialised by a lockfile: a second concurrent `forge`
+  process waits briefly, then refuses rather than silently losing an update.
+  A dead process's lock breaks automatically and is recorded in the trace.
 
 ## Proportionality
 
@@ -158,6 +180,33 @@ implementer. Doing bounded work yourself is the proportionality exception
 for trivial items, not the default. The measure is cost per completed item,
 not delegation percentage — but zero explorer/tester dispatches over a whole
 project means you are absorbing their work.
+
+## Parallel dispatch (opt-in — off by default)
+
+Forge is serial by default: `options.concurrency` is 1 and the CLI refuses a
+second in-flight item. Field measurement showed unmanaged multi-worker bursts
+arising anyway — so concurrency is now a deliberate, guarded choice, never a
+drift. Only the **user** raises the cap
+(`forge config set options.concurrency 3`); never raise it yourself.
+
+When the cap is above 1, the loop changes in exactly one place: **after an
+async dispatch, do not poll it — start the next READY item first** (scope it,
+start it, brief it, dispatch it). Poll a running worker only when the cap is
+reached or nothing else is READY. The CLI enforces the safety conditions:
+items running together must have disjoint `scope.allowed` (start refuses
+overlap), and every state write is lock-serialised. You enforce the rest:
+
+- Shared-surface work stays serial — migrations, wiring/DI/registry files,
+  manifests, lockfiles, generated code, config schema, spec-touching work,
+  baseline capture. When in doubt, it is shared surface.
+- Verify one item at a time, and re-verify on `done` refusals — with several
+  workers writing one tree, a sibling's write between verify and done
+  correctly invalidates evidence; that refusal is the guard working, not an
+  obstacle.
+- On any scope-overlap refusal, serialize — do not shave scopes to force
+  parallelism.
+- Review does not thin out because workers overlap: every item still gets
+  its review before `done`, one at a time.
 
 ## Discoveries
 

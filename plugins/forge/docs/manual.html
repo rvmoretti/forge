@@ -708,9 +708,23 @@ claude</span>
       <tr><td><b>One orchestrator</b></td><td>Two sessions editing the same project at once (this
         caused real data loss once). A session lock blocks the second session's writes; a dead
         session's lock ages out or is cleared with <code>forge session takeover --force</code>.</td></tr>
-      <tr><td><b>Scope guard</b></td><td>A worker "helpfully" editing files it was told not to
-        touch. Forbidden paths are refused by the hook while the item runs; paths in
-        <code>options.protect</code> (generated code, migrations) are frozen always.</td></tr>
+      <tr><td><b>Scope guard — both directions</b></td><td>A worker "helpfully" editing files it
+        was told not to touch. Forbidden paths are refused by the hook while the item runs; paths
+        in <code>options.protect</code> (generated code, migrations) are frozen always. And when
+        every running item declares its allowed scope, edits <i>outside</i> that territory are
+        refused too — scope is required before an item can even start.</td></tr>
+      <tr><td><b>Concurrency gate</b></td><td>Workers silently piling up on one shared tree
+        (field-measured: 4 at once, unguarded). One item in flight is now enforced, not assumed;
+        running more is a deliberate setting (<code>options.concurrency</code>) and requires
+        non-overlapping scopes — overlap is refused.</td></tr>
+      <tr><td><b>State-write lock</b></td><td>Two forge commands changing the work graph at the
+        same instant and silently losing one update. Writes are serialised by a lockfile; live
+        contention waits then refuses loudly, and a dead process's lock breaks automatically
+        (recorded in the trace).</td></tr>
+      <tr><td><b>Dispatch records</b></td><td>Not knowing which worker did what. Every handoff to
+        a worker — and every mid-flight message to one — is recorded in state
+        (<code>forge task dispatch</code>), so the agent mix comes from records, not transcript
+        archaeology.</td></tr>
       <tr><td><b>Stop gate</b></td><td>Sessions ending with work silently half-done. Every open
         item must be settled — done, blocked-with-reason, or failed-with-diagnosis.</td></tr>
       <tr><td><b>Living spec</b></td><td>Documentation drift. Every completed item that touched
@@ -793,6 +807,29 @@ claude</span>
         items that depend on it.</td><td>Decide their fate explicitly:
         <code>--dependents drop</code> (they proceed without it) or <code>cancel</code> (they go
         too).</td></tr>
+      <tr><td class="ref-msg">no allowed file scope</td><td>An item was started before its
+        allowed-files scope was recorded — scope in prose is unenforceable.</td><td>Forge derives
+        the scope and records it (<code>forge task update --allowed …</code>); genuinely
+        repo-wide work is declared with <code>--whole-tree --reason</code>.</td></tr>
+      <tr><td class="ref-msg">concurrency cap reached</td><td>A second item tried to start while
+        one is already in flight (serial is the default and it's enforced now, not a
+        convention).</td><td>Resolve the in-flight item first. Running items in parallel is a
+        deliberate choice only <i>you</i> make: <code>forge config set options.concurrency 3</code>.</td></tr>
+      <tr><td class="ref-msg">overlaps the scope of in-progress item</td><td>Two items about to
+        run in parallel would write the same territory — their evidence would contaminate each
+        other.</td><td>Serialize them, or narrow one item's scope. Never shave scopes just to
+        force parallelism.</td></tr>
+      <tr><td class="ref-msg">OUTSIDE the allowed scope</td><td>An edit targeted a file no
+        in-progress item is allowed to touch (the whitelist side of the scope guard).</td>
+        <td>The worker stops and reports — correct behavior. If the path genuinely belongs to
+        the work: <code>forge task update --allowed …</code>, deliberately.</td></tr>
+      <tr><td class="ref-msg">write-locked by another forge process</td><td>Two forge commands
+        tried to change state at the same moment; the second waited, then refused rather than
+        silently losing an update.</td><td>Nothing — retry in a moment. A dead process's lock
+        breaks automatically and the break is recorded in the trace.</td></tr>
+      <tr><td class="ref-msg">not IN_PROGRESS — dispatch records a handoff</td><td>A dispatch was
+        recorded for an item that isn't running.</td><td>Start the item first; dispatch records
+        belong to live work.</td></tr>
     </tbody>
   </table></div>
 
@@ -852,7 +889,7 @@ claude</span>
       <tr><td><code>init</code></td><td>Create the project's <code>forge/</code> state.</td></tr>
       <tr><td><code>config get [path] · set &lt;path&gt; &lt;value&gt;</code></td><td>Read/write project settings (see options below).</td></tr>
       <tr><td><code>preflight [--full]</code></td><td>Readiness checks; <code>--full</code> also executes the verify commands.</td></tr>
-      <tr><td><code>task add · list · show · start · verify · done · fail · block · cancel · update</code></td><td>The work-item lifecycle. <code>verify --artifact &lt;file&gt;</code> attaches evidence (screenshots); <code>fail --note</code> requires a diagnosis; <code>update</code> is the audited way to change an item.</td></tr>
+      <tr><td><code>task add · list · show · start · dispatch · verify · done · fail · block · cancel · update</code></td><td>The work-item lifecycle. <code>start</code> refuses an item with no <code>--allowed</code> file scope (deliberate: <code>--whole-tree --reason</code>) and enforces the concurrency cap; <code>dispatch --agent</code> records the handoff to a worker in state (<code>--kind message</code> audits a mid-flight message); <code>verify --artifact &lt;file&gt;</code> attaches evidence (screenshots); <code>fail --note</code> requires a diagnosis; <code>update</code> is the audited way to change an item.</td></tr>
       <tr><td><code>brief &lt;id&gt;</code></td><td>Generate the worker-brief skeleton for an item.</td></tr>
       <tr><td><code>milestone list · security &lt;M&gt; --note · approve &lt;M&gt; · reopen &lt;M&gt; --reason</code></td><td>Gate lifecycle. <code>approve</code> refuses without the security review (or explicit <code>--skip-security --reason</code>).</td></tr>
       <tr><td><code>decision add "title" · discovery add "title"</code></td><td>Append to the project logs (title required; <code>--authority human|forge</code>, <code>--evidence</code>, <code>--impact</code>…).</td></tr>
@@ -871,6 +908,8 @@ claude</span>
       <tr><td><code>options.gates</code></td><td><code>per-milestone</code> (default — stop for your testing) or <code>end-only</code>.</td></tr>
       <tr><td><code>options.security</code></td><td><code>off</code> disables the gate's security-review requirement for this project.</td></tr>
       <tr><td><code>options.protect</code></td><td>Comma-separated always-frozen paths, e.g. <code>"src/gen/,migrations/"</code>.</td></tr>
+      <tr><td><code>options.concurrency</code></td><td>Max work items in flight at once. Default <code>1</code> (serial — enforced, not a convention). Raising it is your call, never Forge's; parallel items must have disjoint file scopes and the CLI refuses overlap.</td></tr>
+      <tr><td><code>options.scopeExempt</code></td><td>Dirs exempt from the scope whitelist (orchestrator housekeeping). Default <code>forge/,spec/,docs/</code>; <code>*.md</code> is always exempt.</td></tr>
       <tr><td><code>specDir</code></td><td>Where the spec folder lives.</td></tr>
     </tbody>
   </table></div>

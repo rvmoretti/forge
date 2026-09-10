@@ -64,8 +64,10 @@ At **Step 7** (generate handoff artifacts), in addition to `CLAUDE.md` and
    know which screens have binding mocks.
 3. Convert `PLAN.md` into the work graph: one `forge task add` per task, in
    dependency order, with `--deps`, `--milestone` (from the confirmed cut),
-   and **acceptance criteria taken from the spec** (`04-logic.md` criteria
-   are mandatory sources). Give every criterion a machine check
+   an `--allowed` file scope per item (from the planned file layout — `task
+   start` refuses an unscoped item, and refine it before starting once real
+   code exists), and **acceptance criteria taken from the spec**
+   (`04-logic.md` criteria are mandatory sources). Give every criterion a machine check
    (`--criterion "desc::command"`) wherever one can exist — a criterion
    nobody can run is a weak gate, and the CLI's red-first check will flag
    vacuous ones. Screen items whose mock exists get a mock-fidelity

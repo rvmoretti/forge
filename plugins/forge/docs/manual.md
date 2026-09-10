@@ -44,7 +44,7 @@ stale/multiple cached versions.
    action), not pixels unless the user says so. Unmocked screens still get the design-ux pack.
 4. Spec gates → CLAUDE.md, PLAN.md, verify commands set, phase build, work graph created
    (`forge task add` per item, red-first machine-checkable criteria, `--milestone`, `--deps`,
-   `--component`). Preflight runs.
+   `--component`, `--allowed` file scope — start refuses without one). Preflight runs.
 5. User says "build it" (`/forge:build`) → build loop, milestone by milestone.
 6. At each gate: security pass first, then demo, verdict, feedback→decisions+items, approve.
 
@@ -79,11 +79,17 @@ changes how intent is gathered, never which gates apply. No special commands.
 
 ## The build loop (per item)
 
-1. **Brief** — `forge task start <id>` (records pre-work check results + tree) → `forge brief`
-   skeleton + spec excerpts, decisions, domain pack(s), scope from dependency closure. Screen
-   work: brief carries the design-ux pack + the approved mock; dispatch prompts start with
-   `# Work brief — <id>: <title>` (usage telemetry ties dispatches through it).
-2. **Worker executes** — one bounded task, fresh context; stops and reports on spec holes or
+1. **Scope & start** — derive the allowed-files scope from the dependency closure and RECORD it
+   (`forge task update <id> --allowed "..."`) — start refuses an unscoped item (deliberate
+   whole-tree work: `start --whole-tree --reason`). Then `forge task start <id>` (records
+   pre-work check results + tree). One item in flight by default: start refuses a second
+   IN_PROGRESS item (`options.concurrency`, default 1), and at higher caps refuses scope overlap.
+2. **Brief & dispatch** — `forge brief` skeleton + spec excerpts, decisions, domain pack(s).
+   Screen work: brief carries the design-ux pack + the approved mock. Record the handoff in
+   state — `forge task dispatch <id> --agent <worker>` — immediately before launching; a
+   mid-flight message to a running worker is recorded too (`--kind message --note`). Dispatch
+   prompts still start with `# Work brief — <id>: <title>` (ties old logs in usage telemetry).
+   **Worker executes** — one bounded task, fresh context; stops and reports on spec holes or
    scope conflicts. Routing: exploration → forge-explorer; test authoring → forge-tester;
    don't absorb worker-work on orchestrator tokens (measure = cost per DONE item).
 3. **Verify** — `forge task verify <id>`: all `verify.*` commands (incl. `verify.security`) +
@@ -123,9 +129,17 @@ evidence-or-nothing DONE (current tree) · red-first criteria (vacuous checks re
 ladder (diagnosis required; 3rd identical attempt refused) · milestone gates (human approval +
 security review) · baseline guard · one-orchestrator session lock (heartbeat on writes; second
 session's writes blocked; `forge session takeover --force` clears a dead lock; 15-min TTL) ·
-scope guard (item `scope.forbidden` + `options.protect` refused by hook; note: covers file-tool
-edits, not shell writes — review covers those) · stop gate · state write-guard (forge/state and
-config.json only via CLI) · titled logs (untitled decision/discovery refused) · living spec.
+scope guard, both directions (item `scope.forbidden` + `options.protect` blacklist, AND — when
+every in-progress item declares `scope.allowed` — a whitelist blocking edits outside the union;
+`forge/`, spec dir, `docs/`, `*.md` exempt via `options.scopeExempt`; covers file-tool edits,
+not shell writes — review covers those) · scope-required start (empty `scope.allowed` refused;
+`--whole-tree --reason` for deliberate exceptions) · concurrency gate (`options.concurrency`,
+default 1 = serial; higher caps require disjoint scopes — overlap refused) · state-write lock
+(concurrent forge processes serialised by `forge/state/work.lock`; live contention refused,
+dead-process locks broken + traced) · dispatch records (`task dispatch` — agent mix and
+mid-flight messages in state, not transcript inference) · stop gate · state write-guard
+(forge/state and config.json only via CLI) · titled logs (untitled decision/discovery
+refused) · living spec.
 
 ## Refusals — meaning → action (abbreviated)
 
@@ -145,6 +159,13 @@ config.json only via CLI) · titled logs (untitled decision/discovery refused) �
 - "Open work items are still IN_PROGRESS" (stop) → settle each item.
 - "needs a title — nothing was recorded" → re-run decision/discovery add with a title.
 - "dependents" on cancel → `--dependents drop|cancel` explicitly.
+- "no allowed file scope" → set it (`task update --allowed`) or declare whole-tree deliberately.
+- "concurrency cap reached" → resolve the in-flight item, or the user raises `options.concurrency`.
+- "overlaps the scope of in-progress item" → serialize the two items, or narrow one scope.
+- "OUTSIDE the allowed scope" (hook) → stop and report; widen scope deliberately if the path belongs.
+- "write-locked by another forge process" → another forge command is mid-write; wait and retry
+  (dead locks break automatically and are traced).
+- "not IN_PROGRESS — dispatch records a handoff" → start the item before recording its dispatch.
 
 Debugging rule (for the user AND the orchestrator): before working around anything, run
 `forge doctor` (install/state self-check: versions, cache, hooks, lock, orphaned IN_PROGRESS)
@@ -154,7 +175,8 @@ and `forge trace --refusals` (flight recorder: every CLI call + hook decision, v
 ## CLI reference (run as `node <plugin>/bin/forge.js <cmd>` from project root)
 
 `init` · `config get|set` · `preflight [--full]` ·
-`task add|list|show|start|verify|done|fail|block|cancel|update` (start: `--agent`, `--escalate`;
+`task add|list|show|start|dispatch|verify|done|fail|block|cancel|update` (start: `--agent`,
+`--escalate`, `--whole-tree --reason`; dispatch: `--agent`, `--kind launch|message`, `--note`;
 verify: `--artifact`, `--skip-baseline --reason`; add/update: `--criterion "desc::cmd"`,
 `--deps`, `--milestone`, `--component`, `--allowed`, `--forbidden`; update requires `--reason`
 when criteria change after failures; cancel: `--reason`, `--dependents drop|cancel`) ·
@@ -167,10 +189,14 @@ stop` (plugin internal).
 
 Config: `verify.test|lint|typecheck|security|…` (all run in every verify) · `options.gates
 per-milestone|end-only` · `options.security off` · `options.protect "p1/,p2/"` ·
-`options.graphify` · `options.web` · `specDir` · `phase spec|build`.
+`options.concurrency N` (max items in flight; default 1 = serial; raise only with disjoint
+scopes and the parallel-dispatch rules) · `options.scopeExempt "a/,b/"` (whitelist-exempt dirs;
+default forge/,spec/,docs/; *.md always exempt) · `options.graphify` · `options.web` ·
+`specDir` · `phase spec|build`.
 
 Project files: `forge/config.json` · `forge/state/` (work.json, preflight, baseline,
-session.json lock, components.json, trace.jsonl — hook-protected, CLI-only) · `forge/
+session.json lock, work.lock write-lock, components.json, trace.jsonl — hook-protected,
+CLI-only) · `forge/
 decisions.md` + `discoveries.md` (append-only, titled) · `forge/dashboard.html` (generated) ·
 `spec/` + `spec/mocks/`.
 

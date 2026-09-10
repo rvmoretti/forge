@@ -17,7 +17,7 @@ let dir;
 function forge(args, opts = {}) {
   const r = spawnSync(process.execPath, [CLI, ...args], {
     cwd: dir, encoding: 'utf8', input: opts.stdin || '',
-    env: Object.assign({}, process.env, { CLAUDE_PROJECT_DIR: dir })
+    env: Object.assign({}, process.env, { CLAUDE_PROJECT_DIR: dir }, opts.env || {})
   });
   return { code: r.status, out: (r.stdout || '') + (r.stderr || '') };
 }
@@ -39,7 +39,8 @@ function freshProject() {
   forge(['config', 'set', 'options.graphify', 'skip']);
 }
 function addItem(id, extra = []) {
-  return forge(['task', 'add', '--id', id, '--title', id, '--criterion', 'ok::node -e "process.exit(0)"', ...extra]);
+  // v0.12: start refuses an unscoped item — default a scope; explicit --allowed in `extra` wins (opt() takes the first).
+  return forge(['task', 'add', '--id', id, '--title', id, '--criterion', 'ok::node -e "process.exit(0)"', ...extra, '--allowed', 'src/']);
 }
 function touch(name) {
   fs.writeFileSync(path.join(dir, name), String(Math.random()));
@@ -368,7 +369,7 @@ test('discovery/decision add refuse without a title; positional title accepted',
 
 test('hook blocks edits to a forbidden path while its item is IN_PROGRESS, allows after done', () => {
   forge(['task', 'add', '--id', 'T1', '--title', 't', '--criterion', 'ok::node -e "process.exit(0)"',
-         '--forbidden', 'src/gen/,schemas/events.json']);
+         '--allowed', 'src/,schemas/', '--forbidden', 'src/gen/,schemas/events.json']);
   forge(['task', 'start', 'T1']);
   const dir1 = hook('pretooluse', { session_id: 's1', tool_name: 'Write', tool_input: { file_path: 'src/gen/Model.java' } });
   assert.strictEqual(dir1.code, 2);
@@ -398,8 +399,8 @@ test('config options.protect blocks edits regardless of work items', () => {
 // --- v0.6: stats ---------------------------------------------------------------
 
 test('stats reports first-pass rate, retries and milestone health', () => {
-  forge(['task', 'add', '--id', 'T1', '--title', 't', '--criterion', 'ok::node -e "process.exit(0)"', '--milestone', 'M1']);
-  forge(['task', 'add', '--id', 'T2', '--title', 't', '--criterion', 'ok::node -e "process.exit(0)"', '--milestone', 'M1']);
+  forge(['task', 'add', '--id', 'T1', '--title', 't', '--criterion', 'ok::node -e "process.exit(0)"', '--milestone', 'M1', '--allowed', 'src/']);
+  forge(['task', 'add', '--id', 'T2', '--title', 't', '--criterion', 'ok::node -e "process.exit(0)"', '--milestone', 'M1', '--allowed', 'src/']);
   forge(['task', 'start', 'T1']); touch('a.txt');
   forge(['task', 'verify', 'T1']); forge(['task', 'done', 'T1']);
   forge(['task', 'start', 'T2']);
@@ -517,4 +518,117 @@ test('components register, auto-register from --component, and render in the das
   assert.match(dash, /Listing detail/);
   assert.match(dash, /api-core/);
   assert.doesNotMatch(dash, /not tagged to any component/); // every item is tagged here
+});
+
+// --- v0.12: state-write lock -------------------------------------------------
+
+test('concurrent task adds all persist under the state lock', async () => {
+  const { spawn } = require('child_process');
+  const N = 12;
+  await Promise.all(Array.from({ length: N }, (_, i) => new Promise(res => {
+    spawn(process.execPath, [CLI, 'task', 'add', '--id', 'P' + i, '--title', 'p',
+      '--criterion', 'ok::node -e "process.exit(0)"', '--allowed', `p${i}/`], {
+      cwd: dir, env: Object.assign({}, process.env, { CLAUDE_PROJECT_DIR: dir, FORGE_LOCK_WAIT_MS: '30000' })
+    }).on('exit', res);
+  })));
+  const w = JSON.parse(fs.readFileSync(path.join(dir, 'forge', 'state', 'work.json'), 'utf8'));
+  assert.strictEqual(Object.keys(w.items).filter(k => k.startsWith('P')).length, N);
+});
+
+test('a live-holder lock refuses a concurrent mutation; a dead-holder lock breaks and is traced', () => {
+  const lock = path.join(dir, 'forge', 'state', 'work.lock');
+  fs.writeFileSync(lock, JSON.stringify({ pid: process.pid, ts: new Date().toISOString(), cmd: 'test-holder' }));
+  const refused = forge(['task', 'add', '--id', 'L1', '--title', 'l', '--criterion', 'ok::node -e "process.exit(0)"', '--allowed', 'l/'],
+    { env: { FORGE_LOCK_WAIT_MS: '300' } });
+  assert.notStrictEqual(refused.code, 0);
+  assert.match(refused.out, /write-locked/);
+  fs.writeFileSync(lock, JSON.stringify({ pid: 999999, ts: new Date().toISOString(), cmd: 'dead-holder' }));
+  const ok = forge(['task', 'add', '--id', 'L2', '--title', 'l', '--criterion', 'ok::node -e "process.exit(0)"', '--allowed', 'l2/']);
+  assert.strictEqual(ok.code, 0);
+  assert.match(fs.readFileSync(path.join(dir, 'forge', 'state', 'trace.jsonl'), 'utf8'), /lock-break/);
+  assert.ok(!fs.existsSync(lock)); // released on exit
+});
+
+test('read-only commands proceed while the lock is held', () => {
+  addItem('R1');
+  const lock = path.join(dir, 'forge', 'state', 'work.lock');
+  fs.writeFileSync(lock, JSON.stringify({ pid: process.pid, ts: new Date().toISOString(), cmd: 'test-holder' }));
+  assert.strictEqual(forge(['task', 'list'], { env: { FORGE_LOCK_WAIT_MS: '300' } }).code, 0);
+  assert.strictEqual(forge(['status'], { env: { FORGE_LOCK_WAIT_MS: '300' } }).code, 0);
+  fs.unlinkSync(lock);
+});
+
+// --- v0.12: scope.allowed required + whitelist --------------------------------
+
+test('start refuses an empty scope.allowed; --whole-tree needs a reason, then records **', () => {
+  forge(['task', 'add', '--id', 'S1', '--title', 's', '--criterion', 'ok::node -e "process.exit(0)"']);
+  const r = forge(['task', 'start', 'S1']);
+  assert.notStrictEqual(r.code, 0);
+  assert.match(r.out, /no allowed file scope/);
+  const noReason = forge(['task', 'start', 'S1', '--whole-tree']);
+  assert.notStrictEqual(noReason.code, 0);
+  assert.match(noReason.out, /--reason/);
+  assert.strictEqual(forge(['task', 'start', 'S1', '--whole-tree', '--reason', 'repo-wide rename']).code, 0);
+  const w = JSON.parse(fs.readFileSync(path.join(dir, 'forge', 'state', 'work.json'), 'utf8'));
+  assert.deepStrictEqual(w.items.S1.scope.allowed, ['**']);
+});
+
+test('hook enforces scope.allowed as a whitelist with exemptions; inert when an in-progress item lacks scope', () => {
+  addItem('W1'); // allowed: src/
+  forge(['task', 'start', 'W1']);
+  const outside = hook('pretooluse', { session_id: 's1', tool_name: 'Write', tool_input: { file_path: 'lib/x.js' } });
+  assert.strictEqual(outside.code, 2);
+  assert.match(outside.out, /OUTSIDE the allowed scope/);
+  assert.strictEqual(hook('pretooluse', { session_id: 's1', tool_name: 'Write', tool_input: { file_path: 'src/x.js' } }).code, 0);
+  assert.strictEqual(hook('pretooluse', { session_id: 's1', tool_name: 'Write', tool_input: { file_path: 'PLAN.md' } }).code, 0);
+  assert.strictEqual(hook('pretooluse', { session_id: 's1', tool_name: 'Write', tool_input: { file_path: 'docs/notes.txt' } }).code, 0);
+  assert.match(fs.readFileSync(path.join(dir, 'forge', 'state', 'trace.jsonl'), 'utf8'), /scope-allowed/);
+  // pre-v0.12 state compat: an in-progress item without a scope disables the whitelist (blacklist still applies)
+  const wf = path.join(dir, 'forge', 'state', 'work.json');
+  const w = JSON.parse(fs.readFileSync(wf, 'utf8'));
+  w.items.W1.scope.allowed = [];
+  fs.writeFileSync(wf, JSON.stringify(w));
+  assert.strictEqual(hook('pretooluse', { session_id: 's1', tool_name: 'Write', tool_input: { file_path: 'lib/x.js' } }).code, 0);
+});
+
+test('task list flags items without a scope and withholds READY', () => {
+  forge(['task', 'add', '--id', 'N1', '--title', 'n', '--criterion', 'ok::node -e "process.exit(0)"']);
+  const r = forge(['task', 'list']);
+  assert.match(r.out, /N1.*NO SCOPE/);
+  assert.doesNotMatch(r.out, /N1.*\[READY\]/);
+});
+
+// --- v0.12: concurrency cap + disjoint scopes ---------------------------------
+
+test('second in-flight item refused at default cap 1; cap 2 allows disjoint scopes, refuses overlap', () => {
+  addItem('C1'); // src/
+  forge(['task', 'add', '--id', 'C2', '--title', 'c', '--criterion', 'ok::node -e "process.exit(0)"', '--allowed', 'lib/']);
+  forge(['task', 'add', '--id', 'C3', '--title', 'c', '--criterion', 'ok::node -e "process.exit(0)"', '--allowed', 'src/deep/']);
+  forge(['task', 'start', 'C1']);
+  const capped = forge(['task', 'start', 'C2']);
+  assert.notStrictEqual(capped.code, 0);
+  assert.match(capped.out, /concurrency cap/);
+  forge(['config', 'set', 'options.concurrency', '2']);
+  const overlap = forge(['task', 'start', 'C3']);
+  assert.notStrictEqual(overlap.code, 0);
+  assert.match(overlap.out, /overlaps the scope/);
+  assert.strictEqual(forge(['task', 'start', 'C2']).code, 0);
+});
+
+// --- v0.12: dispatch records ---------------------------------------------------
+
+test('dispatch records launches and mid-flight messages on IN_PROGRESS items only', () => {
+  addItem('D1');
+  const early = forge(['task', 'dispatch', 'D1', '--agent', 'forge-implementer']);
+  assert.notStrictEqual(early.code, 0);
+  assert.match(early.out, /not IN_PROGRESS/);
+  forge(['task', 'start', 'D1']);
+  assert.strictEqual(forge(['task', 'dispatch', 'D1', '--agent', 'forge-implementer']).code, 0);
+  assert.strictEqual(forge(['task', 'dispatch', 'D1', '--kind', 'message', '--note', 'clarified API shape']).code, 0);
+  assert.notStrictEqual(forge(['task', 'dispatch', 'D1', '--kind', 'resume']).code, 0);
+  const w = JSON.parse(fs.readFileSync(path.join(dir, 'forge', 'state', 'work.json'), 'utf8'));
+  assert.strictEqual(w.items.D1.dispatches.length, 2);
+  assert.strictEqual(w.items.D1.dispatches[0].agent, 'forge-implementer');
+  assert.strictEqual(w.items.D1.dispatches[0].kind, 'launch');
+  assert.strictEqual(w.items.D1.dispatches[1].kind, 'message');
 });
