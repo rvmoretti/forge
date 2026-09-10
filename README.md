@@ -39,7 +39,7 @@ session resumes exactly where things stood.
 
 Every claim below is a refusal in code, not an instruction in a prompt —
 and every one is covered by a test in `tests/cli.test.js` (`npm test`,
-36 tests):
+44 tests):
 
 - **DONE requires a passing verification record for the current tree** — no record, a failed record, or evidence older than the latest edit all refuse.
 - **Checks must prove something** — `start` records each criterion check's pre-work result; if everything was green before work and nothing changed, `done` refuses (vacuous or already-satisfied criteria get flagged, not laundered).
@@ -52,7 +52,10 @@ and every one is covered by a test in `tests/cli.test.js` (`npm test`,
 - **Sessions can't end with silently dangling work** — the stop gate catches in-progress items and failed items parked in TODO.
 - **One orchestrator per project** — a session lock (heartbeat on every write) makes hooks refuse writes from a second session while the first is active; a clean finish releases it, a stale one ages out, and `forge session takeover --force` clears a dead session's lock.
 - **Log entries can't lose their identity** — `decision add` / `discovery add` refuse when no title is given (a bare positional argument counts as the title), instead of silently recording "(untitled)".
-- **Scope is enforced, not advisory** — while an item is IN_PROGRESS, edits to its `scope.forbidden` paths are blocked by the hook, and paths frozen in config (`options.protect`) are blocked always. (Applies to file-tool edits; shell-level writes remain a review concern.)
+- **Scope is enforced, not advisory — in both directions** — while an item is IN_PROGRESS, edits to its `scope.forbidden` paths are blocked by the hook, paths frozen in config (`options.protect`) are blocked always, and when every running item declares its `scope.allowed`, edits *outside* that territory are blocked too. An item can't even start without a declared scope (`--whole-tree --reason` for deliberate exceptions). (Applies to file-tool edits; shell-level writes remain a review concern.)
+- **One item in flight is a gate, not a habit** — `task start` refuses a second IN_PROGRESS item at the default `options.concurrency 1`; running items in parallel is a deliberate per-project setting, and parallel items must have disjoint file scopes — overlap is refused.
+- **Concurrent state writes can't silently lose an update** — every mutating command serialises through a lockfile; live contention refuses loudly, a dead process's lock breaks automatically and the break is traced.
+- **Worker handoffs are records, not archaeology** — `forge task dispatch` stores who was launched (and any mid-flight message to a running worker) in state, per attempt.
 
 Development discipline: **every field failure becomes a permanent test** —
 the session lock, the untitled-log refusal, and the dispatch-tie fallbacks
@@ -162,6 +165,41 @@ session recovers the full picture from disk — the conversation is never the
 memory.
 
 ## Changelog
+
+### v0.12.0 — guarded parallelism: the safety layer
+Origin: an external empirical review of a real Forge project (d2dauto, 87
+items) showed multi-worker bursts already happening unguarded, every item
+scope living only in brief prose, and a read-modify-write race on the work
+graph. v0.12 makes the implicit explicit and the unsafe refused — before any
+speed is chased:
+
+- **State-write lock** — every mutating `forge` command serialises through
+  `forge/state/work.lock` (retry + backoff; live contention refuses loudly
+  instead of silently losing an update; a dead process's lock breaks
+  automatically by PID-liveness and is recorded in the trace).
+- **Scope is now required and enforced as a whitelist.** `task start`
+  refuses an item with an empty `scope.allowed` (deliberate whole-tree work:
+  `--whole-tree --reason`, recorded). When every in-progress item declares a
+  scope, the PreToolUse hook blocks edits *outside* the union of allowed
+  scopes too — with `forge/`, the spec dir, `docs/` and `*.md` exempt as
+  orchestrator housekeeping (`options.scopeExempt`). `task list` and the
+  dashboard flag unscoped items.
+- **Concurrency is a gate, not a convention.** `options.concurrency`
+  (default **1** = serial, now enforced) caps items IN_PROGRESS; raising it
+  is the user's call only, and parallel items must have disjoint scopes —
+  overlap is refused at `start`. The contract gains a parallel-dispatch
+  section (dispatch-next-before-polling, shared-surface stays serial).
+- **`forge task dispatch <id> --agent <name>`** — the worker handoff becomes
+  a state record (append-only, per retry), replacing transcript inference;
+  `--kind message` audits mid-flight messages to a running worker (the
+  previously invisible SendMessage path). `forge usage` reports the state
+  records as authoritative when present.
+
+Deliberately not shipped yet, pending the review's validation protocol:
+raising the default cap, worktree isolation + integration items, and the
+9-second-review determination (tracked in TRACEABILITY).
+
+8 new tests (44 total).
 
 ### v0.11.0 — brownfield gets two doors
 The forge-brownfield skill now opens with an entry fork it asks the user

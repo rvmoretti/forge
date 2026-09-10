@@ -90,8 +90,18 @@ an explicitly recorded external source, and each is covered by tests:
 | Delegation routing (explorer/tester) | v0.8.0 | usage telemetry: 79/79 = implementer | contract model-economics |
 | design-ux pack + mocks-as-spec + `--artifact` | v0.9.0 | original METHOD's drawn frontend, restored | pack + method Step 7 + `verify --artifact` |
 | Component registry + dashboard project map | v0.10.0 | user's visual-map requirement | CLI `component` + generated dashboard |
+| Brownfield entry fork (bounded change / destination) | v0.11.0 | user's two-starting-points requirement | forge-brownfield §0 + §7 |
+| State-write lock (work.lock, PID-liveness stale-break) | v0.12.0 | external parallelism review of d2dauto: `saveWork` read-modify-write race | CLI `acquireWorkLock` around every mutating command |
+| Required + whitelist-enforced `scope.allowed` | v0.12.0 | same review: 0/87 items carried a scope; whitelist was inert | `task start` refusal + PreToolUse whitelist (union, exempt dirs) |
+| Concurrency gate (`options.concurrency`, disjoint scopes) | v0.12.0 | same review: 4-way unguarded worker bursts observed | `task start` cap + overlap refusal; contract parallel-dispatch section |
+| Dispatch records (`task dispatch`, incl. mid-flight messages) | v0.12.0 | same review: dispatch↔item tie by inference is fragile; 30 unaudited SendMessages | CLI `task dispatch` + contract step 3; `usage` reads state first |
 
 Still deferred, with triggers: the maintain loop (monitoring bands →
 auto-intent) until a Forge project has production traffic; continuous evals
 of agent configuration until an incident class demands one; parallel
-worktree orchestration (would need per-worktree locks).
+worktree orchestration + integration items (build only after the §8
+validation protocol on Changes 1–4 shows the concurrency gain is real —
+worktrees are the expensive change); the 9-second-review investigation
+(review-before-verify vs review-absent — determination to be recorded as a
+decision against d2dauto's transcripts, then a contract amendment or an
+observable review record).
