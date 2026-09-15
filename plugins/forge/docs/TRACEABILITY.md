@@ -95,6 +95,7 @@ an explicitly recorded external source, and each is covered by tests:
 | Required + whitelist-enforced `scope.allowed` | v0.12.0 | same review: 0/87 items carried a scope; whitelist was inert | `task start` refusal + PreToolUse whitelist (union, exempt dirs) |
 | Concurrency gate (`options.concurrency`, disjoint scopes) | v0.12.0 | same review: 4-way unguarded worker bursts observed | `task start` cap + overlap refusal; contract parallel-dispatch section |
 | Dispatch records (`task dispatch`, incl. mid-flight messages) | v0.12.0 | same review: dispatch↔item tie by inference is fragile; 30 unaudited SendMessages | CLI `task dispatch` + contract step 3; `usage` reads state first |
+| Dashboard telemetry panel (time live from state; tokens from `usage --write` snapshot) | v0.12.1 | user request — follow time/tokens per agent as a project progresses; log parsing stays out of the regen path | generated dashboard (projection only; trimmed medians, honest empty states) |
 
 Still deferred, with triggers: the maintain loop (monitoring bands →
 auto-intent) until a Forge project has production traffic; continuous evals

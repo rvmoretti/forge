@@ -39,7 +39,7 @@ session resumes exactly where things stood.
 
 Every claim below is a refusal in code, not an instruction in a prompt —
 and every one is covered by a test in `tests/cli.test.js` (`npm test`,
-44 tests):
+46 tests):
 
 - **DONE requires a passing verification record for the current tree** — no record, a failed record, or evidence older than the latest edit all refuse.
 - **Checks must prove something** — `start` records each criterion check's pre-work result; if everything was green before work and nothing changed, `done` refuses (vacuous or already-satisfied criteria get flagged, not laundered).
@@ -165,6 +165,17 @@ session recovers the full picture from disk — the conversation is never the
 memory.
 
 ## Changelog
+
+### v0.12.1 — telemetry on the dashboard
+The dashboard gains a telemetry section. **Development time** renders live
+from state timestamps: per-agent trimmed medians for prep (start→dispatch)
+and execution (dispatch→verify), built from v0.12's dispatch records, plus
+the median item span — labeled as what it is (wall-clock brackets, not agent
+runtime; windows over 2h excluded as session breaks). **Tokens** render from
+the last `forge usage --write` snapshot with its timestamp — logs are never
+parsed inside the dashboard regen, so every state operation stays instant,
+and per-agent token attribution the logs don't expose is shown as absent,
+never estimated. 2 new tests (46 total).
 
 ### v0.12.0 — guarded parallelism: the safety layer
 Origin: an external empirical review of a real Forge project (project-b, 87
