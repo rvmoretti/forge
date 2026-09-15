@@ -661,8 +661,11 @@ claude</span>
       <tr><td>The visual picture</td><td>open <code>forge/dashboard.html</code> in a browser</td>
         <td>Progress bar, the work graph by milestone, decisions, discoveries — and the
         <b>project map</b>: one box per component (a screen, an API, the database…) with its route,
-        progress, blockers, and its mock or latest screenshot. Regenerates on every change; just
-        reload the tab.</td></tr>
+        progress, blockers, and its mock or latest screenshot. Plus <b>telemetry</b>: development
+        time per agent (live from state — median prep and execution per worker type; wall-clock,
+        honestly labeled, session breaks trimmed) and token totals from the last
+        <code>forge usage --write</code> snapshot, stamped with when it was taken. Regenerates on
+        every change; just reload the tab.</td></tr>
       <tr><td>Process health</td><td><code>/forge:stats</code></td>
         <td>First-pass rate, retries, escalations, how long items take, per-milestone health.
         Falling first-pass rate = briefs or criteria degrading.</td></tr>

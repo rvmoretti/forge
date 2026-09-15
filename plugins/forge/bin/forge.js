@@ -287,6 +287,62 @@ function generateDashboard() {
       ${untagged ? `<p class="mut">${untagged} work item(s) not tagged to any component.</p>` : ''}`;
   }
 
+  // v0.12.1: telemetry — development time LIVE from state timestamps; tokens
+  // from the last `forge usage --write` snapshot (never parsed live: log
+  // parsing on every regen would slow every state operation).
+  let telemetryBlock = '';
+  {
+    const med = arr => { if (!arr.length) return null; const s2 = [...arr].sort((a, b) => a - b); return s2[Math.floor(s2.length / 2)]; };
+    const fmtDur = ms2 => ms2 == null ? '—' : (ms2 < 90000 ? Math.round(ms2 / 1000) + 's' : Math.round(ms2 / 60000) + 'm');
+    const TRIM = 2 * 60 * 60 * 1000; // windows over 2h = session break / human idle, excluded
+    const perAgent = {}; const itemSpans = [];
+    for (const id of w.order) {
+      const t = w.items[id];
+      const startedTs = (t.attempts || []).filter(a => a.outcome === 'started').map(a => Date.parse(a.ts)).filter(Number.isFinite);
+      const passedTs = (t.attempts || []).filter(a => a.outcome === 'passed').map(a => Date.parse(a.ts)).filter(Number.isFinite);
+      if (startedTs.length && passedTs.length) {
+        const span = Math.max(...passedTs) - Math.min(...startedTs);
+        if (span > 0 && span < TRIM) itemSpans.push(span);
+      }
+      for (const d of (t.dispatches || [])) {
+        const a = d.agent || '(agent not named)';
+        const rec = perAgent[a] = perAgent[a] || { launches: 0, msgs: 0, prep: [], exec: [] };
+        if (d.kind === 'message') { rec.msgs++; continue; }
+        rec.launches++;
+        const dts = Date.parse(d.ts); if (!Number.isFinite(dts)) continue;
+        const prevStart = startedTs.filter(x => x <= dts).sort((x, y) => x - y).pop();
+        if (prevStart != null) { const p = dts - prevStart; if (p >= 0 && p < TRIM) rec.prep.push(p); }
+        const nextVer = (t.verifications || []).map(v2 => Date.parse(v2.ts)).filter(x => Number.isFinite(x) && x >= dts).sort((x, y) => x - y)[0];
+        if (nextVer != null) { const e = nextVer - dts; if (e >= 0 && e < TRIM) rec.exec.push(e); }
+      }
+    }
+    const agentRows = Object.entries(perAgent).map(([a, r]) =>
+      `<tr><td><code>${esc(a)}</code></td><td class="mut">${r.launches}${r.msgs ? ` (+${r.msgs} msg)` : ''}</td><td>${fmtDur(med(r.prep))}</td><td>${fmtDur(med(r.exec))}</td></tr>`).join('');
+    const timePanel =
+      `<div><h2>Development time <span class="mut" style="font-weight:400">(live from state — wall-clock, not agent runtime)</span></h2>
+      <div class="tblwrap"><table><thead><tr><th>Agent</th><th>Dispatches</th><th>Median prep (start→dispatch)</th><th>Median execution (dispatch→verify)</th></tr></thead>
+      <tbody>${agentRows || `<tr><td colspan="4" class="mut">No dispatch records yet — they accumulate as items run under v0.12+ (forge task dispatch).</td></tr>`}</tbody></table></div>
+      <p class="mut" style="margin-top:6px">Median item start→done: <b>${fmtDur(med(itemSpans))}</b>${itemSpans.length ? ` (${itemSpans.length} item(s))` : ''} · trimmed medians — windows over 2h excluded as session breaks. Execution is the window the worker ran in, bracketed by CLI events; the worker's exact runtime lives only in transcripts (see forge usage).</p></div>`;
+    const usageSnap = readJson(path.join(STATE, 'usage.json'), null);
+    let tokenPanel;
+    if (usageSnap) {
+      let tokenRows = '';
+      for (const [model, threads] of Object.entries(usageSnap.models || {}))
+        for (const [thread, t2] of Object.entries(threads))
+          tokenRows += `<tr><td><code>${esc(model)}</code> <span class="mut">[${thread === 'main' ? 'orchestrator' : 'workers'}]</span></td><td class="mut">${t2.calls || 0}</td><td>${(t2.out || 0).toLocaleString()}</td><td class="mut">${(t2.in || 0).toLocaleString()}</td></tr>`;
+      const byType = Object.entries(usageSnap.byType || {}).map(([k, v2]) => `${esc(k)}×${v2}`).join(' · ');
+      const totOut = (usageSnap.mainOut || 0) + (usageSnap.sideOut || 0);
+      tokenPanel =
+        `<div><h2>Tokens <span class="mut" style="font-weight:400">(observed — snapshot as of ${esc(String(usageSnap.ts || '?').slice(0, 16).replace('T', ' '))})</span></h2>
+        <div class="tblwrap"><table><thead><tr><th>Model [thread]</th><th>Calls</th><th>Output</th><th>Input</th></tr></thead><tbody>${tokenRows || '<tr><td colspan="4" class="mut">empty snapshot</td></tr>'}</tbody></table></div>
+        <p class="mut" style="margin-top:6px">Output — orchestrator: <b>${(usageSnap.mainOut || 0).toLocaleString()}</b> · workers: <b>${(usageSnap.sideOut || 0).toLocaleString()}</b>${totOut ? ` (${Math.round(100 * (usageSnap.sideOut || 0) / totOut)}% delegated)` : ''}${byType ? ` · dispatches: ${byType}` : ''}.
+        Per-agent token attribution inside worker threads is not exposed by the logs — absent data is absent, never estimated. Refresh: <code>forge usage --write</code>.</p></div>`;
+    } else {
+      tokenPanel = `<div><h2>Tokens</h2><p class="mut">No usage snapshot yet — run <code>forge usage --write</code> (zero tokens, any terminal) and this panel fills in.</p></div>`;
+    }
+    telemetryBlock = `<div class="grid2">${timePanel}${tokenPanel}</div>`;
+  }
+
   const logBlock = (entries, empty) => entries.length
     ? entries.map(e => `<div class="log"><b>${esc(e.title)}</b><pre>${esc(e.body)}</pre></div>`).join('')
     : `<p class="mut">${empty}</p>`;
@@ -341,6 +397,7 @@ td{padding:8px 12px;border-bottom:1px solid #f0efe9;vertical-align:top} tr:last-
   <div class="card"><b>${counts.CANCELLED}</b><span>cancelled</span></div>
 </div>
 ${mapBlock}
+${telemetryBlock}
 <h2>Work graph</h2>
 ${milestoneBlocks || '<p class="mut">No work items yet.</p>'}
 <div class="grid2">

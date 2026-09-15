@@ -115,8 +115,12 @@ blocked-with-reason / failed-with-diagnosis).
 
 - `/forge:status` — phase, counts, blockers, what needs the human.
 - `forge/dashboard.html` — generated projection: progress, work graph, decisions/discoveries,
-  preflight, baseline, spec files, and the **project map** (one box per component: kind, route,
-  progress, in-progress/blocked/fails, mock or latest screenshot). Auto-regenerates; never edit.
+  preflight, baseline, spec files, the **project map** (one box per component: kind, route,
+  progress, in-progress/blocked/fails, mock or latest screenshot), and **telemetry** —
+  development time live from state (per-agent trimmed medians: prep = start→dispatch,
+  execution = dispatch→verify; wall-clock brackets, not agent runtime; >2h windows excluded
+  as session breaks) plus tokens from the last `forge usage --write` snapshot, stamped with
+  its timestamp (never parsed live; absent data is absent). Auto-regenerates; never edit.
 - `/forge:stats` — first-pass rate, failed attempts, most-retried items, escalations,
   start→done elapsed (wall-clock), per-milestone health.
 - `/forge:usage` — observed tokens by model, orchestrator vs workers, dispatches tied to items,

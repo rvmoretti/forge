@@ -615,6 +615,41 @@ test('second in-flight item refused at default cap 1; cap 2 allows disjoint scop
   assert.strictEqual(forge(['task', 'start', 'C2']).code, 0);
 });
 
+// --- v0.12.1: dashboard telemetry panel ----------------------------------------
+
+test('dashboard renders time telemetry from dispatch records and tokens from the usage snapshot', () => {
+  addItem('T1');
+  forge(['task', 'start', 'T1']);
+  forge(['task', 'dispatch', 'T1', '--agent', 'forge-implementer']);
+  touch('work.txt');
+  forge(['task', 'verify', 'T1']);
+  forge(['task', 'done', 'T1']);
+  // no snapshot yet → honest empty state
+  let dash = fs.readFileSync(path.join(dir, 'forge', 'dashboard.html'), 'utf8');
+  assert.match(dash, /Development time/);
+  assert.match(dash, /forge-implementer/);
+  assert.match(dash, /Median item start→done/);
+  assert.match(dash, /No usage snapshot yet/);
+  // snapshot present → token panel with staleness stamp
+  fs.writeFileSync(path.join(dir, 'forge', 'state', 'usage.json'), JSON.stringify({
+    ts: new Date().toISOString(),
+    models: { 'claude-sonnet': { main: { calls: 10, in: 5000, out: 2000 }, side: { calls: 30, in: 90000, out: 41000 } } },
+    byType: { 'forge:forge-implementer': 12 }, mainOut: 2000, sideOut: 41000
+  }));
+  forge(['dashboard']);
+  dash = fs.readFileSync(path.join(dir, 'forge', 'dashboard.html'), 'utf8');
+  assert.match(dash, /snapshot as of/);
+  assert.match(dash, /41,000/);
+  assert.match(dash, /% delegated/);
+});
+
+test('dashboard telemetry shows the no-records empty state on a fresh project', () => {
+  addItem('T1');
+  forge(['dashboard']);
+  const dash = fs.readFileSync(path.join(dir, 'forge', 'dashboard.html'), 'utf8');
+  assert.match(dash, /No dispatch records yet/);
+});
+
 // --- v0.12: dispatch records ---------------------------------------------------
 
 test('dispatch records launches and mid-flight messages on IN_PROGRESS items only', () => {
