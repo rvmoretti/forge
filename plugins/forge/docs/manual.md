@@ -31,6 +31,11 @@ as an either/or with a recommendation, recorded in decisions.md; (2) a high-risk
   delta. You are never off-process for changing your mind.
 - **The dashboard is surfaced, not hidden**: forge/dashboard.html reminders appear at init,
   milestone completion, and approval.
+- **Roadmap changes outside a build session**: the forge-roadmap-review skill (ships with the
+  plugin) is the product-owner intake desk — from Cowork/desktop with the project folder
+  connected, or a planning session: features, business rules, and mockups for FUTURE
+  milestones, all applied via the forge CLI, recorded as decisions, picked up automatically
+  by the next build session. It refuses while an orchestrator session is active.
 
 ## Install (once per machine)
 
