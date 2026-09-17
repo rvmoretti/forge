@@ -102,6 +102,7 @@ an explicitly recorded external source, and each is covered by tests:
 | Collapsible dashboard sections; scope warning scoped to the active milestone | v0.13.0 | usability: long graphs unreadable; thin backlog items spammed warnings | generated dashboard |
 | Verification timing in evidence + human gate-wait metric | v0.13.0 | vNext review: measure the time taxonomy before optimizing anything | `run()` ms per check → verification `durationMs`; telemetry panel |
 | Saved briefs (`brief --save` → forge/briefs/) + dashboard item cards, milestone component chips, next-touched, live filter | v0.13.1 | user: briefs were ephemeral/unreadable; "what gets touched when" invisible | CLI `brief --save` + contract step 2 + generated dashboard |
+| Dashboard redesign (branded shell, needs-you banner, KPI + pace/forecast projection, milestone rail, design strip) + `--mock` item field | v0.14.0 | user: dashboard unusable/unattractive; mocks invisible; no elapsed/remaining view | generated dashboard (projection; forecast labeled and computed only from observed pace) + `task --mock` |
 
 Still deferred, with triggers: the maintain loop (monitoring bands →
 auto-intent) until a Forge project has production traffic; continuous evals
