@@ -166,6 +166,17 @@ memory.
 
 ## Changelog
 
+### v0.13.2 — roadmap review ships with the plugin
+The product-owner intake desk (`forge-roadmap-review`) becomes a plugin skill,
+so every Forge install carries it: review and change the roadmap, future
+features, business rules, and mockups OUTSIDE a build session — from Cowork/
+desktop with the project folder connected, or a dedicated planning session —
+with every change applied through the forge CLI (never state edits), recorded
+as decisions, and picked up automatically by the next build session. Safety
+gates: refuses while an orchestrator session is active; touches only
+milestones not in progress. `docs/cowork-skills/` keeps the account-skill
+copy for Cowork users who prefer installing it there.
+
 ### v0.13.1 — the readable dashboard
 - **Every item opens into a card**: objective, acceptance criteria (with their
   machine checks), scope, component, dispatch history, verification evidence —
