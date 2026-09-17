@@ -12,6 +12,26 @@ The user is interrupted for exactly three things: (1) a product decision / spec 
 as an either/or with a recommendation, recorded in decisions.md; (2) a high-risk approval;
 (3) a milestone review — try the running slice, give a verdict, approve the gate.
 
+## You are always guided (v0.13)
+
+- **Every session opens with your next step.** The session-start hook computes it from state
+  (continue in-flight work / test a finished milestone / say "continue" for the next item /
+  resume the spec interview / start something new) and the orchestrator says it in plain words
+  first thing. `/forge:start` is the explicit entry command — any time you feel lost, run it.
+- **The feature dump has a named moment**: at project start (and entering brownfield
+  destination mode), Forge explicitly invites your feature lists, notes, sketches, mockups,
+  documents. That input shapes everything asked afterwards.
+- **The mockup stop is mandatory**: when the spec reaches screens, Forge stops and asks per
+  screen — Forge drafts a mock / you create+upload one (you get the spec excerpts to design
+  from) / consciously skip. Every choice, including skip, is recorded as a decision. Applies
+  to greenfield Step 7 AND brownfield goals that touch UI.
+- **Changing course is part of the process**: small change → decision + task add/update in the
+  current milestone; bigger change → the milestone gate, where Forge explicitly asks "anything
+  to change, add, or reprioritize?"; new destination → the roadmap intake re-runs for the
+  delta. You are never off-process for changing your mind.
+- **The dashboard is surfaced, not hidden**: forge/dashboard.html reminders appear at init,
+  milestone completion, and approval.
+
 ## Install (once per machine)
 
 Prereqs: Claude Code + git. In a Claude Code session inside each project that should use Forge:
@@ -113,6 +133,7 @@ blocked-with-reason / failed-with-diagnosis).
 
 ## Progress views (all zero/low token)
 
+- `/forge:start` — the guided entry: Forge reads state and walks the user to the next step.
 - `/forge:status` — phase, counts, blockers, what needs the human.
 - `forge/dashboard.html` — generated projection: progress, work graph, decisions/discoveries,
   preflight, baseline, spec files, the **project map** (one box per component: kind, route,
@@ -120,7 +141,10 @@ blocked-with-reason / failed-with-diagnosis).
   development time live from state (per-agent trimmed medians: prep = start→dispatch,
   execution = dispatch→verify; wall-clock brackets, not agent runtime; >2h windows excluded
   as session breaks) plus tokens from the last `forge usage --write` snapshot, stamped with
-  its timestamp (never parsed live; absent data is absent). Auto-regenerates; never edit.
+  its timestamp (never parsed live; absent data is absent). v0.13: every section is
+  collapsible — the active milestone opens, closed milestones fold away; time metrics add
+  median verification runtime (recorded per verify) and per-milestone human gate wait.
+  Auto-regenerates; never edit.
 - `/forge:stats` — first-pass rate, failed attempts, most-retried items, escalations,
   start→done elapsed (wall-clock), per-milestone health.
 - `/forge:usage` — observed tokens by model, orchestrator vs workers, dispatches tied to items,

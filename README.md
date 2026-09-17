@@ -39,7 +39,7 @@ session resumes exactly where things stood.
 
 Every claim below is a refusal in code, not an instruction in a prompt —
 and every one is covered by a test in `tests/cli.test.js` (`npm test`,
-46 tests):
+49 tests):
 
 - **DONE requires a passing verification record for the current tree** — no record, a failed record, or evidence older than the latest edit all refuse.
 - **Checks must prove something** — `start` records each criterion check's pre-work result; if everything was green before work and nothing changed, `done` refuses (vacuous or already-satisfied criteria get flagged, not laundered).
@@ -165,6 +165,40 @@ session recovers the full picture from disk — the conversation is never the
 memory.
 
 ## Changelog
+
+### v0.13.0 — the guided experience
+Field feedback from the first non-engineer users: the gates were solid but the
+journey between them wasn't. v0.13 makes Forge hold the user's hand:
+
+- **Every session opens with your next step** — the session-start hook computes
+  it deterministically from state (continue in-flight work / test a finished
+  milestone / "say continue" / resume the interview / start something new) and
+  the orchestrator says it first, in plain language. New `/forge:start`
+  command as the explicit guided entry.
+- **The feature dump has a named moment** — at project start and on entering
+  brownfield destination mode, Forge explicitly invites feature lists, notes,
+  sketches, mockups, documents.
+- **The mockup stop is mandatory, not an offer** — per screen: Forge drafts /
+  user uploads (handed the spec excerpts to design from) / conscious skip —
+  every choice recorded as a decision, silence is not a skip. Greenfield and
+  brownfield.
+- **Changing course is designed in** — the milestone gate now explicitly asks
+  "anything to change, add, or reprioritize?"; the contract routes small
+  changes (decision + task update), bigger ones (the gate), and new
+  destinations (roadmap-intake re-run for the delta).
+- **The whole project lives in the work graph** — the entire plan enters at
+  cut time, later milestones as thin items (criteria/scope added when their
+  milestone approaches); parked backlog documents are declared a drift bug.
+  Scope warnings now target only the active milestone.
+- **The project map stays honest** — component registry seeded as a Step 7 /
+  orientation deliverable; `task add` warns on untagged items; preflight
+  counts them.
+- **Dashboard: every section is collapsible** (active milestone open, closed
+  ones folded); dashboard reminders at init/milestone events; telemetry adds
+  median verification runtime (now recorded in every verification's evidence)
+  and per-milestone human gate wait.
+
+3 new tests (49 total).
 
 ### v0.12.1 — telemetry on the dashboard
 The dashboard gains a telemetry section. **Development time** renders live

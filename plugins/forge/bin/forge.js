@@ -158,14 +158,22 @@ function lockAge(l) {
 }
 
 function run(cmd, opts = {}) {
+  const t0 = Date.now();
   const r = spawnSync(cmd, { shell: true, cwd: PROJECT, encoding: 'utf8',
     timeout: opts.timeout || 600000, maxBuffer: 16 * 1024 * 1024 });
   const outText = ((r.stdout || '') + (r.stderr || '')).trim();
   return {
     cmd,
     exit: r.status === null ? -1 : r.status,
-    tail: outText.split('\n').slice(-40).join('\n')
+    tail: outText.split('\n').slice(-40).join('\n'),
+    ms: Date.now() - t0 // v0.13: verification time becomes observable in evidence records
   };
+}
+
+// v0.13: the first milestone with unfinished items — warnings target it, not the backlog
+function activeMilestone(w) {
+  for (const m of milestoneSeq(w)) if (!milestoneComplete(w, m)) return m;
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -229,27 +237,30 @@ function generateDashboard() {
     } catch (_) { /* ignore */ }
   }
 
+  const actM = activeMilestone(w);
   const milestoneBlocks = Object.entries(byMilestone).map(([m, items]) => {
     const gate = (w.gates || {})[m];
     const allClosed = items.every(x => ['DONE', 'CANCELLED'].includes(x.t.status));
     const gateChip = m === '(no milestone)' ? '' :
       gate && gate.approved ? chip('GATE APPROVED', '#15803d') :
       allClosed ? chip('AWAITING HUMAN APPROVAL', '#b45309') : chip('gate pending', '#57606f');
+    // v0.13: collapsible — the milestone that needs attention opens, closed ones fold away
+    const openAttr = (m === actM || m === '(no milestone)' || (allClosed && !(gate && gate.approved))) ? ' open' : '';
     const done = items.filter(x => x.t.status === 'DONE').length;
     const rows = items.map(({ t, isReady }) => {
       const fails = t.attempts.filter(a => a.outcome === 'failed').length;
       const lastV = t.verifications.length ? t.verifications[t.verifications.length - 1] : null;
       return `<tr>
         <td>${chip(isReady ? 'READY' : t.status, sColor[isReady ? 'READY' : t.status] || '#57606f')}</td>
-        <td><b>${esc(t.id || '')}</b> ${esc(t.title)}${t.status === 'BLOCKED' ? `<div class="mut">⛔ ${esc(t.blockReason)}</div>` : ''}${t.status === 'CANCELLED' ? `<div class="mut">✕ ${esc(t.cancelReason)}</div>` : ''}${!((t.scope || {}).allowed || []).length && !['DONE', 'CANCELLED'].includes(t.status) ? `<div class="mut" style="color:#b45309">⚠ no file scope — start will refuse (task update --allowed)</div>` : ''}</td>
+        <td><b>${esc(t.id || '')}</b> ${esc(t.title)}${t.status === 'BLOCKED' ? `<div class="mut">⛔ ${esc(t.blockReason)}</div>` : ''}${t.status === 'CANCELLED' ? `<div class="mut">✕ ${esc(t.cancelReason)}</div>` : ''}${!((t.scope || {}).allowed || []).length && !['DONE', 'CANCELLED'].includes(t.status) && (m === actM || m === '(no milestone)') ? `<div class="mut" style="color:#b45309">⚠ no file scope — start will refuse (task update --allowed)</div>` : ''}</td>
         <td class="mut">${t.deps.length ? t.deps.map(esc).join(', ') : '—'}</td>
         <td class="mut">${t.criteria.length}${t.criteria.some(c => c.check) ? ' ✓' : ''}</td>
         <td>${fails ? chip(fails + ' failed', '#b45309') : '<span class="mut">—</span>'}</td>
         <td>${lastV ? chip(lastV.passed ? 'passed' : 'failed', lastV.passed ? '#15803d' : '#b91c1c') + `<span class="mut" style="margin-left:6px">${esc(lastV.ts.slice(0, 16).replace('T', ' '))}</span>` : '<span class="mut">never</span>'}</td>
       </tr>`;
     }).join('');
-    return `<h3>${esc(m)} <span class="mut" style="font-weight:400">${done}/${items.length} done</span> ${gateChip}</h3>
-      <div class="tblwrap"><table><thead><tr><th>Status</th><th>Item</th><th>Deps</th><th>Criteria</th><th>Attempts</th><th>Last verification</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+    return `<details class="sec sub"${openAttr}><summary>${esc(m)} <span class="mut">${done}/${items.length} done</span> ${gateChip}</summary>
+      <div class="tblwrap" style="margin-top:8px"><table><thead><tr><th>Status</th><th>Item</th><th>Deps</th><th>Criteria</th><th>Attempts</th><th>Last verification</th></tr></thead><tbody>${rows}</tbody></table></div></details>`;
   }).join('');
 
   // v0.10: project map — one box per registered component
@@ -282,9 +293,9 @@ function generateDashboard() {
       </div>`;
     }).join('');
     const untagged = w.order.filter(id => !w.items[id].component).length;
-    mapBlock = `<h2>Project map <span class="mut" style="font-weight:400">(components — forge component add/update · items tagged via --component)</span></h2>
+    mapBlock = `<details class="sec" open><summary>Project map <span class="mut">(components — forge component add/update · items tagged via --component)</span></summary>
       <div class="cards" style="align-items:stretch">${boxes}</div>
-      ${untagged ? `<p class="mut">${untagged} work item(s) not tagged to any component.</p>` : ''}`;
+      ${untagged ? `<p class="mut">${untagged} work item(s) not tagged to any component.</p>` : ''}</details>`;
   }
 
   // v0.12.1: telemetry — development time LIVE from state timestamps; tokens
@@ -293,9 +304,25 @@ function generateDashboard() {
   let telemetryBlock = '';
   {
     const med = arr => { if (!arr.length) return null; const s2 = [...arr].sort((a, b) => a - b); return s2[Math.floor(s2.length / 2)]; };
-    const fmtDur = ms2 => ms2 == null ? '—' : (ms2 < 90000 ? Math.round(ms2 / 1000) + 's' : Math.round(ms2 / 60000) + 'm');
+    const fmtDur = ms2 => ms2 == null ? '—' : (ms2 < 90000 ? Math.round(ms2 / 1000) + 's' : (ms2 < 5400000 ? Math.round(ms2 / 60000) + 'm' : (ms2 / 3600000).toFixed(1) + 'h'));
     const TRIM = 2 * 60 * 60 * 1000; // windows over 2h = session break / human idle, excluded
-    const perAgent = {}; const itemSpans = [];
+    const perAgent = {}; const itemSpans = []; const verifDurs = [];
+    // v0.13 time taxonomy: verification runtime (from evidence records) + human gate wait
+    for (const id of w.order) for (const v3 of (w.items[id].verifications || [])) if (v3.durationMs) verifDurs.push(v3.durationMs);
+    const gateWaits = [];
+    for (const m3 of milestoneSeq(w)) {
+      const g3 = (w.gates || {})[m3];
+      if (!g3 || !g3.approved || !g3.ts) continue;
+      let lastPass = null;
+      for (const id of w.order) {
+        const t3 = w.items[id];
+        if (t3.milestone !== m3) continue;
+        for (const a3 of (t3.attempts || [])) if (a3.outcome === 'passed') {
+          const x = Date.parse(a3.ts); if (Number.isFinite(x) && (!lastPass || x > lastPass)) lastPass = x;
+        }
+      }
+      if (lastPass) { const wm = Date.parse(g3.ts) - lastPass; if (wm > 0) gateWaits.push(`${esc(m3)} ${fmtDur(wm)}`); }
+    }
     for (const id of w.order) {
       const t = w.items[id];
       const startedTs = (t.attempts || []).filter(a => a.outcome === 'started').map(a => Date.parse(a.ts)).filter(Number.isFinite);
@@ -319,10 +346,10 @@ function generateDashboard() {
     const agentRows = Object.entries(perAgent).map(([a, r]) =>
       `<tr><td><code>${esc(a)}</code></td><td class="mut">${r.launches}${r.msgs ? ` (+${r.msgs} msg)` : ''}</td><td>${fmtDur(med(r.prep))}</td><td>${fmtDur(med(r.exec))}</td></tr>`).join('');
     const timePanel =
-      `<div><h2>Development time <span class="mut" style="font-weight:400">(live from state — wall-clock, not agent runtime)</span></h2>
+      `<div><h3>Development time <span class="mut" style="font-weight:400">(live from state — wall-clock, not agent runtime)</span></h3>
       <div class="tblwrap"><table><thead><tr><th>Agent</th><th>Dispatches</th><th>Median prep (start→dispatch)</th><th>Median execution (dispatch→verify)</th></tr></thead>
       <tbody>${agentRows || `<tr><td colspan="4" class="mut">No dispatch records yet — they accumulate as items run under v0.12+ (forge task dispatch).</td></tr>`}</tbody></table></div>
-      <p class="mut" style="margin-top:6px">Median item start→done: <b>${fmtDur(med(itemSpans))}</b>${itemSpans.length ? ` (${itemSpans.length} item(s))` : ''} · trimmed medians — windows over 2h excluded as session breaks. Execution is the window the worker ran in, bracketed by CLI events; the worker's exact runtime lives only in transcripts (see forge usage).</p></div>`;
+      <p class="mut" style="margin-top:6px">Median item start→done: <b>${fmtDur(med(itemSpans))}</b>${itemSpans.length ? ` (${itemSpans.length} item(s))` : ''} · median verification run: <b>${fmtDur(med(verifDurs))}</b>${gateWaits.length ? ` · human gate wait: <b>${gateWaits.join(' · ')}</b>` : ''} · trimmed medians — windows over 2h excluded as session breaks. Execution is the window the worker ran in, bracketed by CLI events; the worker's exact runtime lives only in transcripts (see forge usage).</p></div>`;
     const usageSnap = readJson(path.join(STATE, 'usage.json'), null);
     let tokenPanel;
     if (usageSnap) {
@@ -333,14 +360,14 @@ function generateDashboard() {
       const byType = Object.entries(usageSnap.byType || {}).map(([k, v2]) => `${esc(k)}×${v2}`).join(' · ');
       const totOut = (usageSnap.mainOut || 0) + (usageSnap.sideOut || 0);
       tokenPanel =
-        `<div><h2>Tokens <span class="mut" style="font-weight:400">(observed — snapshot as of ${esc(String(usageSnap.ts || '?').slice(0, 16).replace('T', ' '))})</span></h2>
+        `<div><h3>Tokens <span class="mut" style="font-weight:400">(observed — snapshot as of ${esc(String(usageSnap.ts || '?').slice(0, 16).replace('T', ' '))})</span></h3>
         <div class="tblwrap"><table><thead><tr><th>Model [thread]</th><th>Calls</th><th>Output</th><th>Input</th></tr></thead><tbody>${tokenRows || '<tr><td colspan="4" class="mut">empty snapshot</td></tr>'}</tbody></table></div>
         <p class="mut" style="margin-top:6px">Output — orchestrator: <b>${(usageSnap.mainOut || 0).toLocaleString()}</b> · workers: <b>${(usageSnap.sideOut || 0).toLocaleString()}</b>${totOut ? ` (${Math.round(100 * (usageSnap.sideOut || 0) / totOut)}% delegated)` : ''}${byType ? ` · dispatches: ${byType}` : ''}.
         Per-agent token attribution inside worker threads is not exposed by the logs — absent data is absent, never estimated. Refresh: <code>forge usage --write</code>.</p></div>`;
     } else {
-      tokenPanel = `<div><h2>Tokens</h2><p class="mut">No usage snapshot yet — run <code>forge usage --write</code> (zero tokens, any terminal) and this panel fills in.</p></div>`;
+      tokenPanel = `<div><h3>Tokens</h3><p class="mut">No usage snapshot yet — run <code>forge usage --write</code> (zero tokens, any terminal) and this panel fills in.</p></div>`;
     }
-    telemetryBlock = `<div class="grid2">${timePanel}${tokenPanel}</div>`;
+    telemetryBlock = `<details class="sec" open><summary>Telemetry <span class="mut">(time live from state · tokens from the last usage snapshot)</span></summary><div class="grid2" style="margin-top:8px">${timePanel}${tokenPanel}</div></details>`;
   }
 
   const logBlock = (entries, empty) => entries.length
@@ -380,6 +407,13 @@ td{padding:8px 12px;border-bottom:1px solid #f0efe9;vertical-align:top} tr:last-
 .log pre{font-family:inherit;white-space:pre-wrap;color:#464b58;font-size:12.5px;margin-top:2px}
 .grid2{display:grid;grid-template-columns:1fr 1fr;gap:20px}@media(max-width:840px){.grid2{grid-template-columns:1fr}}
 .stamp{font-size:11.5px;color:#9aa0ad}
+details.sec{margin:20px 0 6px}
+details.sec>summary{cursor:pointer;user-select:none;font-weight:650;font-size:17px;padding:6px 0;letter-spacing:-.01em}
+details.sec>summary:hover{color:#3b3f8f}
+details.sec>summary .mut{font-weight:400}
+details.sec.sub{margin:10px 0}
+details.sec.sub>summary{font-size:14.5px}
+details.sec>summary::marker{color:#9aa0ad}
 </style></head><body><div class="wrap">
 <div class="head">
   <div><h1>⚙️ Forge — ${esc(cfg.project)}</h1>
@@ -398,20 +432,22 @@ td{padding:8px 12px;border-bottom:1px solid #f0efe9;vertical-align:top} tr:last-
 </div>
 ${mapBlock}
 ${telemetryBlock}
-<h2>Work graph</h2>
-${milestoneBlocks || '<p class="mut">No work items yet.</p>'}
-<div class="grid2">
-<div><h2>Decisions <span class="mut" style="font-weight:400">(latest first · forge/decisions.md)</span></h2>${logBlock(decisions, 'None recorded yet.')}</div>
-<div><h2>Discoveries <span class="mut" style="font-weight:400">(latest first · forge/discoveries.md)</span></h2>${logBlock(discoveries, 'None recorded yet.')}</div>
-</div>
-<div class="grid2">
-<div><h2>Preflight ${pf ? `<span class="mut" style="font-weight:400">${esc(pf.ts.slice(0, 16).replace('T', ' '))}</span>` : ''}</h2>
+<details class="sec" open><summary>Work graph <span class="mut">(the whole project — closed milestones fold away)</span></summary>
+${milestoneBlocks || '<p class="mut">No work items yet.</p>'}</details>
+<details class="sec" open><summary>Decisions &amp; discoveries <span class="mut">(latest first · forge/decisions.md · forge/discoveries.md)</span></summary>
+<div class="grid2" style="margin-top:8px">
+<div><h3>Decisions</h3>${logBlock(decisions, 'None recorded yet.')}</div>
+<div><h3>Discoveries</h3>${logBlock(discoveries, 'None recorded yet.')}</div>
+</div></details>
+<details class="sec"><summary>Preflight &amp; baseline ${pf ? `<span class="mut">preflight ${esc(pf.ts.slice(0, 16).replace('T', ' '))}</span>` : ''}</summary>
+<div class="grid2" style="margin-top:8px">
+<div><h3>Preflight</h3>
 <div class="tblwrap"><table><tbody>${pfBlock}</tbody></table></div></div>
-<div><h2>Baseline ${base ? `<span class="mut" style="font-weight:400">${esc(base.ts.slice(0, 16).replace('T', ' '))}</span>` : ''}</h2>
+<div><h3>Baseline ${base ? `<span class="mut" style="font-weight:400">${esc(base.ts.slice(0, 16).replace('T', ' '))}</span>` : ''}</h3>
 <div class="tblwrap"><table><tbody>${baseBlock}</tbody></table></div></div>
-</div>
-${specRows ? `<h2>Specification <span class="mut" style="font-weight:400">(${esc(cfg.specDir)}/ — the source of intent)</span></h2>
-<div class="tblwrap"><table><thead><tr><th>File</th><th>Size</th><th>Modified</th></tr></thead><tbody>${specRows}</tbody></table></div>` : ''}
+</div></details>
+${specRows ? `<details class="sec"><summary>Specification <span class="mut">(${esc(cfg.specDir)}/ — the source of intent)</span></summary>
+<div class="tblwrap" style="margin-top:8px"><table><thead><tr><th>File</th><th>Size</th><th>Modified</th></tr></thead><tbody>${specRows}</tbody></table></div></details>` : ''}
 </div></body></html>`;
 
   fs.mkdirSync(FORGE, { recursive: true });
@@ -568,6 +604,7 @@ const commands = {
     appendMd(DECISIONS_FILE, '# Decisions log (append-only, via forge CLI)', '');
     appendMd(DISCOVERIES_FILE, '# Discoveries log (append-only, via forge CLI)', '');
     out('Forge project state ready.');
+    out('📊 Tip for the user: forge/dashboard.html (open it in any browser) is the visual picture of the whole project — it updates itself on every change.');
   },
 
   // -- config ---------------------------------------------------------------
@@ -622,6 +659,14 @@ const commands = {
             const r = run(cmd);
             check(`verify.${k} runs`, r.exit === 0, r.exit === 0 ? 'green' : `exit ${r.exit} — record as pre-existing failure or fix before relying on this gate`, 'warning');
           }
+        }
+        // v0.13: the project map is only honest when items are tagged
+        {
+          const wPf = readJson(WORK_FILE, { items: {}, order: [] });
+          const untaggedPf = wPf.order.filter(id => !wPf.items[id].component && wPf.items[id].status !== 'CANCELLED').length;
+          if (wPf.order.length)
+            check('component map', untaggedPf === 0,
+              untaggedPf ? `${untaggedPf} work item(s) not tagged to a component — the project map is incomplete (forge task update <id> --component <c>)` : 'all items tagged', 'warning');
         }
         // v0.8: deterministic security scanning belongs in the verify path
         if ((cfg.options || {}).security !== 'off')
@@ -702,6 +747,8 @@ const commands = {
         }
       }
       out(`Created ${item.id}: ${item.title}`);
+      if (!w.items[item.id].component)
+        out(`WARNING: '${item.id}' has no --component tag — the dashboard project map cannot place it. Tag it: forge task update ${item.id} --component <id>`);
 
     } else if (sub === 'list') {
       const filter = opt('status');
@@ -710,8 +757,11 @@ const commands = {
         if (filter && t.status !== filter) continue;
         const noScope = !((t.scope || {}).allowed || []).length;
         const ready = t.status === 'TODO' && depsSatisfied(w, t).length === 0 && t.criteria.length > 0 && !noScope;
+        // v0.13: thin backlog items are legitimate — warn only where the work is live (active milestone or unmilestoned)
+        const actM = activeMilestone(w);
+        const warnScope = noScope && !['DONE', 'CANCELLED'].includes(t.status) && (!t.milestone || t.milestone === actM);
         out(`${t.status.padEnd(11)} ${id.padEnd(8)} ${t.title}${ready ? '  [READY]' : ''}` +
-            (noScope && !['DONE', 'CANCELLED'].includes(t.status) ? '  [NO SCOPE — start will refuse]' : '') +
+            (warnScope ? '  [NO SCOPE — start will refuse]' : '') +
             (t.deps.length ? `  deps: ${t.deps.join(',')}` : '') +
             (failedAttempts(t) ? `  failed-attempts: ${failedAttempts(t)}` : ''));
       }
@@ -816,7 +866,8 @@ const commands = {
         if (fs.existsSync(path.resolve(PROJECT, a))) return true;
         out(`WARNING: --artifact ${a} does not exist — not recorded.`); return false;
       });
-      item.verifications.push({ ts: ts(), passed, results, tree: treeState(), skippedBaseline, artifacts: artifacts.length ? artifacts : undefined });
+      item.verifications.push({ ts: ts(), passed, results, tree: treeState(), skippedBaseline, artifacts: artifacts.length ? artifacts : undefined,
+        durationMs: results.reduce((a, r) => a + (r.ms || 0), 0) });
       item.updated = ts();
       saveWork(w);
       for (const r of results) out(`${r.exit === 0 ? 'PASS' : 'FAIL'}  [${r.kind}] ${r.cmd}${r.note ? `  (${r.note})` : ''}${r.exit !== 0 ? '\n' + r.tail : ''}`);
@@ -855,8 +906,10 @@ const commands = {
       if (item.milestone && milestoneComplete(w, item.milestone) && !((w.gates || {})[item.milestone] || {}).approved
           && ((loadConfig() || {}).options || {}).gates !== 'end-only')
         out(`\nMILESTONE '${item.milestone}' IS COMPLETE and now awaits human review.\n` +
-            `Demo it to the user, collect their verdict, then: forge milestone approve ${item.milestone} --note "..."\n` +
-            `Items in later milestones will refuse to start until then.`);
+            `Demo it to the user, collect their verdict, AND ask: "anything you want to change or add before the next milestone?"\n` +
+            `— their answer becomes decisions + work-graph updates. Then: forge milestone approve ${item.milestone} --note "..."\n` +
+            `Items in later milestones will refuse to start until then.\n` +
+            `📊 Point the user at forge/dashboard.html for the visual state of the project.`);
 
     } else if (sub === 'fail') {
       const item = getItem(w, argv[2]);
@@ -1492,6 +1545,7 @@ const commands = {
       appendMd(DECISIONS_FILE, '# Decisions log (append-only, via forge CLI)',
         `\n### ${ts()} — Milestone '${m}' approved\n- Authority: human\n- Decision: milestone gate approved after human review${secSkip ? ` (SECURITY REVIEW SKIPPED: ${secSkip})` : ''}\n- Why: ${opt('note') || '(no note recorded)'}\n`);
       out(`Milestone '${m}' approved — later milestones may now start.`);
+      out(`📊 forge/dashboard.html now shows this milestone closed — worth a look for the user.`);
     } else if (sub === 'reopen') {
       const m = argv[2];
       if (!opt('reason')) die('Reopening a gate must be explicit: --reason "..."');
@@ -1529,10 +1583,50 @@ const commands = {
         const digest = spawnSync(process.execPath, [__filename, 'status'], { cwd: PROJECT, encoding: 'utf8' });
         parts.push('## Current project state\n```\n' + (digest.stdout || '') + '```');
         parts.push('Run `forge preflight` if state above shows it was never run or is stale.');
+        // v0.13: deterministic "next step" — the user is guided by the hand, every session.
+        try {
+          const wNS = JSON.parse(fs.readFileSync(WORK_FILE, 'utf8'));
+          const cfgNS = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
+          const items = wNS.order.map(id => wNS.items[id]);
+          const inProg = wNS.order.filter(id => wNS.items[id].status === 'IN_PROGRESS');
+          const blocked = wNS.order.filter(id => wNS.items[id].status === 'BLOCKED');
+          const ready = wNS.order.filter(id => {
+            const t = wNS.items[id];
+            return t.status === 'TODO' && (t.deps || []).every(d => !wNS.items[d] || wNS.items[d].status === 'DONE') && (t.criteria || []).length > 0;
+          });
+          const awaiting = [];
+          for (const m of milestoneSeq(wNS)) {
+            if (milestoneComplete(wNS, m) && !(((wNS.gates || {})[m]) || {}).approved) awaiting.push(m);
+          }
+          const allDone = items.length > 0 && items.every(t => ['DONE', 'CANCELLED'].includes(t.status));
+          let ns;
+          if (cfgNS.phase === 'spec') {
+            ns = 'This project is in the SPEC PHASE. Tell the user in plain words: "We\'re still designing — I\'ll pick the interview up where we left off." Resume the forge-method interview at the first ungated layer. If they have feature lists, notes, or sketches they haven\'t shared yet, ask for them NOW.';
+          } else if (inProg.length) {
+            ns = `Open work is IN_PROGRESS (${inProg.join(', ')}). Tell the user: "Picking up where we left off." Settle each in-flight item first (verify+done / fail with diagnosis / block with reason), then continue the build loop.`;
+          } else if (awaiting.length) {
+            ns = `Milestone '${awaiting[0]}' is COMPLETE and waiting for the USER's review. Tell them plainly: "Your turn — try the running slice" (say exactly how to run/see it), collect their verdict, ask what they'd like to change before the next milestone, then record: forge milestone approve ${awaiting[0]} --note "...".`;
+          } else if (ready.length) {
+            ns = `${ready.length} item(s) are READY. Tell the user: "Ready to keep building — say 'continue' and I'll take the next item (${ready[0]})." If they'd rather change direction first, take their feedback into decisions and the work graph before dispatching.`;
+          } else if (blocked.length) {
+            ns = `Everything runnable is BLOCKED (${blocked.join(', ')}). Surface each block reason to the user and resolve together — most blocks need a product answer only they can give.`;
+          } else if (allDone) {
+            ns = 'All planned work is DONE. Tell the user, then offer the two ways forward: (a) a bounded change, or (b) a new destination/feature set — the forge-brownfield entry fork. This is also the moment to share any new feature list or mockups.';
+          } else {
+            ns = 'The work graph is empty or nothing is startable. Review the spec/plan with the user and create or unblock work items (forge task add / update).';
+          }
+          parts.push('## YOUR NEXT STEP (tell the user this in plain language, first thing)\n' + ns +
+            '\n\n📊 Remind the user when useful: `forge/dashboard.html` (open in a browser) is the visual picture of the whole project — progress, milestones, components, telemetry. It updates itself.');
+        } catch (_) { /* guidance is best-effort; never break session start */ }
       } else {
-        parts.push('## Current project state\nForge is installed but this project has no forge/config.json yet.\n' +
-          '- New project → this is the SPEC PHASE: use the forge-method skill; run `forge init` to create state.\n' +
-          '- Existing codebase → use the forge-brownfield skill; run `forge init`, then orientation.');
+        parts.push('## Current project state\nForge is installed but this project has no forge/config.json yet.\n\n' +
+          '## GUIDE THE USER IN (they may be non-technical — hold their hand)\n' +
+          'Greet them, explain in one sentence what happens next, and ask which door fits:\n' +
+          '- **A new product from scratch** → forge-method skill: a layered interview (vision → domain → experience → API → logic → foundation). Tell them: "I\'ll ask you questions in plain language, one topic at a time — no tech knowledge needed."\n' +
+          '- **An existing codebase, one bounded change** → forge-brownfield skill, mode A.\n' +
+          '- **An existing codebase with a destination** (a feature list / roadmap / redesign) → forge-brownfield skill, mode B.\n' +
+          'THE FEATURE DUMP MOMENT IS NOW: explicitly invite them — "If you have feature lists, notes, sketches, or documents describing what you want, paste or attach them now; they shape everything I ask next." Never make them guess when to share.\n' +
+          'Then run `forge init` and begin. Mention once: forge/dashboard.html will be their visual progress page.');
       }
       // v0.5: one orchestrator per project — surface the lock at session start
       {

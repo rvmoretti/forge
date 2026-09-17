@@ -650,6 +650,58 @@ test('dashboard telemetry shows the no-records empty state on a fresh project', 
   assert.match(dash, /No dispatch records yet/);
 });
 
+// --- v0.13: guided experience + whole-graph + timing ---------------------------
+
+test('session-start injects a computed next step; welcome guidance when uninitialized', () => {
+  // uninitialized project → guided entry
+  const bare = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-welcome-'));
+  spawnSync('git', ['init', '-q'], { cwd: bare });
+  const r0 = spawnSync(process.execPath, [CLI, 'hook', 'session-start'], {
+    cwd: bare, encoding: 'utf8', input: '{}',
+    env: Object.assign({}, process.env, { CLAUDE_PROJECT_DIR: bare })
+  });
+  assert.match((r0.stdout || ''), /GUIDE THE USER IN/);
+  assert.match((r0.stdout || ''), /FEATURE DUMP MOMENT/);
+  // initialized project with an IN_PROGRESS item → "picking up" guidance
+  addItem('T1');
+  forge(['task', 'start', 'T1']);
+  const r1 = hook('session-start', {});
+  assert.match(r1.out, /YOUR NEXT STEP/);
+  assert.match(r1.out, /IN_PROGRESS \(T1\)/);
+  // milestone awaiting approval → "your turn" guidance
+  touch('w.txt');
+  forge(['task', 'verify', 'T1']);
+  forge(['task', 'done', 'T1']);
+  const r2 = hook('session-start', {});
+  assert.match(r2.out, /YOUR NEXT STEP/);
+});
+
+test('scope warning targets only the active milestone; thin later-milestone items stay quiet', () => {
+  forge(['task', 'add', '--id', 'A1', '--title', 'a', '--criterion', 'ok::node -e "process.exit(0)"', '--milestone', 'M1']); // active, unscoped → warn
+  forge(['task', 'add', '--id', 'Z9', '--title', 'z', '--milestone', 'M9']); // thin backlog → quiet
+  const r = forge(['task', 'list']);
+  assert.match(r.out, /A1.*NO SCOPE/);
+  assert.doesNotMatch(r.out, /Z9.*NO SCOPE/);
+});
+
+test('untagged component warning on add, preflight counts untagged, verification records duration', () => {
+  const add = forge(['task', 'add', '--id', 'C9', '--title', 'c', '--criterion', 'ok::node -e "process.exit(0)"', '--allowed', 'src/']);
+  assert.match(add.out, /no --component tag/);
+  const pf = forge(['preflight']);
+  assert.match(pf.out, /component map/);
+  assert.match(pf.out, /not tagged/);
+  forge(['task', 'start', 'C9']);
+  touch('w.txt');
+  forge(['task', 'verify', 'C9']);
+  const w = JSON.parse(fs.readFileSync(path.join(dir, 'forge', 'state', 'work.json'), 'utf8'));
+  const v = w.items.C9.verifications.at(-1);
+  assert.ok(typeof v.durationMs === 'number' && v.durationMs >= 0);
+  // dashboard is collapsible
+  const dash = fs.readFileSync(path.join(dir, 'forge', 'dashboard.html'), 'utf8');
+  assert.match(dash, /<details class="sec"/);
+  assert.match(dash, /<details class="sec sub" open/);
+});
+
 // --- v0.12: dispatch records ---------------------------------------------------
 
 test('dispatch records launches and mid-flight messages on IN_PROGRESS items only', () => {

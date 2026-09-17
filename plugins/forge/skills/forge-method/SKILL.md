@@ -28,7 +28,12 @@ Key behavioral rules it enforces (do not soften these):
 ## Forge integration (what this skill adds to the METHOD)
 
 At **Step 0**: if `forge/config.json` does not exist, run `forge init` so the
-project has state from the start (phase stays `spec`).
+project has state from the start (phase stays `spec`). **Open with the
+feature-dump invitation** before the first interview question: "if you have
+feature lists, notes, sketches, mockups, or documents describing what you
+want, share them NOW — they shape everything I ask next." Repeat the
+invitation at the Experience layer for anything visual. Never leave the user
+guessing when to hand over what they already have.
 
 At **Step 7** (generate handoff artifacts), in addition to `CLAUDE.md` and
 `PLAN.md`:
@@ -51,22 +56,34 @@ At **Step 7** (generate handoff artifacts), in addition to `CLAUDE.md` and
    Then ask one more either/or: stop for their testing after each milestone
    (`per-milestone`, recommended default) or run straight through
    (`end-only`)? Record it: `forge config set options.gates <choice>`.
-   **Mocks (products with a UI).** Offer the user the drawn-frontend path:
-   for each key screen in `02-experience.md`, a mock — Claude Design, a
-   Figma export, or a photographed sketch; wireframe fidelity is enough
-   unless a screen really matters. Approved mocks land in
-   `spec/mocks/<screen>.<ext>`, referenced from `02-experience.md`, with the
-   approval recorded (`forge decision add "Mock approved: <screen>"
+   **Mocks (products with a UI) — this is a MANDATORY STOP, not an offer.**
+   For each key screen (or screen group) in `02-experience.md`, present
+   three explicit choices: (a) Forge drafts a mock for approval, (b) the
+   user creates/uploads their own — hand them the relevant spec excerpts to
+   design from (Claude Design, Figma export, or a photographed sketch;
+   wireframe fidelity is enough unless a screen really matters), or
+   (c) consciously skip mocks for that screen. Wait for the answer; silence
+   is not a skip. Approved mocks land in `spec/mocks/<screen>.<ext>`,
+   referenced from `02-experience.md`, with the approval recorded
+   (`forge decision add "Mock approved: <screen>" --authority human`); a
+   skip is recorded too (`forge decision add "Mocks skipped: <scope>"
    --authority human`). A mock binds intent (hierarchy, grouping, primary
-   action) — pixel fidelity only if the user says so. Screens the user
-   declines to mock still get the `design-ux` pack at build time. This is an
-   offer, not a gate — record a decision either way so build-phase sessions
-   know which screens have binding mocks.
-3. Convert `PLAN.md` into the work graph: one `forge task add` per task, in
-   dependency order, with `--deps`, `--milestone` (from the confirmed cut),
-   an `--allowed` file scope per item (from the planned file layout — `task
-   start` refuses an unscoped item, and refine it before starting once real
-   code exists), and **acceptance criteria taken from the spec**
+   action) — pixel fidelity only if the user says so. Skipped screens still
+   get the `design-ux` pack at build time.
+3. Convert `PLAN.md` into the work graph — **the WHOLE plan, every
+   milestone**: one `forge task add` per task, in dependency order, with
+   `--deps` and `--milestone` (from the confirmed cut). Near-term items get
+   their `--allowed` file scope and full criteria now; later-milestone items
+   may enter THIN (id, title, objective, milestone, deps only — criteria and
+   scope are added via `task update` when their milestone approaches).
+   Nothing planned stays outside the graph — a backlog parked in a document
+   is invisible to every gate and view. **First seed the component
+   registry**: every subsystem the spec names becomes `forge component add
+   <id> --kind frontend|backend|db|job|integration` BEFORE items are
+   created, and every item carries `--component`. For items starting now:
+   `--allowed` scope (from the planned file layout — `task start` refuses an
+   unscoped item, and refine it before starting once real code exists) and
+   **acceptance criteria taken from the spec**
    (`04-logic.md` criteria are mandatory sources). Give every criterion a machine check
    (`--criterion "desc::command"`) wherever one can exist — a criterion
    nobody can run is a weak gate, and the CLI's red-first check will flag

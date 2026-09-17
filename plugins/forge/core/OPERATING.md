@@ -27,6 +27,14 @@ in this phase. The phase ends when the spec gates and you generate:
 `verify.lint`, `verify.typecheck`, `options.web`, `phase build`), and the work
 graph (`forge task add` per PLAN item, each with acceptance criteria drawn
 from the spec — every criterion with a machine check wherever possible).
+**The work graph carries the WHOLE project**: every planned item of every
+milestone goes in at cut time — later milestones as thin items (id, title,
+objective, `--milestone`, `--deps`; criteria and scope are added via
+`task update` when their milestone approaches). A backlog parked in a
+document instead of the graph is a spec-drift bug: invisible to every gate,
+stat, and view. Seed the component registry in the same step — every
+subsystem the spec names becomes `forge component add <id> --kind ...`
+BEFORE items are created, and every item carries `--component`.
 
 **Build phase**: run the loop below, item by item, milestone by milestone.
 
@@ -109,8 +117,10 @@ from confirmed goals, milestone cut across everything. Then the same loop.
    --reason`; per-project opt-out: `options.security off`). Deterministic
    scanning is separate and continuous: `verify.security` runs inside every
    `task verify`. Then demo the running slice to the user (the milestone's
-   demo criterion says how), collect their verdict, record it:
-   `forge milestone approve <M> --note "..."`. Their
+   demo criterion says how), collect their verdict, and **ask explicitly:
+   "anything you want to change, add, or reprioritize before the next
+   milestone?"** — the gate is the designed moment for course changes.
+   Record the approval: `forge milestone approve <M> --note "..."`. Their
    feedback becomes decisions and work-graph updates BEFORE the next
    milestone starts. The CLI refuses to start later-milestone items until
    the gate is approved — this is the user's early-drift catch; never ask
@@ -225,6 +235,38 @@ autonomously and keep the state current — they check progress with
 `/forge:status`, not by reading your narration. When you do interrupt, bring:
 what you found, the options, your recommendation, the consequences. Never ask
 "what should I do?" — ask "A or B; I recommend A because X."
+
+## The guided experience (the user may be non-technical — hold their hand)
+
+- **Every session opens with orientation.** First thing, tell the user in one
+  plain-language sentence where the project stands and what the single next
+  step is (the session-start hook computes it — deliver it, don't skip it).
+  The user must never have to guess what to do or say next; when input is
+  needed, ask for it as an either/or with a recommendation.
+- **The feature dump has a moment, and you name it.** At project start (and
+  whenever entering brownfield destination mode), explicitly invite: "if you
+  have feature lists, notes, sketches, mockups, or documents describing what
+  you want, share them NOW — they shape everything I ask next." Never let the
+  user wonder when to hand over what they have.
+- **The mockup stop is mandatory, not an offer.** When the spec reaches
+  screens (greenfield Step 7; brownfield goals that touch UI), STOP and give
+  the user three explicit choices per screen or screen group: (a) Forge
+  drafts mocks for approval, (b) the user creates/uploads mocks (give them
+  the spec excerpts to design from), or (c) consciously skip mocks. Whatever
+  they choose is recorded as a human decision — a skip is
+  `forge decision add "Mocks skipped: <scope>" --authority human`. Silence is
+  not a skip.
+- **Keep the dashboard visible.** At init, at every milestone event, and
+  whenever reporting progress, remind the user that `forge/dashboard.html`
+  (opened in any browser) is their visual picture — it updates itself.
+- **Changing course is normal — say how.** The user may change or add intent
+  at any time; route it by size: a small adaptation → record the decision,
+  `task add`/`task update` inside the current milestone; a bigger change →
+  fold it in at the next milestone gate (see step 6 — you ASK for changes
+  there); a new destination or roadmap shift → re-run the brownfield §7
+  intake for the delta (gap analysis on the new goals, spec updated, new
+  milestones cut). Never make the user feel a change is off-process — the
+  process exists to absorb change safely.
 
 ## Session discipline
 
