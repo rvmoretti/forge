@@ -294,9 +294,9 @@ function generateDashboard() {
         <td>${lastV ? chip(lastV.passed ? 'passed' : 'failed', lastV.passed ? '#15803d' : '#b91c1c') + `<span class="mut" style="margin-left:6px">${esc(lastV.ts.slice(0, 16).replace('T', ' '))}</span>` : '<span class="mut">never</span>'}</td>
       </tr>`;
     }).join('');
-    // v0.13.1: which components this milestone touches — "what gets touched when" at a glance
-    const mComps = [...new Set(items.map(x => x.t.component).filter(Boolean))];
-    return `<details class="sec sub"${openAttr}><summary>${esc(m)} <span class="mut">${done}/${items.length} done</span> ${gateChip}${mComps.length ? ` <span class="mchips">${mComps.map(compChip).join(' ')}</span>` : ''}</summary>
+    // v0.15: component chips removed from milestone headers (user feedback: pure noise at
+    // real-project density — components remain on item cards, the map, and the rail dots)
+    return `<details class="sec sub"${openAttr}><summary>${esc(m)} <span class="mut">${done}/${items.length} done</span> ${gateChip}</summary>
       <div class="tblwrap" style="margin-top:8px"><table><thead><tr><th>Status</th><th>Item</th><th>Deps</th><th>Criteria</th><th>Attempts</th><th>Last verification</th></tr></thead><tbody>${rows}</tbody></table></div></details>`;
   }).join('');
 
@@ -591,7 +591,6 @@ details.sec>summary .mut{font-weight:400}
 details.sec.sub{margin:10px 0}
 details.sec.sub>summary{font-size:14px;padding:6px 10px}
 details.sec>summary::marker{color:var(--ink3)}
-.mchips{margin-left:8px}
 details.icd{margin-top:5px}
 details.icd>summary{cursor:pointer;font-size:11.5px;color:var(--ink3);user-select:none;width:max-content;padding:1px 7px;border:1px solid var(--line);border-radius:6px;background:var(--ground)}
 details.icd>summary:hover{color:var(--accent);border-color:#d4551a55}
@@ -774,7 +773,64 @@ function getItem(w, id) {
 }
 
 function failedAttempts(item) {
-  return item.attempts.filter(a => a.outcome === 'failed').length;
+  // v0.15: provider failures (rate limit, outage, timeout) are the platform's
+  // fault, not the approach's — they never count toward the escalation ladder.
+  return item.attempts.filter(a => a.outcome === 'failed' && a.kind !== 'provider').length;
+}
+
+// v0.15: item-shape guard — field evidence (project-b T55): a mega-item stalls
+// workers, and a decision smuggled into criteria stalls the whole loop.
+// Warnings, not refusals: brownfield graphs legitimately vary in shape.
+function itemShapeWarnings(item) {
+  const warns = [];
+  const globs = ((item.scope || {}).allowed || []).length;
+  if (globs > 8)
+    warns.push(`scope has ${globs} allowed globs — items this wide stall workers (field evidence: a 17-glob item hit the watchdog). Prefer one item per surface.`);
+  if ((item.criteria || []).length > 6)
+    warns.push(`${item.criteria.length} acceptance criteria — a brief this heavy usually hides several items. Prefer decomposing before start.`);
+  for (const c of (item.criteria || []))
+    if (/\b(owner|user|human|product)\b[^.]*\b(decid\w+|choos\w+|choice)\b|\bdecide whether\b/i.test(c.desc || ''))
+      warns.push(`criterion reads like a PRODUCT DECISION, not acceptance: "${c.desc}" — resolve it with the owner (forge decision add) BEFORE work starts; never delegate a decision to a worker.`);
+  return warns;
+}
+
+// v0.15: same matcher semantics as the PreToolUse scope guard, for API workers.
+function globMatch(rel, pattern) {
+  const pat = String(pattern).replace(/\\/g, '/').replace(/^\.\//, '');
+  if (!pat) return false;
+  if (pat.endsWith('/')) return rel === pat.slice(0, -1) || rel.startsWith(pat);
+  if (pat.includes('*')) {
+    const re = new RegExp('^' + pat.split('*').map(s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('[^]*') + '$');
+    return re.test(rel);
+  }
+  return rel === pat || rel.startsWith(pat + '/');
+}
+
+// v0.15: brief text factored out — 'forge brief' prints/saves it and API
+// workers ('forge worker run') consume it directly.
+function briefLines(item, cfg) {
+  const lines = [];
+  lines.push(`# Work brief — ${item.id}: ${item.title}`);
+  lines.push('', `## Objective`, item.objective || '(fill in)');
+  lines.push('', `## Acceptance criteria (your work is verified against these — they are the definition of done)`);
+  item.criteria.forEach((c, i) => lines.push(`${i + 1}. ${c.desc}${c.check ? `  — machine check: \`${c.check}\`` : '  — (no machine check; explain how you validated it)'}`));
+  lines.push('', `## Scope`);
+  lines.push(`Allowed to modify: ${item.scope.allowed.length ? item.scope.allowed.join(', ') : '(orchestrator: derive from the dependency closure — use Graphify if available)'}`);
+  lines.push(`Must NOT touch: ${item.scope.forbidden.length ? item.scope.forbidden.join(', ') : '(orchestrator: fill in)'}`);
+  lines.push('', `## Project verification commands (will be run on your result)`);
+  Object.entries(cfg.verify || {}).forEach(([k, v]) => lines.push(`- ${k}: \`${v}\``));
+  // provider failures carry no approach diagnosis — only real failed attempts inform the retry
+  const fails = item.attempts.filter(a => a.outcome === 'failed' && a.kind !== 'provider');
+  if (fails.length) {
+    lines.push('', `## Previous failed attempts — do not repeat these approaches`);
+    fails.forEach(a => lines.push(`- ${a.ts}: ${a.note}`));
+  }
+  lines.push('', `## Rules`,
+    `- Stay inside the allowed scope. If correctness requires touching excluded areas, STOP and report — do not expand scope yourself.`,
+    `- If the spec does not answer a question you need answered, STOP and report the hole — never invent product behavior.`,
+    `- Report back: summary, files changed, tests run and results, discoveries, open questions.`);
+  lines.push('', `_Orchestrator: prepend relevant spec excerpts, decisions, and the applicable domain pack before dispatching._`);
+  return lines;
 }
 
 function lastVerification(item) {
@@ -1004,6 +1060,7 @@ const commands = {
       out(`Created ${item.id}: ${item.title}`);
       if (!w.items[item.id].component)
         out(`WARNING: '${item.id}' has no --component tag — the dashboard project map cannot place it. Tag it: forge task update ${item.id} --component <id>`);
+      for (const wmsg of itemShapeWarnings(w.items[item.id])) out(`ITEM-SHAPE WARNING: ${wmsg}`);
 
     } else if (sub === 'list') {
       const filter = opt('status');
@@ -1091,6 +1148,7 @@ const commands = {
       item.updated = ts();
       saveWork(w);
       out(`${item.id} → IN_PROGRESS${opt('escalate') ? ` (escalation: ${opt('escalate')})` : ''}`);
+      for (const wmsg of itemShapeWarnings(item)) out(`ITEM-SHAPE WARNING: ${wmsg}`);
       if (alreadyGreen.length)
         out(`WARNING: ${alreadyGreen.length} criterion check(s) ALREADY PASS before any work:\n` +
             alreadyGreen.map(p => `  - ${p.desc}`).join('\n') +
@@ -1169,13 +1227,21 @@ const commands = {
     } else if (sub === 'fail') {
       const item = getItem(w, argv[2]);
       if (item.status !== 'IN_PROGRESS') die(`'${item.id}' is not IN_PROGRESS.`);
-      item.attempts.push({ ts: ts(), outcome: 'failed', note: opt('note') || '(no diagnosis recorded)' });
+      // v0.15: provider-failure taxonomy — a rate limit / outage / timeout is not
+      // a failed approach and must not burn the escalation ladder.
+      const fkind = opt('kind') || null;
+      if (fkind && !['provider', 'worker'].includes(fkind))
+        die(`--kind must be 'provider' (rate limit / outage / timeout — does not count toward escalation) or 'worker' (the approach failed — counts).`);
+      item.attempts.push({ ts: ts(), outcome: 'failed', kind: fkind, note: opt('note') || '(no diagnosis recorded)' });
       item.status = 'TODO';
       item.updated = ts();
       saveWork(w);
       const fails = failedAttempts(item);
-      out(`${item.id} attempt recorded as failed (${fails} total). ` +
-          (fails >= 2 ? 'Next start REQUIRES --escalate.' : 'Diagnose before retrying — retry in a fresh worker context with the diagnosis in the brief.'));
+      if (fkind === 'provider')
+        out(`${item.id} attempt recorded as PROVIDER failure (escalation counter unchanged: ${fails}). Retry when the provider recovers, switch models, or fall back to a Claude worker.`);
+      else
+        out(`${item.id} attempt recorded as failed (${fails} total). ` +
+            (fails >= 2 ? 'Next start REQUIRES --escalate.' : 'Diagnose before retrying — retry in a fresh worker context with the diagnosis in the brief. A stall usually narrows (diagnose → shrink the brief); decompose when it cannot.'));
 
     } else if (sub === 'block') {
       const item = getItem(w, argv[2]);
@@ -1263,6 +1329,7 @@ const commands = {
       item.updated = ts();
       saveWork(w);
       out(`${item.id} updated:\n` + changes.map(c => `  - ${c}`).join('\n'));
+      for (const wmsg of itemShapeWarnings(item)) out(`ITEM-SHAPE WARNING: ${wmsg}`);
 
     } else if (sub === 'dispatch') {
       // v0.12: the handoff to a worker is a state event, not transcript archaeology.
@@ -1289,26 +1356,7 @@ const commands = {
     const w = loadWork();
     const item = getItem(w, argv[1]);
     const cfg = loadConfig() || {};
-    const lines = [];
-    lines.push(`# Work brief — ${item.id}: ${item.title}`);
-    lines.push('', `## Objective`, item.objective || '(fill in)');
-    lines.push('', `## Acceptance criteria (your work is verified against these — they are the definition of done)`);
-    item.criteria.forEach((c, i) => lines.push(`${i + 1}. ${c.desc}${c.check ? `  — machine check: \`${c.check}\`` : '  — (no machine check; explain how you validated it)'}`));
-    lines.push('', `## Scope`);
-    lines.push(`Allowed to modify: ${item.scope.allowed.length ? item.scope.allowed.join(', ') : '(orchestrator: derive from the dependency closure — use Graphify if available)'}`);
-    lines.push(`Must NOT touch: ${item.scope.forbidden.length ? item.scope.forbidden.join(', ') : '(orchestrator: fill in)'}`);
-    lines.push('', `## Project verification commands (will be run on your result)`);
-    Object.entries(cfg.verify || {}).forEach(([k, v]) => lines.push(`- ${k}: \`${v}\``));
-    const fails = item.attempts.filter(a => a.outcome === 'failed');
-    if (fails.length) {
-      lines.push('', `## Previous failed attempts — do not repeat these approaches`);
-      fails.forEach(a => lines.push(`- ${a.ts}: ${a.note}`));
-    }
-    lines.push('', `## Rules`,
-      `- Stay inside the allowed scope. If correctness requires touching excluded areas, STOP and report — do not expand scope yourself.`,
-      `- If the spec does not answer a question you need answered, STOP and report the hole — never invent product behavior.`,
-      `- Report back: summary, files changed, tests run and results, discoveries, open questions.`);
-    lines.push('', `_Orchestrator: prepend relevant spec excerpts, decisions, and the applicable domain pack before dispatching._`);
+    const lines = briefLines(item, cfg);
     // v0.13.1: briefs become readable artifacts — saved briefs are linked from the dashboard
     if (flag('save')) {
       const bdir = path.join(FORGE, 'briefs');
@@ -1318,6 +1366,200 @@ const commands = {
       out(`Saved skeleton to forge/briefs/${item.id}.md — COMPLETE IT IN PLACE (spec excerpts, decisions, domain pack) before dispatch.\n` +
           `The dashboard links it on the item's card, and dispatch prompts can reference the file path.`);
     } else out(lines.join('\n'));
+  },
+
+  // -- worker (v0.15, providers phase A) --------------------------------------
+  // An API worker: executes ONE already-started item against an OpenAI-compatible
+  // provider (default OpenRouter). The model runs in a tightly mediated loop —
+  // it can read the repo, write ONLY inside the item's allowed scope, and run
+  // ONLY the configured verify commands. Enforcement is in this code, not in
+  // the prompt. The orchestrator stays in its own harness; this is how cheap
+  // fast models take small, well-briefed items. Verification stays independent:
+  // the worker cannot mark the item done.
+  async worker() {
+    const sub = argv[1];
+    if (sub !== 'run') die('Usage: forge worker run <id> [--model <provider-model-id>] [--max-turns N]');
+    const w = loadWork();
+    const item = getItem(w, argv[2]);
+    if (item.status !== 'IN_PROGRESS')
+      die(`Refused: '${item.id}' is not IN_PROGRESS — every gate (criteria, deps, scope, concurrency, escalation) lives in 'task start'. Start it first.`);
+    const cfg = loadConfig() || {};
+    const prov = cfg.providers || {};
+    const baseUrl = String(opt('url') || prov.url || 'https://openrouter.ai/api/v1').replace(/\/+$/, '');
+    const model = opt('model') || prov.model;
+    if (!model)
+      die(`No worker model configured.\n  forge config set providers.model "<model-id>"   (any OpenRouter/OpenAI-compatible id)\nor pass --model. The orchestrator model is untouched by this — API workers are additive.`);
+    const keyEnv = prov.keyEnv || 'OPENROUTER_API_KEY';
+    const apiKey = process.env[keyEnv];
+    if (!apiKey)
+      die(`No API key: environment variable ${keyEnv} is not set. Keys are read from the environment and never stored on disk.\n  export ${keyEnv}=sk-...        (or name another variable: forge config set providers.keyEnv MY_VAR)`);
+    const maxTurns = parseInt(opt('max-turns') || prov.maxTurns, 10) || 24;
+    const reqTimeoutMs = parseInt(prov.requestTimeoutMs, 10) || 180000;
+    const verifyCmds = cfg.verify || {};
+
+    // The brief: the completed saved brief when it exists, else the generated skeleton.
+    const briefFile = path.join(FORGE, 'briefs', `${item.id}.md`);
+    const briefText = fs.existsSync(briefFile) ? fs.readFileSync(briefFile, 'utf8') : briefLines(item, cfg).join('\n');
+
+    const ROOT = path.resolve(PROJECT);
+    const relOf = (p) => {
+      const rel = path.relative(ROOT, path.resolve(ROOT, String(p))).replace(/\\/g, '/');
+      return (!rel || rel.startsWith('..') || path.isAbsolute(rel)) ? null : rel;
+    };
+    const SENSITIVE = /(^|\/)(\.env[^/]*|\.git|node_modules)(\/|$)/;
+    const written = [];
+
+    const tools = [
+      { type: 'function', function: { name: 'read_file', description: 'Read a repository file (UTF-8; truncated beyond 48KB).', parameters: { type: 'object', properties: { path: { type: 'string', description: 'path relative to the project root' } }, required: ['path'] } } },
+      { type: 'function', function: { name: 'list_dir', description: 'List a repository directory (directories end with /).', parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] } } },
+      { type: 'function', function: { name: 'write_file', description: 'Create or overwrite ONE file. Writes are machine-refused outside the item\'s allowed scope — do not attempt them.', parameters: { type: 'object', properties: { path: { type: 'string' }, content: { type: 'string' } }, required: ['path', 'content'] } } },
+      { type: 'function', function: { name: 'run_verify', description: `Run a configured project verification command. which: one of ${JSON.stringify(Object.keys(verifyCmds))} or "all". No other commands can be run.`, parameters: { type: 'object', properties: { which: { type: 'string' } }, required: ['which'] } } },
+      { type: 'function', function: { name: 'done', description: 'Finish the attempt. Call with an honest summary when the criteria are satisfied — or with blocked=true and the exact blocker (spec hole, scope too narrow) if you cannot proceed.', parameters: { type: 'object', properties: { summary: { type: 'string' }, blocked: { type: 'boolean' } }, required: ['summary'] } } }
+    ];
+
+    const execTool = (name, args) => {
+      if (name === 'read_file') {
+        const rel = relOf(args.path);
+        if (!rel) return `ERROR: path escapes the project root.`;
+        if (SENSITIVE.test(rel)) return `ERROR: refused — sensitive path (${rel}).`;
+        try {
+          const buf = fs.readFileSync(path.join(ROOT, rel), 'utf8');
+          return buf.length > 48 * 1024 ? buf.slice(0, 48 * 1024) + `\n...[truncated: file is ${buf.length} chars]` : buf;
+        } catch (e) { return `ERROR: ${e.code || e.message}`; }
+      }
+      if (name === 'list_dir') {
+        const rel = relOf(args.path || '.');
+        if (rel === null) return `ERROR: path escapes the project root.`;
+        try {
+          const ents = fs.readdirSync(path.join(ROOT, rel || '.'), { withFileTypes: true })
+            .filter(d => !SENSITIVE.test((rel ? rel + '/' : '') + d.name))
+            .slice(0, 200).map(d => d.isDirectory() ? d.name + '/' : d.name);
+          return ents.join('\n') || '(empty)';
+        } catch (e) { return `ERROR: ${e.code || e.message}`; }
+      }
+      if (name === 'write_file') {
+        const rel = relOf(args.path);
+        if (!rel) return `ERROR: path escapes the project root.`;
+        if (rel === 'forge' || rel.startsWith('forge/')) return `SCOPE GUARD: forge/ is orchestrator territory — workers never write Forge state.`;
+        const hitF = ((item.scope || {}).forbidden || []).find(p => globMatch(rel, p));
+        if (hitF) return `SCOPE GUARD: '${rel}' is in the FORBIDDEN scope of this item ('${hitF}') — the write is refused. If correctness requires it, call done with blocked=true and report.`;
+        if (!(item.scope.allowed || []).some(p => globMatch(rel, p)))
+          return `SCOPE GUARD: '${rel}' is OUTSIDE the allowed scope of this item (${item.scope.allowed.join(', ')}) — the write is refused. If correctness requires it, call done with blocked=true and report.`;
+        try {
+          fs.mkdirSync(path.dirname(path.join(ROOT, rel)), { recursive: true });
+          fs.writeFileSync(path.join(ROOT, rel), String(args.content));
+          if (!written.includes(rel)) written.push(rel);
+          return `OK: wrote ${rel} (${String(args.content).length} chars)`;
+        } catch (e) { return `ERROR: ${e.code || e.message}`; }
+      }
+      if (name === 'run_verify') {
+        const keys = args.which === 'all' ? Object.keys(verifyCmds) : [args.which];
+        if (!keys.length) return 'ERROR: no verification commands configured.';
+        return keys.map(k => {
+          if (!verifyCmds[k]) return `ERROR: '${k}' is not a configured verify command (${Object.keys(verifyCmds).join(', ') || 'none'}).`;
+          const r = run(verifyCmds[k], { timeout: 300000 });
+          return `[${k}] exit=${r.exit}\n${(r.tail || '').slice(-6000)}`;
+        }).join('\n\n');
+      }
+      return `ERROR: unknown tool '${name}'.`;
+    };
+
+    const sys = [
+      `You are a Forge API worker executing ONE work item in an existing codebase. You are not the architect and not the product owner.`,
+      `Machine-enforced rules (not suggestions — the harness refuses violations):`,
+      `- write_file works ONLY inside the item's allowed scope; forge/ and forbidden paths are refused.`,
+      `- run_verify runs ONLY the project's configured verification commands.`,
+      `- You cannot mark the item done; the orchestrator verifies your work independently afterwards.`,
+      `Method: read what you need first; make focused changes; run_verify; iterate until the acceptance criteria pass; then call done with an honest summary (files changed, checks run, open questions).`,
+      `If the brief has a hole or the scope is too narrow to do the work correctly: STOP and call done with blocked=true and the exact question — never invent product behavior, never work around the scope.`
+    ].join('\n');
+
+    const messages = [{ role: 'system', content: sys }, { role: 'user', content: briefText }];
+    let tokIn = 0, tokOut = 0, turns = 0, finish = null;
+
+    const providerDie = (detail) => {
+      traceEvent({ outcome: 'provider-failure', item: item.id, model, detail: String(detail).slice(0, 200) });
+      process.stderr.write(
+        `PROVIDER FAILURE: ${detail}\nThis is the platform's fault, not the approach's. Record it WITHOUT burning the escalation ladder:\n` +
+        `  forge task fail ${item.id} --kind provider --note "${String(detail).replace(/"/g, "'").slice(0, 120)}"\n` +
+        `Then retry later, switch models (--model), or fall back to a Claude worker.\n`);
+      process.exit(3);
+    };
+
+    const chat = async () => {
+      const ctl = new AbortController();
+      const timer = setTimeout(() => ctl.abort(), reqTimeoutMs);
+      let res;
+      try {
+        res = await fetch(baseUrl + '/chat/completions', {
+          method: 'POST', signal: ctl.signal,
+          headers: { 'content-type': 'application/json', authorization: `Bearer ${apiKey}` },
+          body: JSON.stringify({ model, messages, tools, tool_choice: 'auto' })
+        });
+      } catch (e) {
+        providerDie(`network/timeout error calling ${baseUrl}: ${e.name === 'AbortError' ? `no response within ${reqTimeoutMs}ms` : e.message}`);
+      } finally { clearTimeout(timer); }
+      if (res.status === 429 || res.status >= 500) providerDie(`HTTP ${res.status} from ${baseUrl}: ${(await res.text().catch(() => '')).slice(0, 300)}`);
+      if (res.status === 401 || res.status === 403) die(`Provider auth error (HTTP ${res.status}): check ${keyEnv}. Keys are never stored by Forge — re-export and retry.`);
+      if (!res.ok) die(`Provider rejected the request (HTTP ${res.status}): ${(await res.text().catch(() => '')).slice(0, 500)}`);
+      const data = await res.json().catch(() => providerDie('unparseable JSON response'));
+      if (data.usage) { tokIn += data.usage.prompt_tokens || 0; tokOut += data.usage.completion_tokens || 0; }
+      return (data.choices && data.choices[0] && data.choices[0].message) || providerDie('response has no choices[0].message');
+    };
+
+    out(`API worker → ${item.id} via ${model} (${baseUrl}) — max ${maxTurns} turns, brief: ${fs.existsSync(briefFile) ? `forge/briefs/${item.id}.md` : 'generated skeleton'}`);
+    while (turns < maxTurns && !finish) {
+      turns++;
+      const msg = await chat();
+      messages.push(msg);
+      const calls = msg.tool_calls || [];
+      if (!calls.length) {
+        messages.push({ role: 'user', content: 'Use the tools to act. When the work is complete (or blocked), call done.' });
+        continue;
+      }
+      for (const c of calls) {
+        let args = {}; try { args = JSON.parse(c.function.arguments || '{}'); } catch (_) { }
+        if (c.function.name === 'done') {
+          finish = { summary: String(args.summary || ''), blocked: !!args.blocked };
+          messages.push({ role: 'tool', tool_call_id: c.id, content: 'acknowledged' });
+          out(`[turn ${turns}] done${finish.blocked ? ' (BLOCKED)' : ''}`);
+          break;
+        }
+        const result = execTool(c.function.name, args);
+        out(`[turn ${turns}] ${c.function.name} ${String(args.path || args.which || '').slice(0, 80)}${String(result).startsWith('SCOPE GUARD') ? '  ← REFUSED (scope)' : ''}`);
+        messages.push({ role: 'tool', tool_call_id: c.id, content: String(result) });
+      }
+    }
+
+    // Record the dispatch in state (explicit lock — 'worker' loads read-only so the
+    // lock is not held across minutes of API calls).
+    acquireWorkLock();
+    try {
+      const w2 = readJson(WORK_FILE, { schema: 1, items: {}, order: [] });
+      const it2 = w2.items[item.id];
+      if (it2) {
+        it2.dispatches = it2.dispatches || [];
+        it2.dispatches.push({
+          ts: ts(), agent: model, kind: 'api', turns, tokensIn: tokIn, tokensOut: tokOut,
+          blocked: !!(finish && finish.blocked), filesWritten: written.slice(0, 50),
+          note: finish ? finish.summary.slice(0, 500) : `turn cap (${maxTurns}) hit without done`
+        });
+        it2.updated = ts();
+        writeJson(WORK_FILE, w2);
+      }
+    } finally { releaseWorkLock(); }
+    regenDashboard();
+
+    if (!finish)
+      die(`Worker hit the turn cap (${maxTurns}) without calling done — that is a worker failure, not a provider failure.\n` +
+          `  forge task fail ${item.id} --kind worker --note "turn cap: <what it was doing>"\n` +
+          `Diagnose and narrow the brief before retrying; decompose if it cannot be narrowed.`);
+    out(`\nWorker finished in ${turns} turn(s) — tokens in/out: ${tokIn.toLocaleString()}/${tokOut.toLocaleString()} — files written: ${written.length ? written.join(', ') : 'none'}`);
+    out(`Worker summary: ${finish.summary || '(none given)'}`);
+    if (finish.blocked)
+      out(`\nWorker reports BLOCKED — resolve the blocker (spec/decision/scope), then re-dispatch or fall back to a Claude worker.\n  forge task fail ${item.id} --kind worker --note "blocked: ..."   or   forge task block ${item.id} --reason "..."`);
+    else
+      out(`\nThe worker's word proves nothing — verification stays independent:\n  forge task verify ${item.id}\n  forge task done ${item.id}   (only after verify passes)`);
   },
 
   // -- decisions / discoveries -------------------------------------------------
@@ -2077,6 +2319,14 @@ const commands = {
   milestone list | approve <m> [--note] | reopen <m> --reason
                                          human gates between milestones (config: options.gates per-milestone|end-only)
   brief <id>                             print the brief skeleton for a work item
+  worker run <id> [--model m] [--max-turns N]
+                                         v0.15: execute an IN_PROGRESS item with an API worker
+                                         (OpenRouter/OpenAI-compatible). Reads the saved brief; writes
+                                         only inside the item's allowed scope; runs only configured
+                                         verify commands; records an 'api' dispatch with token counts.
+                                         Key from env (default OPENROUTER_API_KEY), never stored.
+  task fail <id> --kind provider|worker  provider = rate limit/outage/timeout — never counts toward
+                                         the escalation ladder; worker (default) = the approach failed
   decision add --title --decision --why [--authority human|forge]
   discovery add --title --evidence --impact [--affects T1,T2]
   baseline capture | check               brownfield: record and guard pre-existing state
@@ -2097,6 +2347,8 @@ const commands = {
                options.concurrency N     max items IN_PROGRESS at once (default 1 = serial; raise only with
                                          disjoint scopes — see OPERATING.md parallel dispatch)
                options.scopeExempt "a/,b/"  dirs exempt from the scope whitelist (default forge/,spec/,docs/; *.md always exempt)
+               providers.model "<id>" · providers.url (default https://openrouter.ai/api/v1) ·
+               providers.keyEnv (default OPENROUTER_API_KEY) · providers.maxTurns (default 24)
   state writes are serialised by forge/state/work.lock (concurrent forge processes wait, then refuse;
   a dead process's lock breaks automatically and is recorded in trace.jsonl)`);
   }
@@ -2106,4 +2358,6 @@ const commands = {
 
 const cmd = argv[0] || 'help';
 if (!commands[cmd]) die(`Unknown command '${cmd}'. Try: forge help`);
-commands[cmd]();
+const ret = commands[cmd]();
+// v0.15: 'worker' is async (provider API loop); every other command stays sync.
+if (ret && typeof ret.catch === 'function') ret.catch(e => die(String((e && e.message) || e)));

@@ -103,6 +103,10 @@ an explicitly recorded external source, and each is covered by tests:
 | Verification timing in evidence + human gate-wait metric | v0.13.0 | vNext review: measure the time taxonomy before optimizing anything | `run()` ms per check → verification `durationMs`; telemetry panel |
 | Saved briefs (`brief --save` → forge/briefs/) + dashboard item cards, milestone component chips, next-touched, live filter | v0.13.1 | user: briefs were ephemeral/unreadable; "what gets touched when" invisible | CLI `brief --save` + contract step 2 + generated dashboard |
 | Dashboard redesign (branded shell, needs-you banner, KPI + pace/forecast projection, milestone rail, design strip) + `--mock` item field | v0.14.0 | user: dashboard unusable/unattractive; mocks invisible; no elapsed/remaining view | generated dashboard (projection; forecast labeled and computed only from observed pace) + `task --mock` |
+| API workers, providers phase A (`worker run`: scope-sandboxed read/write/verify loop over OpenAI-compatible providers; `api` dispatch records with token counts) | v0.15.0 | user: workers locked to one vendor/subscription; measured improvement zero because levers never fired | CLI `worker run` + contract "API workers" section; sandbox enforced in code |
+| Provider-failure taxonomy (`fail --kind provider` exempt from escalation + brief history) | v0.15.0 | vNext review seed; field: platform errors would burn the retry ladder | CLI `task fail --kind` + `failedAttempts()` filter |
+| Item-shape guard (warn: >8 globs, >6 criteria, decision-shaped criteria) + stall rule (diagnose-and-narrow before decompose) | v0.15.0 | field (project-b T55): mega-item stalled 55min; narrowed retry finished in 24min; a smuggled decision criterion had to be removed mid-flight | CLI warnings at add/update/start + contract build-loop stall rule |
+| Milestone headers lose component chip rows | v0.15.0 | user: pills at real-project density are noise; components already on cards/map/rail | generated dashboard |
 
 Still deferred, with triggers: the maintain loop (monitoring bands →
 auto-intent) until a Forge project has production traffic; continuous evals
