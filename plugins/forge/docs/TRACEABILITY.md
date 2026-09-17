@@ -96,6 +96,11 @@ an explicitly recorded external source, and each is covered by tests:
 | Concurrency gate (`options.concurrency`, disjoint scopes) | v0.12.0 | same review: 4-way unguarded worker bursts observed | `task start` cap + overlap refusal; contract parallel-dispatch section |
 | Dispatch records (`task dispatch`, incl. mid-flight messages) | v0.12.0 | same review: dispatch↔item tie by inference is fragile; 30 unaudited SendMessages | CLI `task dispatch` + contract step 3; `usage` reads state first |
 | Dashboard telemetry panel (time live from state; tokens from `usage --write` snapshot) | v0.12.1 | user request — follow time/tokens per agent as a project progresses; log parsing stays out of the regen path | generated dashboard (projection only; trimmed medians, honest empty states) |
+| Guided experience (session next-step, `/forge:start`, named feature-dump moment, mandatory mock stop, gate change-invitation, dashboard reminders) | v0.13.0 | field feedback: non-technical users felt lost between install and build | session-start hook (deterministic next-step) + contract "guided experience" section + method/brownfield skills |
+| Whole-project work graph (thin later-milestone items; parked backlog docs = drift bug) | v0.13.0 | field: items living only in docs/handoff were invisible to every gate and view | contract spec-phase rule + method Step 7 + brownfield §7; `add` allows thin, `start` still gates |
+| Component seeding + untagged warnings | v0.13.0 | field: 0-tag projects rendered an empty/partial project map | skills (registry as Step 7/orientation deliverable) + `task add` warning + preflight check |
+| Collapsible dashboard sections; scope warning scoped to the active milestone | v0.13.0 | usability: long graphs unreadable; thin backlog items spammed warnings | generated dashboard |
+| Verification timing in evidence + human gate-wait metric | v0.13.0 | vNext review: measure the time taxonomy before optimizing anything | `run()` ms per check → verification `durationMs`; telemetry panel |
 
 Still deferred, with triggers: the maintain loop (monitoring bands →
 auto-intent) until a Forge project has production traffic; continuous evals

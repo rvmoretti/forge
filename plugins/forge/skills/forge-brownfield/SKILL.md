@@ -26,6 +26,12 @@ orienting:
 Mode A → run §1–§6 as written for the requested change.
 Mode B → run the roadmap intake (§7), which wraps §1–§6.
 
+**Name the feature-dump moment out loud, in both modes**: "if you have
+feature lists, notes, sketches, mockups, or documents describing what you
+want, share them NOW — they shape everything I ask next." In Mode B the
+dump IS step §7.1; in Mode A it may reveal the user actually wants Mode B.
+Never leave the user wondering when to hand over what they already have.
+
 If the user picked A but keeps adding "and later I also want…" items,
 offer B explicitly — a drip-fed roadmap forfeits cross-feature planning.
 
@@ -155,14 +161,24 @@ arrives from the code; the plan is the gap between them.
 5. **Seed the spec from the goals.** Create the spec skeleton (§4 rules) and
    write the user's confirmed goals into the layers as [CONFIRMED] intent;
    what orientation established about current behavior enters as [OBSERVED].
-   Approved mocks land in `spec/mocks/` referenced from 02-experience, each
-   approval recorded (`forge decision add "Mock approved: <screen>"
-   --authority human`).
+   **Then the mockup stop — MANDATORY for every goal that touches UI**: per
+   screen (or screen group), three explicit choices — (a) Forge drafts a
+   mock for approval, (b) the user creates/uploads one (hand them the spec
+   excerpts to design from), or (c) consciously skip. Wait for the answer;
+   silence is not a skip. Approved mocks land in `spec/mocks/` referenced
+   from 02-experience, each approval recorded (`forge decision add "Mock
+   approved: <screen>" --authority human`); a skip is recorded too
+   (`forge decision add "Mocks skipped: <scope>" --authority human`).
 
 6. **Milestone cut + work graph — apply the forge-method Step 7 machinery**
    (milestone proposal confirmed by the user, demo criterion each,
    red-first machine-checkable criteria, `--deps`/`--milestone`/
-   `--component`, gates choice, preflight). Two defaults to propose:
+   `--component`, gates choice, preflight). **The WHOLE destination enters
+   the graph at cut time** — later-milestone items as thin items (id,
+   title, objective, milestone, deps; criteria and scope via `task update`
+   when their milestone approaches). A backlog parked in a document is a
+   spec-drift bug. Seed the component registry first (`forge component add`
+   per subsystem the goals touch) so every item can be tagged. Two defaults to propose:
    the walking skeleton among the MISSING features first (integration risk
    surfaces early), and half-done features in early milestones (the messiest
    code exercises the baseline machinery first). In the same pass, set

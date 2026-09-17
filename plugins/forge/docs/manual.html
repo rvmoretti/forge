@@ -580,6 +580,31 @@ claude</span>
   <h2>⚙️ Daily driving — the build loop and your part in it</h2>
   <p class="lead">What runs while you're away, and the few moments that are yours.</p>
 
+  <div class="tblwrap"><table>
+    <thead><tr><th>You never have to guess…</th><th>Because (v0.13)</th></tr></thead>
+    <tbody>
+      <tr><td><b>What to do when you open a session</b></td><td>Every session opens with your
+        next step, computed from state — continue in-flight work, test a finished milestone,
+        say "continue" for the next item, resume the interview, or start something new. Feeling
+        lost anyway? Type <code>/forge:start</code> — the explicit guided entry.</td></tr>
+      <tr><td><b>When to hand over your feature lists</b></td><td>The feature-dump moment is
+        named out loud at project start and when entering the destination mode: paste or attach
+        your lists, notes, sketches, documents right then — they shape everything Forge asks
+        next.</td></tr>
+      <tr><td><b>When mockups happen</b></td><td>The mockup stop is mandatory: when the spec
+        reaches screens, Forge stops and asks per screen — Forge drafts a mock, you
+        create/upload one (you get the spec excerpts to design from), or you consciously skip.
+        Every choice, including the skip, is recorded as a decision.</td></tr>
+      <tr><td><b>How to change your mind mid-project</b></td><td>Small change → tell Forge any
+        time; it becomes a decision + work-graph update inside the current milestone. Bigger
+        change → the milestone gate, where Forge explicitly asks "anything to change, add, or
+        reprioritize before the next milestone?". A new destination → the roadmap intake
+        re-runs for the delta. Changing course is part of the process, never against it.</td></tr>
+      <tr><td><b>Where to look</b></td><td><code>forge/dashboard.html</code> — Forge reminds you
+        of it at init and every milestone. It's the visual picture and it updates itself.</td></tr>
+    </tbody>
+  </table></div>
+
   <figure>
     <svg viewBox="0 0 900 210" role="img" aria-label="The build loop: start and brief, worker executes, machine verification, review of evidence, done. Failures loop back through a mandatory diagnosis; the third identical attempt is refused.">
       <defs><marker id="a2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
@@ -873,6 +898,7 @@ claude</span>
   <h3>In the chat (slash commands — plain words always work too)</h3>
   <div class="tblwrap"><table id="cmdtable">
     <tbody>
+      <tr><td><code>/forge:start</code></td><td>Feeling lost? The guided entry — Forge reads the project state and walks you to the next step.</td></tr>
       <tr><td><code>/forge:status</code></td><td>Where are we? What needs me?</td></tr>
       <tr><td><code>/forge:build</code></td><td>Run the build loop.</td></tr>
       <tr><td><code>/forge:preflight</code></td><td>Environment &amp; readiness check.</td></tr>
