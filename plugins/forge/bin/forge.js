@@ -225,6 +225,10 @@ function generateDashboard() {
   const sColor = { DONE: '#15803d', IN_PROGRESS: '#3b3f8f', BLOCKED: '#b91c1c', TODO: '#57606f', CANCELLED: '#9aa0ad', READY: '#0f766e' };
   const chip = (label, color) =>
     `<span style="display:inline-block;font-size:10.5px;font-weight:700;letter-spacing:.04em;padding:1px 8px;border-radius:99px;border:1px solid ${color}44;color:${color};background:${color}12">${esc(label)}</span>`;
+  // v0.13.1: components loaded early — milestone sections show which components they touch
+  const comps = readJson(COMPONENTS_FILE, { schema: 1, components: {} }).components;
+  const kindColor = { frontend: '#3b3f8f', backend: '#0f766e', db: '#b45309', job: '#57606f', integration: '#7c3aed' };
+  const compChip = (cid) => chip(cid, kindColor[(comps[cid] || {}).kind] || '#57606f');
 
   // spec files
   let specRows = '';
@@ -250,26 +254,45 @@ function generateDashboard() {
     const rows = items.map(({ t, isReady }) => {
       const fails = t.attempts.filter(a => a.outcome === 'failed').length;
       const lastV = t.verifications.length ? t.verifications[t.verifications.length - 1] : null;
+      // v0.13.1: everything known about the item, one click away — plus the saved brief when it exists
+      const disp = t.dispatches || [];
+      const launches = disp.filter(d => d.kind !== 'message');
+      const msgs = disp.length - launches.length;
+      const agents = [...new Set(disp.map(d => d.agent).filter(Boolean))];
+      const hasBrief = t.id && fs.existsSync(path.join(FORGE, 'briefs', `${t.id}.md`));
+      const card = `<details class="icd"><summary>details${hasBrief ? ' · 📄 brief' : ''}</summary><div class="icdb">
+        ${t.objective ? `<p><b>Objective</b> — ${esc(t.objective)}</p>` : ''}
+        <p><b>Acceptance criteria</b></p><ol>${t.criteria.length ? t.criteria.map(c => `<li>${esc(c.desc)}${c.check ? ` — <code>${esc(c.check)}</code>` : ' <span class="mut">(no machine check)</span>'}</li>`).join('') : '<li class="mut">none yet (thin item — added when its milestone approaches)</li>'}</ol>
+        <p><b>Scope</b> — ${((t.scope || {}).allowed || []).length ? `<code>${esc(t.scope.allowed.join(', '))}</code>` : '<span class="mut">not set</span>'}${((t.scope || {}).forbidden || []).length ? ` · forbidden: <code>${esc(t.scope.forbidden.join(', '))}</code>` : ''}${t.component ? ` · component: ${compChip(t.component)}` : ''}</p>
+        ${disp.length ? `<p><b>Dispatches</b> — ${launches.length} launch(es)${msgs ? `, ${msgs} mid-flight message(s)` : ''}${agents.length ? ` · ${agents.map(esc).join(', ')}` : ''}</p>` : ''}
+        ${lastV ? `<p><b>Last verification</b> — ${lastV.passed ? 'passed' : 'failed'} ${esc(lastV.ts.slice(0, 16).replace('T', ' '))}${lastV.durationMs ? ` · ran ${Math.round(lastV.durationMs / 1000)}s` : ''}${(lastV.artifacts || []).length ? ` · evidence: ${lastV.artifacts.map(a => `<a href="../${esc(a)}">${esc(a)}</a>`).join(' · ')}` : ''}</p>` : ''}
+        ${hasBrief ? `<p>📄 <a href="briefs/${esc(t.id)}.md"><b>Read the full brief</b></a></p>` : ''}
+      </div></details>`;
       return `<tr>
         <td>${chip(isReady ? 'READY' : t.status, sColor[isReady ? 'READY' : t.status] || '#57606f')}</td>
-        <td><b>${esc(t.id || '')}</b> ${esc(t.title)}${t.status === 'BLOCKED' ? `<div class="mut">⛔ ${esc(t.blockReason)}</div>` : ''}${t.status === 'CANCELLED' ? `<div class="mut">✕ ${esc(t.cancelReason)}</div>` : ''}${!((t.scope || {}).allowed || []).length && !['DONE', 'CANCELLED'].includes(t.status) && (m === actM || m === '(no milestone)') ? `<div class="mut" style="color:#b45309">⚠ no file scope — start will refuse (task update --allowed)</div>` : ''}</td>
+        <td><b>${esc(t.id || '')}</b> ${esc(t.title)}${t.status === 'BLOCKED' ? `<div class="mut">⛔ ${esc(t.blockReason)}</div>` : ''}${t.status === 'CANCELLED' ? `<div class="mut">✕ ${esc(t.cancelReason)}</div>` : ''}${!((t.scope || {}).allowed || []).length && !['DONE', 'CANCELLED'].includes(t.status) && (m === actM || m === '(no milestone)') ? `<div class="mut" style="color:#b45309">⚠ no file scope — start will refuse (task update --allowed)</div>` : ''}${card}</td>
         <td class="mut">${t.deps.length ? t.deps.map(esc).join(', ') : '—'}</td>
         <td class="mut">${t.criteria.length}${t.criteria.some(c => c.check) ? ' ✓' : ''}</td>
         <td>${fails ? chip(fails + ' failed', '#b45309') : '<span class="mut">—</span>'}</td>
         <td>${lastV ? chip(lastV.passed ? 'passed' : 'failed', lastV.passed ? '#15803d' : '#b91c1c') + `<span class="mut" style="margin-left:6px">${esc(lastV.ts.slice(0, 16).replace('T', ' '))}</span>` : '<span class="mut">never</span>'}</td>
       </tr>`;
     }).join('');
-    return `<details class="sec sub"${openAttr}><summary>${esc(m)} <span class="mut">${done}/${items.length} done</span> ${gateChip}</summary>
+    // v0.13.1: which components this milestone touches — "what gets touched when" at a glance
+    const mComps = [...new Set(items.map(x => x.t.component).filter(Boolean))];
+    return `<details class="sec sub"${openAttr}><summary>${esc(m)} <span class="mut">${done}/${items.length} done</span> ${gateChip}${mComps.length ? ` <span class="mchips">${mComps.map(compChip).join(' ')}</span>` : ''}</summary>
       <div class="tblwrap" style="margin-top:8px"><table><thead><tr><th>Status</th><th>Item</th><th>Deps</th><th>Criteria</th><th>Attempts</th><th>Last verification</th></tr></thead><tbody>${rows}</tbody></table></div></details>`;
   }).join('');
 
   // v0.10: project map — one box per registered component
-  const comps = readJson(COMPONENTS_FILE, { schema: 1, components: {} }).components;
   let mapBlock = '';
   if (Object.keys(comps).length) {
-    const kindColor = { frontend: '#3b3f8f', backend: '#0f766e', db: '#b45309', job: '#57606f', integration: '#7c3aed' };
     const boxes = Object.values(comps).map(c => {
       const items = w.order.map(id => w.items[id]).filter(t => t.component === c.id);
+      // v0.13.1: when is this component touched next?
+      let nextM = null;
+      for (const m2 of milestoneSeq(w)) {
+        if (w.order.some(id => { const t2 = w.items[id]; return t2.component === c.id && t2.milestone === m2 && !['DONE', 'CANCELLED'].includes(t2.status); })) { nextM = m2; break; }
+      }
       const done = items.filter(t => t.status === 'DONE').length;
       const inProg = items.filter(t => t.status === 'IN_PROGRESS');
       const blocked = items.filter(t => t.status === 'BLOCKED');
@@ -287,7 +310,7 @@ function generateDashboard() {
         </div>
         ${c.route ? `<div class="mut"><code>${esc(c.route)}</code></div>` : ''}
         <div class="bar" style="margin:8px 0 4px"><div style="width:${pctC}%"></div></div>
-        <div class="mut">${done}/${items.length} done${inProg.length ? ` · <b style="color:#3b3f8f">${inProg.map(t => esc(t.id)).join(',')} in progress</b>` : ''}${blocked.length ? ` · <b style="color:#b91c1c">${blocked.length} blocked</b>` : ''}${fails ? ` · ${fails} failed attempt(s)` : ''}</div>
+        <div class="mut">${done}/${items.length} done${inProg.length ? ` · <b style="color:#3b3f8f">${inProg.map(t => esc(t.id)).join(',')} in progress</b>` : ''}${blocked.length ? ` · <b style="color:#b91c1c">${blocked.length} blocked</b>` : ''}${fails ? ` · ${fails} failed attempt(s)` : ''}${nextM ? ` · next touched: <b>${esc(nextM)}</b>` : (items.length ? ' · no open work' : '')}</div>
         ${c.doc ? `<div class="mut">📄 <code>${esc(c.doc)}</code></div>` : ''}
         ${imgTag}
       </div>`;
@@ -408,12 +431,28 @@ td{padding:8px 12px;border-bottom:1px solid #f0efe9;vertical-align:top} tr:last-
 .grid2{display:grid;grid-template-columns:1fr 1fr;gap:20px}@media(max-width:840px){.grid2{grid-template-columns:1fr}}
 .stamp{font-size:11.5px;color:#9aa0ad}
 details.sec{margin:20px 0 6px}
-details.sec>summary{cursor:pointer;user-select:none;font-weight:650;font-size:17px;padding:6px 0;letter-spacing:-.01em}
-details.sec>summary:hover{color:#3b3f8f}
+details.sec>summary{cursor:pointer;user-select:none;font-weight:650;font-size:17px;padding:8px 10px;letter-spacing:-.01em;border-radius:10px;transition:background .12s}
+details.sec>summary:hover{background:#f0efe9;color:#3b3f8f}
 details.sec>summary .mut{font-weight:400}
 details.sec.sub{margin:10px 0}
-details.sec.sub>summary{font-size:14.5px}
+details.sec.sub>summary{font-size:14.5px;padding:6px 10px}
 details.sec>summary::marker{color:#9aa0ad}
+.mchips{margin-left:8px}
+details.icd{margin-top:5px}
+details.icd>summary{cursor:pointer;font-size:11.5px;color:#6b7080;user-select:none;width:max-content;padding:1px 6px;border:1px solid #e6e4de;border-radius:6px;background:#faf9f6}
+details.icd>summary:hover{color:#3b3f8f;border-color:#3b3f8f55}
+details.icd[open]>summary{color:#3b3f8f}
+.icdb{background:#faf9f6;border:1px solid #e6e4de;border-radius:10px;padding:10px 14px;margin-top:6px;font-size:12.5px;color:#464b58}
+.icdb p{margin:4px 0}
+.icdb ol{margin:2px 0 6px 18px;padding:0}
+.icdb li{margin:2px 0}
+.tblwrap,.card,.log{box-shadow:0 1px 2px rgba(26,29,39,.04)}
+tbody tr{transition:background .1s}
+tbody tr:hover{background:#faf9f2}
+.filter{width:100%;max-width:380px;font:inherit;font-size:13px;padding:8px 12px;border:1px solid #e6e4de;border-radius:10px;background:#fff;margin:2px 0 4px;outline:none}
+.filter:focus{border-color:#3b3f8f88;box-shadow:0 0 0 3px #3b3f8f14}
+.bar{height:10px}
+.bar div{background:linear-gradient(90deg,#15803d,#1da24f)}
 </style></head><body><div class="wrap">
 <div class="head">
   <div><h1>⚙️ Forge — ${esc(cfg.project)}</h1>
@@ -433,6 +472,7 @@ details.sec>summary::marker{color:#9aa0ad}
 ${mapBlock}
 ${telemetryBlock}
 <details class="sec" open><summary>Work graph <span class="mut">(the whole project — closed milestones fold away)</span></summary>
+<input class="filter" id="wgfilter" type="search" placeholder="Filter items… (id, title, component, status)" aria-label="Filter work items">
 ${milestoneBlocks || '<p class="mut">No work items yet.</p>'}</details>
 <details class="sec" open><summary>Decisions &amp; discoveries <span class="mut">(latest first · forge/decisions.md · forge/discoveries.md)</span></summary>
 <div class="grid2" style="margin-top:8px">
@@ -448,7 +488,25 @@ ${milestoneBlocks || '<p class="mut">No work items yet.</p>'}</details>
 </div></details>
 ${specRows ? `<details class="sec"><summary>Specification <span class="mut">(${esc(cfg.specDir)}/ — the source of intent)</span></summary>
 <div class="tblwrap" style="margin-top:8px"><table><thead><tr><th>File</th><th>Size</th><th>Modified</th></tr></thead><tbody>${specRows}</tbody></table></div></details>` : ''}
-</div></body></html>`;
+</div>
+<script>
+(function(){
+  var i=document.getElementById('wgfilter'); if(!i) return;
+  i.addEventListener('input',function(){
+    var q=i.value.toLowerCase();
+    document.querySelectorAll('details.sec.sub').forEach(function(d){
+      var any=false;
+      d.querySelectorAll('tbody tr').forEach(function(r){
+        var hit=!q||r.textContent.toLowerCase().indexOf(q)>=0;
+        r.style.display=hit?'':'none'; if(hit)any=true;
+      });
+      if(q){ if(d.dataset.wasOpen===undefined){ d.dataset.wasOpen=d.open?'1':'0'; } d.open=any; d.style.display=any?'':'none'; }
+      else { d.style.display=''; if(d.dataset.wasOpen!==undefined){ d.open=d.dataset.wasOpen==='1'; delete d.dataset.wasOpen; } }
+    });
+  });
+})();
+</script>
+</body></html>`;
 
   fs.mkdirSync(FORGE, { recursive: true });
   fs.writeFileSync(DASHBOARD_FILE, html);
@@ -1053,7 +1111,15 @@ const commands = {
       `- If the spec does not answer a question you need answered, STOP and report the hole — never invent product behavior.`,
       `- Report back: summary, files changed, tests run and results, discoveries, open questions.`);
     lines.push('', `_Orchestrator: prepend relevant spec excerpts, decisions, and the applicable domain pack before dispatching._`);
-    out(lines.join('\n'));
+    // v0.13.1: briefs become readable artifacts — saved briefs are linked from the dashboard
+    if (flag('save')) {
+      const bdir = path.join(FORGE, 'briefs');
+      fs.mkdirSync(bdir, { recursive: true });
+      fs.writeFileSync(path.join(bdir, `${item.id}.md`), lines.join('\n') + '\n');
+      regenDashboard();
+      out(`Saved skeleton to forge/briefs/${item.id}.md — COMPLETE IT IN PLACE (spec excerpts, decisions, domain pack) before dispatch.\n` +
+          `The dashboard links it on the item's card, and dispatch prompts can reference the file path.`);
+    } else out(lines.join('\n'));
   },
 
   // -- decisions / discoveries -------------------------------------------------

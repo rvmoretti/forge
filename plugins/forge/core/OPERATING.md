@@ -54,9 +54,12 @@ from confirmed goals, milestone cut across everything. Then the same loop.
    in brief prose is unenforceable; `start` refuses an unscoped item
    (genuinely whole-tree work: `start --whole-tree --reason`). Then start it
    (`forge task start <id>`).
-2. **Brief**: generate the skeleton (`forge brief <id>`), then complete it —
-   prepend the relevant spec excerpts, decisions, discoveries, and the
-   applicable domain pack (see `forge-domain-packs` skill).
+2. **Brief**: generate the skeleton to a file (`forge brief <id> --save` →
+   `forge/briefs/<id>.md`), then complete it IN THAT FILE — prepend the
+   relevant spec excerpts, decisions, discoveries, and the applicable domain
+   pack (see `forge-domain-packs` skill). The saved brief is the audit
+   artifact: the dashboard links it on the item's card, and the user can
+   read exactly what each worker was told.
    **Screen work**: the brief additionally carries the `design-ux` pack and
    the approved mock (`spec/mocks/<screen>.*`) when one exists; the item
    carries a criterion binding the rendered screen to that mock. A screen

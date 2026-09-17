@@ -144,7 +144,10 @@ blocked-with-reason / failed-with-diagnosis).
   its timestamp (never parsed live; absent data is absent). v0.13: every section is
   collapsible — the active milestone opens, closed milestones fold away; time metrics add
   median verification runtime (recorded per verify) and per-milestone human gate wait.
-  Auto-regenerates; never edit.
+  v0.13.1: each milestone shows component chips (what gets touched when); component boxes
+  show "next touched: Mx"; every item has an expandable card (objective, criteria, scope,
+  dispatches, verification evidence, and a link to its saved brief); a live filter box
+  searches the whole work graph. Auto-regenerates; never edit.
 - `/forge:stats` — first-pass rate, failed attempts, most-retried items, escalations,
   start→done elapsed (wall-clock), per-milestone health.
 - `/forge:usage` — observed tokens by model, orchestrator vs workers, dispatches tied to items,
@@ -208,7 +211,8 @@ and `forge trace --refusals` (flight recorder: every CLI call + hook decision, v
 verify: `--artifact`, `--skip-baseline --reason`; add/update: `--criterion "desc::cmd"`,
 `--deps`, `--milestone`, `--component`, `--allowed`, `--forbidden`; update requires `--reason`
 when criteria change after failures; cancel: `--reason`, `--dependents drop|cancel`) ·
-`brief <id>` · `milestone list|security|approve|reopen` · `decision add "title" [--authority
+`brief <id> [--save]` (--save → forge/briefs/<id>.md, completed in place, linked from the
+dashboard) · `milestone list|security|approve|reopen` · `decision add "title" [--authority
 human|forge --decision --why]` · `discovery add "title" [--evidence --impact --affects]` ·
 `baseline capture|check` · `component add|update <id> [--name --kind --route --mock --doc] |
 list` · `status` · `dashboard` · `stats` · `usage [--write]` · `session status|takeover

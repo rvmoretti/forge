@@ -39,7 +39,7 @@ session resumes exactly where things stood.
 
 Every claim below is a refusal in code, not an instruction in a prompt —
 and every one is covered by a test in `tests/cli.test.js` (`npm test`,
-49 tests):
+50 tests):
 
 - **DONE requires a passing verification record for the current tree** — no record, a failed record, or evidence older than the latest edit all refuse.
 - **Checks must prove something** — `start` records each criterion check's pre-work result; if everything was green before work and nothing changed, `done` refuses (vacuous or already-satisfied criteria get flagged, not laundered).
@@ -165,6 +165,20 @@ session recovers the full picture from disk — the conversation is never the
 memory.
 
 ## Changelog
+
+### v0.13.1 — the readable dashboard
+- **Every item opens into a card**: objective, acceptance criteria (with their
+  machine checks), scope, component, dispatch history, verification evidence —
+  and a link to the item's brief.
+- **Briefs become artifacts**: `forge brief <id> --save` writes the skeleton to
+  `forge/briefs/<id>.md`; the contract now has the orchestrator complete it in
+  that file before dispatch, so the user can read exactly what each worker was
+  told, from the dashboard.
+- **"What gets touched when"**: each milestone section shows chips of the
+  components its items touch; each component box shows "next touched: Mx".
+- **A live filter box** searches the whole work graph (id, title, component,
+  status); UI polish throughout (hover states, softer cards, cleaner
+  summaries). 1 new test (50 total).
 
 ### v0.13.0 — the guided experience
 Field feedback from the first non-engineer users: the gates were solid but the
