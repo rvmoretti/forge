@@ -152,7 +152,14 @@ blocked-with-reason / failed-with-diagnosis).
   v0.13.1: each milestone shows component chips (what gets touched when); component boxes
   show "next touched: Mx"; every item has an expandable card (objective, criteria, scope,
   dispatches, verification evidence, and a link to its saved brief); a live filter box
-  searches the whole work graph. Auto-regenerates; never edit.
+  searches the whole work graph. v0.14: full redesign — branded sidebar with section nav,
+  a needs-you banner (what needs the human, computed from state), KPI row (progress ring,
+  ready/in-progress/blocked, first-pass rate), a pace & forecast strip (elapsed calendar
+  vs active build; projected remaining as a p25–p75 range from YOUR observed pace — a
+  labeled projection, never a promise; gates left × your median review wait), a milestone
+  rail (the whole journey on one line), and a design strip in screen items' cards (the
+  approved mock beside the latest build capture — items carry `--mock`). Auto-regenerates;
+  never edit.
 - `/forge:stats` — first-pass rate, failed attempts, most-retried items, escalations,
   start→done elapsed (wall-clock), per-milestone health.
 - `/forge:usage` — observed tokens by model, orchestrator vs workers, dispatches tied to items,
@@ -214,8 +221,8 @@ and `forge trace --refusals` (flight recorder: every CLI call + hook decision, v
 `task add|list|show|start|dispatch|verify|done|fail|block|cancel|update` (start: `--agent`,
 `--escalate`, `--whole-tree --reason`; dispatch: `--agent`, `--kind launch|message`, `--note`;
 verify: `--artifact`, `--skip-baseline --reason`; add/update: `--criterion "desc::cmd"`,
-`--deps`, `--milestone`, `--component`, `--allowed`, `--forbidden`; update requires `--reason`
-when criteria change after failures; cancel: `--reason`, `--dependents drop|cancel`) ·
+`--deps`, `--milestone`, `--component`, `--allowed`, `--forbidden`, `--mock`; update requires
+`--reason` when criteria change after failures; cancel: `--reason`, `--dependents drop|cancel`) ·
 `brief <id> [--save]` (--save → forge/briefs/<id>.md, completed in place, linked from the
 dashboard) · `milestone list|security|approve|reopen` · `decision add "title" [--authority
 human|forge --decision --why]` · `discovery add "title" [--evidence --impact --affects]` ·

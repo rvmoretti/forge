@@ -181,6 +181,8 @@ function activeMilestone(w) {
 // ---------------------------------------------------------------------------
 
 const DASHBOARD_FILE = path.join(FORGE, 'dashboard.html');
+// v0.14: Forge wordmark for the dashboard sidebar (white, embedded — the generated file stays self-contained)
+const LOGO_B64 = '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';
 const COMPONENTS_FILE = path.join(STATE, 'components.json');
 
 function esc(s) {
@@ -260,7 +262,22 @@ function generateDashboard() {
       const msgs = disp.length - launches.length;
       const agents = [...new Set(disp.map(d => d.agent).filter(Boolean))];
       const hasBrief = t.id && fs.existsSync(path.join(FORGE, 'briefs', `${t.id}.md`));
-      const card = `<details class="icd"><summary>details${hasBrief ? ' · 📄 brief' : ''}</summary><div class="icdb">
+      // v0.14: design strip — the approved mock beside the latest build capture (intent vs built)
+      let designStrip = '';
+      {
+        let mockP = t.mock || ((comps[t.component] || {}).mock) || null;
+        if (!mockP) { const mm = t.criteria.map(c => (c.desc || '') + ' ' + (c.check || '')).join(' ').match(/spec\/mocks\/[\w./-]+/); if (mm) mockP = mm[0]; }
+        let capP = null;
+        for (const v of (t.verifications || [])) for (const a of (v.artifacts || [])) if (/\.(png|jpe?g|webp|gif|svg)$/i.test(a)) capP = a;
+        const mockOk = mockP && fs.existsSync(path.join(PROJECT, mockP));
+        const capOk = capP && fs.existsSync(path.join(PROJECT, capP));
+        if (mockOk || capOk) designStrip = `<div class="design"><b>Design — intended vs built</b><div class="dpair">
+          ${mockOk ? `<a href="../${esc(mockP)}"><img src="../${esc(mockP)}" alt="approved mock"><span>approved mock · <code>${esc(mockP)}</code></span></a>` : `<div class="dmiss">no mock recorded for this screen</div>`}
+          ${capOk ? `<a href="../${esc(capP)}"><img src="../${esc(capP)}" alt="latest build capture"><span>latest capture · <code>${esc(capP)}</code></span></a>` : `<div class="dmiss">no screen capture yet — <code>task verify --artifact</code></div>`}
+        </div></div>`;
+      }
+      const card = `<details class="icd"><summary>details${designStrip ? ' · 🎨 design' : ''}${hasBrief ? ' · 📄 brief' : ''}</summary><div class="icdb">
+        ${designStrip}
         ${t.objective ? `<p><b>Objective</b> — ${esc(t.objective)}</p>` : ''}
         <p><b>Acceptance criteria</b></p><ol>${t.criteria.length ? t.criteria.map(c => `<li>${esc(c.desc)}${c.check ? ` — <code>${esc(c.check)}</code>` : ' <span class="mut">(no machine check)</span>'}</li>`).join('') : '<li class="mut">none yet (thin item — added when its milestone approaches)</li>'}</ol>
         <p><b>Scope</b> — ${((t.scope || {}).allowed || []).length ? `<code>${esc(t.scope.allowed.join(', '))}</code>` : '<span class="mut">not set</span>'}${((t.scope || {}).forbidden || []).length ? ` · forbidden: <code>${esc(t.scope.forbidden.join(', '))}</code>` : ''}${t.component ? ` · component: ${compChip(t.component)}` : ''}</p>
@@ -324,9 +341,11 @@ function generateDashboard() {
   // v0.12.1: telemetry — development time LIVE from state timestamps; tokens
   // from the last `forge usage --write` snapshot (never parsed live: log
   // parsing on every regen would slow every state operation).
+  const pace = {}; // v0.14: pace & forecast data escapes the telemetry block
   let telemetryBlock = '';
   {
     const med = arr => { if (!arr.length) return null; const s2 = [...arr].sort((a, b) => a - b); return s2[Math.floor(s2.length / 2)]; };
+    const quant = (arr, q) => { if (!arr.length) return null; const s2 = [...arr].sort((a, b) => a - b); return s2[Math.min(s2.length - 1, Math.floor(s2.length * q))]; };
     const fmtDur = ms2 => ms2 == null ? '—' : (ms2 < 90000 ? Math.round(ms2 / 1000) + 's' : (ms2 < 5400000 ? Math.round(ms2 / 60000) + 'm' : (ms2 / 3600000).toFixed(1) + 'h'));
     const TRIM = 2 * 60 * 60 * 1000; // windows over 2h = session break / human idle, excluded
     const perAgent = {}; const itemSpans = []; const verifDurs = [];
@@ -344,7 +363,7 @@ function generateDashboard() {
           const x = Date.parse(a3.ts); if (Number.isFinite(x) && (!lastPass || x > lastPass)) lastPass = x;
         }
       }
-      if (lastPass) { const wm = Date.parse(g3.ts) - lastPass; if (wm > 0) gateWaits.push(`${esc(m3)} ${fmtDur(wm)}`); }
+      if (lastPass) { const wm = Date.parse(g3.ts) - lastPass; if (wm > 0) { gateWaits.push(`${esc(m3)} ${fmtDur(wm)}`); (pace.gateMs = pace.gateMs || []).push(wm); } }
     }
     for (const id of w.order) {
       const t = w.items[id];
@@ -366,6 +385,7 @@ function generateDashboard() {
         if (nextVer != null) { const e = nextVer - dts; if (e >= 0 && e < TRIM) rec.exec.push(e); }
       }
     }
+    pace.med = med; pace.quant = quant; pace.fmtDur = fmtDur; pace.itemSpans = itemSpans;
     const agentRows = Object.entries(perAgent).map(([a, r]) =>
       `<tr><td><code>${esc(a)}</code></td><td class="mut">${r.launches}${r.msgs ? ` (+${r.msgs} msg)` : ''}</td><td>${fmtDur(med(r.prep))}</td><td>${fmtDur(med(r.exec))}</td></tr>`).join('');
     const timePanel =
@@ -393,6 +413,89 @@ function generateDashboard() {
     telemetryBlock = `<details class="sec" open><summary>Telemetry <span class="mut">(time live from state · tokens from the last usage snapshot)</span></summary><div class="grid2" style="margin-top:8px">${timePanel}${tokenPanel}</div></details>`;
   }
 
+  // ---- v0.14: needs-you banner (deterministic, same priority as session guidance) ----
+  let bannerBlock = '';
+  {
+    const seqB = milestoneSeq(w);
+    const awaiting = seqB.filter(m => milestoneComplete(w, m) && !(((w.gates || {})[m]) || {}).approved);
+    const inProgIds = w.order.filter(id => w.items[id].status === 'IN_PROGRESS');
+    const blockedIds = w.order.filter(id => w.items[id].status === 'BLOCKED');
+    let g = '🔥', h = '', p = '';
+    if (cfg.phase === 'spec') { g = '🎨'; h = 'Spec phase — the product is still being shaped'; p = 'Resume the interview in your Claude session; share any feature lists, notes, or mockups you have — they shape everything that follows.'; }
+    else if (awaiting.length) { g = '👋'; h = `Milestone ${esc(awaiting[0])} is finished — your review is the next step`; p = 'Try the running slice, give your verdict, and say anything you want to change or add before the next milestone starts. Then Forge records the approval.'; }
+    else if (blockedIds.length && !inProgIds.length) { g = '⛔'; h = `${blockedIds.length} item(s) are blocked and need your answer`; p = blockedIds.map(id => `<code>${esc(id)}</code> — ${esc(w.items[id].blockReason || '')}`).join(' · '); }
+    else if (inProgIds.length) { g = '⚙️'; h = `Building — ${inProgIds.map(esc).join(', ')} in progress`; p = 'Nothing needs you right now. Forge stops for exactly three things: a product decision, a high-risk approval, a milestone review.'; }
+    else if (ready > 0) { g = '▶️'; h = `${ready} item(s) ready — say “continue” in your Claude session`; p = 'The next item is briefed, dispatched, verified, and reviewed automatically; you\'ll be interrupted only if a product question surfaces.'; }
+    else if (total > 0 && counts.DONE + counts.CANCELLED === total) { g = '🏁'; h = 'All planned work is done'; p = 'Start the next thing: a bounded change or a new destination — Forge asks which door when you open a session.'; }
+    if (h) bannerBlock = `<div class="needsyou"><div class="glyph">${g}</div><div><h3>${h}</h3><p>${p}</p></div></div>`;
+  }
+
+  // ---- v0.14: KPI row ----
+  const doneItems = w.order.map(id => w.items[id]).filter(t => t.status === 'DONE');
+  const fpRate = doneItems.length ? Math.round(100 * doneItems.filter(t => !t.attempts.some(a => a.outcome === 'failed')).length / doneItems.length) : null;
+  const ringDash = Math.round(188 * pct / 100);
+  const kpiBlock = `<div class="kpis">
+    <div class="kpi hero"><svg width="72" height="72" viewBox="0 0 74 74" role="img" aria-label="${pct} percent complete">
+      <circle cx="37" cy="37" r="30" fill="none" stroke="#edebe4" stroke-width="9"/>
+      <circle cx="37" cy="37" r="30" fill="none" stroke="#178744" stroke-width="9" stroke-dasharray="${ringDash} 188" stroke-linecap="round" transform="rotate(-90 37 37)"/>
+      <text x="37" y="42" text-anchor="middle" font-size="15" font-weight="700" fill="#1b1d24">${pct}%</text></svg>
+      <div><div class="v">${counts.DONE}<small> / ${total}</small></div><div class="l">ITEMS DONE · WHOLE PROJECT</div>
+      <div class="d">${milestoneSeq(w).filter(m => (((w.gates || {})[m]) || {}).approved).length} of ${milestoneSeq(w).length || '—'} milestones approved</div></div></div>
+    <div class="kpi"><div class="v" style="color:#0f766e">${ready}</div><div class="l">READY TO BUILD</div><div class="d">${counts.TODO - ready} more planned</div></div>
+    <div class="kpi"><div class="v" style="color:#3b3f8f">${counts.IN_PROGRESS}</div><div class="l">IN PROGRESS</div><div class="d">${counts.CANCELLED ? counts.CANCELLED + ' cancelled' : '&nbsp;'}</div></div>
+    <div class="kpi"><div class="v" style="color:${counts.BLOCKED ? '#b91c1c' : '#8a8e9a'}">${counts.BLOCKED}</div><div class="l">BLOCKED · NEEDS YOU</div><div class="d">&nbsp;</div></div>
+    <div class="kpi"><div class="v">${fpRate == null ? '—' : fpRate + '%'}</div><div class="l">FIRST-PASS RATE</div><div class="d">${pace.itemSpans && pace.itemSpans.length ? 'median item ' + pace.fmtDur(pace.med(pace.itemSpans)) : '&nbsp;'}</div></div>
+  </div>`;
+
+  // ---- v0.14: pace & forecast strip — a PROJECTION from observed pace, never a promise ----
+  let paceBlock = '';
+  {
+    let minStart = null;
+    for (const id of w.order) for (const a of (w.items[id].attempts || [])) if (a.outcome === 'started') {
+      const x = Date.parse(a.ts); if (Number.isFinite(x) && (!minStart || x < minStart)) minStart = x;
+    }
+    const remaining = w.order.filter(id => !['DONE', 'CANCELLED'].includes(w.items[id].status)).length;
+    const spans = pace.itemSpans || [];
+    if (minStart && spans.length >= 3) {
+      const calMs = Date.now() - minStart;
+      const calStr = calMs < 86400000 ? Math.round(calMs / 3600000) + 'h' : (calMs / 86400000).toFixed(calMs < 10 * 86400000 ? 1 : 0) + ' days';
+      const activeMs = spans.reduce((a, b) => a + b, 0);
+      const lo = pace.quant(spans, 0.25) * remaining, hi = pace.quant(spans, 0.75) * remaining;
+      const gatesLeft = milestoneSeq(w).filter(m => !(((w.gates || {})[m]) || {}).approved).length;
+      const medGate = pace.gateMs && pace.gateMs.length ? pace.med(pace.gateMs) : null;
+      paceBlock = `<div class="pacestrip">
+        <div><div class="pk">ELAPSED</div><div class="pv">${calStr} <small>calendar</small> · ${pace.fmtDur(activeMs)} <small>active build</small></div></div>
+        <div class="pdiv"></div>
+        <div><div class="pk" style="color:#b3660a">PROJECTED REMAINING — BUILD</div><div class="pv">${remaining ? `≈ ${pace.fmtDur(lo)}–${pace.fmtDur(hi)} <small>active · ${remaining} item(s) at your pace</small>` : 'nothing left to build'}</div></div>
+        <div class="pdiv"></div>
+        <div><div class="pk">THE REST DEPENDS ON YOU</div><div class="pv">${gatesLeft} gate(s)${medGate ? ` <small>· your median review wait: ${pace.fmtDur(medGate)}</small>` : ''}</div></div>
+        <div class="pnote">Projection from YOUR observed pace (p25–p75 of item times; thin items assumed median-sized) — recomputed on every change, never a promise.</div>
+      </div>`;
+    } else if (minStart) {
+      paceBlock = `<div class="pacestrip"><div class="pnote">Pace & forecast appear after a few items complete — Forge projects only from observed data.</div></div>`;
+    }
+  }
+
+  // ---- v0.14: milestone rail — the whole journey at a glance ----
+  let railBlock = '';
+  {
+    const seqR = milestoneSeq(w);
+    if (seqR.length) {
+      const nodes = seqR.map((m, i) => {
+        const ids = w.order.filter(id => w.items[id].milestone === m);
+        const doneN = ids.filter(id => ['DONE', 'CANCELLED'].includes(w.items[id].status)).length;
+        const g2 = (w.gates || {})[m]; const complete = milestoneComplete(w, m);
+        const cls = g2 && g2.approved ? 'done' : complete ? 'awaitg' : m === actM ? 'activeg' : 'futureg';
+        const sym = g2 && g2.approved ? '✓' : complete ? '!' : String(i + 1);
+        const label = cls === 'awaitg' ? 'your review' : cls === 'done' ? `${doneN}/${ids.length} · gate ✓` : `${doneN}/${ids.length} items`;
+        const mc = [...new Set(ids.map(id => w.items[id].component).filter(Boolean))].slice(0, 4);
+        return `<a class="mnode ${cls}" href="#work"><span class="mdot">${sym}</span><span class="mn">${esc(m)}</span><span class="mi">${label}</span>${mc.length ? `<span class="cdots">${mc.map(c => `<i style="background:${kindColor[(comps[c] || {}).kind] || '#57606f'}"></i>`).join('')}</span>` : ''}</a>`;
+      }).join('');
+      railBlock = `<details class="sec" open id="milestones"><summary>Milestones <span class="mut">(the whole journey — every planned milestone, not a side document)</span></summary>
+        <div class="railwrap"><div class="rail">${nodes}</div></div></details>`;
+    }
+  }
+
   const logBlock = (entries, empty) => entries.length
     ? entries.map(e => `<div class="log"><b>${esc(e.title)}</b><pre>${esc(e.body)}</pre></div>`).join('')
     : `<p class="mut">${empty}</p>`;
@@ -410,84 +513,167 @@ function generateDashboard() {
 <title>Forge — ${esc(cfg.project)}</title>
 <link rel="icon" type="image/png" href="data:image/png;base64,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">
 <style>
+:root{--ink:#1b1d24;--ink2:#565b68;--ink3:#8a8e9a;--ground:#f4f3ef;--surface:#fff;--line:#e6e4dd;--line2:#efede8;
+--side:#15171e;--sideink:#c6c9d3;--sidemut:#787d8b;--sideline:#262a35;--accent:#d4551a;
+--done:#178744;--readyc:#0c8a70;--progc:#4553c4;--blockc:#bb2d2d;--awaitc:#b3660a}
 *{box-sizing:border-box;margin:0;padding:0}
-body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;background:#faf9f6;color:#1a1d27;line-height:1.5;padding:36px 20px 70px}
-.wrap{max-width:1100px;margin:0 auto}
-h1{font-size:24px;letter-spacing:-.02em} h2{font-size:17px;margin:28px 0 10px} h3{font-size:14.5px;margin:16px 0 8px}
-.mut{color:#6b7080;font-size:12.5px}
-code{font-family:ui-monospace,Menlo,monospace;font-size:.9em;background:#f0efe9;border-radius:4px;padding:1px 4px}
-.head{display:flex;justify-content:space-between;align-items:flex-end;gap:16px;flex-wrap:wrap;margin-bottom:6px}
-.bar{height:8px;background:#e6e4de;border-radius:99px;overflow:hidden;margin:10px 0 4px}
-.bar div{height:100%;background:#15803d;border-radius:99px}
-.cards{display:flex;gap:12px;flex-wrap:wrap;margin:14px 0}
-.card{background:#fff;border:1px solid #e6e4de;border-radius:12px;padding:10px 16px;min-width:96px}
-.card b{font-size:20px;font-variant-numeric:tabular-nums} .card span{display:block;font-size:11px;color:#6b7080;text-transform:uppercase;letter-spacing:.05em}
-.tblwrap{overflow-x:auto;background:#fff;border:1px solid #e6e4de;border-radius:12px}
+html{scroll-behavior:smooth}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;background:var(--ground);color:var(--ink);line-height:1.5;font-size:14px}
+h1{font-size:23px;letter-spacing:-.02em} h2{font-size:17px} h3{font-size:14.5px;margin:0 0 8px}
+.mut{color:var(--ink3);font-size:12.5px}
+code{font-family:ui-monospace,Menlo,monospace;font-size:.9em;background:var(--line2);border-radius:4px;padding:1px 4px}
+a{color:var(--accent);text-decoration:none} a:hover{text-decoration:underline}
+.shell{display:flex;min-height:100vh}
+aside{width:222px;flex:none;background:var(--side);color:var(--sideink);display:flex;flex-direction:column;position:sticky;top:0;height:100vh;padding:20px 0 14px}
+.brand{padding:0 18px 16px;border-bottom:1px solid var(--sideline)}
+.brand img{height:26px;display:block;margin-bottom:10px}
+.proj{font-size:12px;color:var(--sidemut)} .proj b{display:block;color:var(--sideink);font-size:13.5px}
+.phase{display:inline-block;margin-top:7px;font-size:9.5px;font-weight:700;letter-spacing:.09em;text-transform:uppercase;color:#e9b98a;border:1px solid #6b4a2b;background:#d4551a1f;border-radius:99px;padding:2px 9px}
+#snav{padding:12px 8px;display:flex;flex-direction:column;gap:2px;flex:1;overflow-y:auto}
+#snav a{display:flex;justify-content:space-between;color:var(--sidemut);font-size:13px;font-weight:500;padding:7px 12px;border-radius:8px}
+#snav a:hover{color:var(--sideink);background:#ffffff0a;text-decoration:none}
+#snav a.on{color:#fff;background:#ffffff12}
+#snav a .k{font-size:11px;color:var(--sidemut);font-variant-numeric:tabular-nums}
+.sidefoot{padding:12px 18px 0;border-top:1px solid var(--sideline);font-size:10.5px;color:var(--sidemut);line-height:1.5}
+.sidefoot b{color:var(--sideink)}
+main{flex:1;min-width:0;padding:24px clamp(16px,3vw,40px) 70px}
+.wrap{max-width:1120px;margin:0 auto}
+.tophead{display:flex;flex-wrap:wrap;align-items:flex-end;justify-content:space-between;gap:10px;margin-bottom:14px}
+.stamp{font-size:11px;color:var(--ink3);text-align:right}
+.needsyou{border:1px solid var(--line);border-left:4px solid var(--awaitc);border-radius:12px;display:flex;gap:14px;align-items:flex-start;padding:15px 18px;background:linear-gradient(0deg,#b3660a08,#b3660a08),var(--surface);margin-bottom:14px;box-shadow:0 1px 2px rgba(27,29,36,.05)}
+.needsyou .glyph{width:36px;height:36px;flex:none;border-radius:10px;background:#b3660a1a;display:grid;place-items:center;font-size:17px}
+.needsyou h3{font-size:14.5px;margin:0} .needsyou p{font-size:12.5px;color:var(--ink2);margin-top:3px;max-width:80ch}
+.kpis{display:grid;grid-template-columns:1.35fr repeat(4,1fr);gap:10px}
+.kpi{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:14px 16px;display:flex;flex-direction:column;gap:1px;justify-content:center;box-shadow:0 1px 2px rgba(27,29,36,.05)}
+.kpi.hero{flex-direction:row;align-items:center;gap:14px}
+.kpi .v{font-weight:700;font-size:24px;letter-spacing:-.02em;font-variant-numeric:tabular-nums}
+.kpi .v small{font-size:13px;color:var(--ink3);font-weight:500}
+.kpi .l{font-size:10.5px;color:var(--ink3);font-weight:600;letter-spacing:.04em}
+.kpi .d{font-size:11.5px;color:var(--ink2)}
+.pacestrip{background:var(--surface);border:1px solid var(--line);border-radius:12px;margin-top:10px;padding:12px 18px;display:flex;flex-wrap:wrap;gap:8px 30px;align-items:center;box-shadow:0 1px 2px rgba(27,29,36,.05)}
+.pk{font-size:10px;font-weight:700;letter-spacing:.07em;color:var(--ink3)}
+.pv{font-weight:700;font-size:15.5px;font-variant-numeric:tabular-nums}
+.pv small{font-size:11.5px;color:var(--ink3);font-weight:500}
+.pdiv{width:1px;height:30px;background:var(--line)}
+.pnote{font-size:10.5px;color:var(--ink3);max-width:280px;line-height:1.45;margin-left:auto}
+.railwrap{overflow-x:auto;padding:10px 2px 8px}
+.rail{display:flex;min-width:max-content}
+.mnode{position:relative;width:106px;flex:none;display:flex;flex-direction:column;align-items:center;gap:5px;padding-top:2px;color:inherit}
+.mnode:hover{text-decoration:none}
+.mnode::before{content:"";position:absolute;top:14px;left:-50%;width:100%;height:2px;background:var(--line)}
+.mnode:first-child::before{display:none}
+.mnode.done::before{background:var(--done)}
+.mdot{width:24px;height:24px;border-radius:50%;display:grid;place-items:center;font-size:11px;font-weight:700;z-index:1;background:var(--surface);border:2px solid var(--line);color:var(--ink3)}
+.mnode.done .mdot{background:var(--done);border-color:var(--done);color:#fff}
+.mnode.awaitg .mdot{border-color:var(--awaitc);color:var(--awaitc);box-shadow:0 0 0 4px #b3660a1f}
+.mnode.activeg .mdot{border-color:var(--accent);color:var(--accent);box-shadow:0 0 0 4px #d4551a14}
+.mn{font-size:10.5px;font-weight:600;text-align:center;line-height:1.2;max-width:96px;color:var(--ink)}
+.mnode.futureg .mn{color:var(--ink3);font-weight:500}
+.mi{font-size:10px;color:var(--ink3);font-variant-numeric:tabular-nums}
+.cdots{display:flex;gap:3px} .cdots i{width:6px;height:6px;border-radius:50%;display:block}
+.cards{display:flex;gap:12px;flex-wrap:wrap;margin:12px 0}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:12px 16px;box-shadow:0 1px 2px rgba(27,29,36,.05)}
+.bar{height:7px;background:var(--line2);border-radius:99px;overflow:hidden;margin:8px 0 4px}
+.bar div{height:100%;background:var(--done);border-radius:99px}
+.tblwrap{overflow-x:auto;background:var(--surface);border:1px solid var(--line);border-radius:12px;box-shadow:0 1px 2px rgba(27,29,36,.05)}
 table{width:100%;border-collapse:collapse;font-size:13px}
-th{font-size:10.5px;text-transform:uppercase;letter-spacing:.06em;color:#6b7080;text-align:left;padding:8px 12px;border-bottom:1px solid #e6e4de}
-td{padding:8px 12px;border-bottom:1px solid #f0efe9;vertical-align:top} tr:last-child td{border-bottom:none}
-.log{background:#fff;border:1px solid #e6e4de;border-radius:10px;padding:10px 14px;margin-bottom:8px;font-size:13px}
+th{font-size:10.5px;text-transform:uppercase;letter-spacing:.06em;color:var(--ink3);text-align:left;padding:8px 12px;border-bottom:1px solid var(--line)}
+td{padding:9px 12px;border-bottom:1px solid var(--line2);vertical-align:top} tr:last-child td{border-bottom:none}
+tbody tr:hover{background:#faf9f4}
+.log{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:10px 14px;margin-bottom:8px;font-size:13px;box-shadow:0 1px 2px rgba(27,29,36,.04)}
 .log pre{font-family:inherit;white-space:pre-wrap;color:#464b58;font-size:12.5px;margin-top:2px}
-.grid2{display:grid;grid-template-columns:1fr 1fr;gap:20px}@media(max-width:840px){.grid2{grid-template-columns:1fr}}
-.stamp{font-size:11.5px;color:#9aa0ad}
-details.sec{margin:20px 0 6px}
-details.sec>summary{cursor:pointer;user-select:none;font-weight:650;font-size:17px;padding:8px 10px;letter-spacing:-.01em;border-radius:10px;transition:background .12s}
-details.sec>summary:hover{background:#f0efe9;color:#3b3f8f}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.stamp code{background:#fff}
+details.sec{margin:26px 0 6px;scroll-margin-top:14px}
+details.sec>summary{cursor:pointer;user-select:none;font-weight:700;font-size:16.5px;padding:8px 10px;letter-spacing:-.01em;border-radius:10px}
+details.sec>summary:hover{background:#eceae3}
 details.sec>summary .mut{font-weight:400}
 details.sec.sub{margin:10px 0}
-details.sec.sub>summary{font-size:14.5px;padding:6px 10px}
-details.sec>summary::marker{color:#9aa0ad}
+details.sec.sub>summary{font-size:14px;padding:6px 10px}
+details.sec>summary::marker{color:var(--ink3)}
 .mchips{margin-left:8px}
 details.icd{margin-top:5px}
-details.icd>summary{cursor:pointer;font-size:11.5px;color:#6b7080;user-select:none;width:max-content;padding:1px 6px;border:1px solid #e6e4de;border-radius:6px;background:#faf9f6}
-details.icd>summary:hover{color:#3b3f8f;border-color:#3b3f8f55}
-details.icd[open]>summary{color:#3b3f8f}
-.icdb{background:#faf9f6;border:1px solid #e6e4de;border-radius:10px;padding:10px 14px;margin-top:6px;font-size:12.5px;color:#464b58}
-.icdb p{margin:4px 0}
-.icdb ol{margin:2px 0 6px 18px;padding:0}
-.icdb li{margin:2px 0}
-.tblwrap,.card,.log{box-shadow:0 1px 2px rgba(26,29,39,.04)}
-tbody tr{transition:background .1s}
-tbody tr:hover{background:#faf9f2}
-.filter{width:100%;max-width:380px;font:inherit;font-size:13px;padding:8px 12px;border:1px solid #e6e4de;border-radius:10px;background:#fff;margin:2px 0 4px;outline:none}
-.filter:focus{border-color:#3b3f8f88;box-shadow:0 0 0 3px #3b3f8f14}
-.bar{height:10px}
-.bar div{background:linear-gradient(90deg,#15803d,#1da24f)}
-</style></head><body><div class="wrap">
-<div class="head">
-  <div><h1>⚙️ Forge — ${esc(cfg.project)}</h1>
-  <div class="mut">Phase: <b>${esc(cfg.phase)}</b> · Verify: ${Object.keys(cfg.verify || {}).length ? Object.keys(cfg.verify).map(esc).join(', ') : 'not set'} · Graphify: ${esc((cfg.options || {}).graphify || 'unset')}</div></div>
-  <div class="stamp">GENERATED PROJECTION — state wins, never edit this file.<br>Generated ${new Date().toISOString().slice(0, 19).replace('T', ' ')} UTC · refresh: <code>forge dashboard</code></div>
-</div>
-<div class="bar"><div style="width:${pct}%"></div></div>
-<div class="mut">${counts.DONE}/${total} work items done (${pct}%)</div>
-<div class="cards">
-  <div class="card"><b>${counts.DONE}</b><span>done</span></div>
-  <div class="card"><b>${counts.IN_PROGRESS}</b><span>in progress</span></div>
-  <div class="card"><b>${ready}</b><span>ready</span></div>
-  <div class="card"><b>${counts.TODO - ready}</b><span>todo</span></div>
-  <div class="card"><b style="color:${counts.BLOCKED ? '#b91c1c' : 'inherit'}">${counts.BLOCKED}</b><span>blocked</span></div>
-  <div class="card"><b>${counts.CANCELLED}</b><span>cancelled</span></div>
-</div>
-${mapBlock}
-${telemetryBlock}
-<details class="sec" open><summary>Work graph <span class="mut">(the whole project — closed milestones fold away)</span></summary>
+details.icd>summary{cursor:pointer;font-size:11.5px;color:var(--ink3);user-select:none;width:max-content;padding:1px 7px;border:1px solid var(--line);border-radius:6px;background:var(--ground)}
+details.icd>summary:hover{color:var(--accent);border-color:#d4551a55}
+details.icd[open]>summary{color:var(--accent)}
+.icdb{background:#faf9f5;border:1px solid var(--line);border-radius:10px;padding:12px 15px;margin-top:6px;font-size:12.5px;color:#464b58}
+.icdb p{margin:4px 0} .icdb ol{margin:2px 0 6px 18px;padding:0} .icdb li{margin:2px 0}
+.design{margin-bottom:10px} .design>b{font-size:12px}
+.dpair{display:grid;grid-template-columns:1fr 1fr;gap:10px;max-width:620px;margin-top:6px}
+.dpair a{display:block} .dpair img{width:100%;max-height:170px;object-fit:cover;object-position:top;border-radius:8px;border:1px solid var(--line);background:#fff}
+.dpair span{display:block;font-size:10.5px;color:var(--ink3);margin-top:3px}
+.dmiss{border:1px dashed var(--line);border-radius:8px;display:grid;place-items:center;min-height:70px;font-size:11px;color:var(--ink3);padding:8px;text-align:center}
+.filter{width:100%;max-width:400px;font:inherit;font-size:13px;padding:9px 13px;border:1px solid var(--line);border-radius:10px;background:var(--surface);margin:2px 0 4px;outline:none}
+.filter:focus{border-color:var(--accent);box-shadow:0 0 0 3px #d4551a14}
+@media (max-width:900px){
+  .shell{flex-direction:column}
+  aside{position:static;width:100%;height:auto;flex-direction:row;align-items:center;flex-wrap:wrap;gap:8px;padding:12px 16px}
+  .brand{border:0;padding:0} .brand img{margin:0 10px 0 0;display:inline-block;vertical-align:middle}
+  #snav{flex-direction:row;flex-wrap:wrap;padding:0} #snav a .k{display:none}
+  .sidefoot{display:none}
+  .kpis{grid-template-columns:1fr 1fr} .kpi.hero{grid-column:1/-1}
+  .grid2{grid-template-columns:1fr} .dpair{grid-template-columns:1fr}
+}
+@media (prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
+</style></head><body>
+<div class="shell">
+<aside>
+  <div class="brand">
+    <img src="data:image/png;base64,${LOGO_B64}" alt="FORGE">
+    <div class="proj"><b>${esc(cfg.project)}</b>${esc(cfg.phase)} phase · v${VERSION}</div>
+    ${actM ? `<span class="phase">${esc(actM)} active</span>` : ''}
+  </div>
+  <nav id="snav">
+    <a href="#overview" class="on">Overview</a>
+    <a href="#milestones">Milestones <span class="k">${milestoneSeq(w).filter(m => (((w.gates || {})[m]) || {}).approved).length}/${milestoneSeq(w).length}</span></a>
+    <a href="#work">Work <span class="k">${counts.DONE}/${total}</span></a>
+    <a href="#map">Project map <span class="k">${Object.keys(comps).length}</span></a>
+    <a href="#telemetry">Telemetry</a>
+    <a href="#journal">Journal</a>
+    <a href="#system">System</a>
+  </nav>
+  <div class="sidefoot"><b>Generated projection.</b><br>State wins — never edit this file.<br>${new Date().toISOString().slice(0, 16).replace('T', ' ')} UTC</div>
+</aside>
+<main><div class="wrap">
+
+<section id="overview" style="scroll-margin-top:14px">
+  <div class="tophead">
+    <h1>${esc(cfg.project)} — where things stand</h1>
+    <div class="stamp">auto-updates on every change · refresh: <code>forge dashboard</code><br>Verify: ${Object.keys(cfg.verify || {}).length ? Object.keys(cfg.verify).map(esc).join(', ') : 'not set'} · Graphify: ${esc((cfg.options || {}).graphify || 'unset')}</div>
+  </div>
+  ${bannerBlock}
+  ${kpiBlock}
+  ${paceBlock}
+</section>
+
+${railBlock}
+
+<details class="sec" open id="work"><summary>Work <span class="mut">(click an item for its full story — criteria, scope, dispatches, evidence, design, the brief)</span></summary>
 <input class="filter" id="wgfilter" type="search" placeholder="Filter items… (id, title, component, status)" aria-label="Filter work items">
 ${milestoneBlocks || '<p class="mut">No work items yet.</p>'}</details>
-<details class="sec" open><summary>Decisions &amp; discoveries <span class="mut">(latest first · forge/decisions.md · forge/discoveries.md)</span></summary>
+
+${mapBlock ? mapBlock.replace('<details class="sec" open>', '<details class="sec" open id="map">') : ''}
+
+${telemetryBlock.replace('<details class="sec" open>', '<details class="sec" open id="telemetry">')}
+
+<details class="sec" open id="journal"><summary>Journal <span class="mut">(decisions bind the product · discoveries change the plan — latest first)</span></summary>
 <div class="grid2" style="margin-top:8px">
 <div><h3>Decisions</h3>${logBlock(decisions, 'None recorded yet.')}</div>
 <div><h3>Discoveries</h3>${logBlock(discoveries, 'None recorded yet.')}</div>
 </div></details>
-<details class="sec"><summary>Preflight &amp; baseline ${pf ? `<span class="mut">preflight ${esc(pf.ts.slice(0, 16).replace('T', ' '))}</span>` : ''}</summary>
+
+<details class="sec" id="system"><summary>System <span class="mut">(preflight · baseline · spec — the plumbing, collapsed until you need it)</span></summary>
 <div class="grid2" style="margin-top:8px">
-<div><h3>Preflight</h3>
+<div><h3>Preflight ${pf ? `<span class="mut" style="font-weight:400">${esc(pf.ts.slice(0, 16).replace('T', ' '))}</span>` : ''}</h3>
 <div class="tblwrap"><table><tbody>${pfBlock}</tbody></table></div></div>
 <div><h3>Baseline ${base ? `<span class="mut" style="font-weight:400">${esc(base.ts.slice(0, 16).replace('T', ' '))}</span>` : ''}</h3>
 <div class="tblwrap"><table><tbody>${baseBlock}</tbody></table></div></div>
-</div></details>
-${specRows ? `<details class="sec"><summary>Specification <span class="mut">(${esc(cfg.specDir)}/ — the source of intent)</span></summary>
-<div class="tblwrap" style="margin-top:8px"><table><thead><tr><th>File</th><th>Size</th><th>Modified</th></tr></thead><tbody>${specRows}</tbody></table></div></details>` : ''}
+</div>
+${specRows ? `<h3 style="margin-top:14px">Specification <span class="mut" style="font-weight:400">(${esc(cfg.specDir)}/ — the source of intent)</span></h3>
+<div class="tblwrap"><table><thead><tr><th>File</th><th>Size</th><th>Modified</th></tr></thead><tbody>${specRows}</tbody></table></div>` : ''}
+</details>
+
+</div></main>
 </div>
 <script>
 (function(){
@@ -504,6 +690,16 @@ ${specRows ? `<details class="sec"><summary>Specification <span class="mut">(${e
       else { d.style.display=''; if(d.dataset.wasOpen!==undefined){ d.open=d.dataset.wasOpen==='1'; delete d.dataset.wasOpen; } }
     });
   });
+})();
+(function(){
+  var links=[].slice.call(document.querySelectorAll('#snav a'));
+  var secs=links.map(function(a){return document.querySelector(a.getAttribute('href'));});
+  function spy(){
+    var y=window.scrollY+130, on=0;
+    secs.forEach(function(s,i){ if(s && s.offsetTop<=y) on=i; });
+    links.forEach(function(a,i){ a.classList.toggle('on', i===on); });
+  }
+  window.addEventListener('scroll', spy, {passive:true}); spy();
 })();
 </script>
 </body></html>`;
@@ -789,6 +985,7 @@ const commands = {
         title: '', objective: '', milestone: null, deps: [], criteria: [],
         scope: { allowed: [], forbidden: [] },
         component: opt('component') || null,
+        mock: opt('mock') || null, // v0.14: the approved mock this screen item is bound to (spec/mocks/...)
         status: 'TODO', attempts: [], verifications: [], history: [],
         preState: null, startTree: null,
         blockReason: null, cancelReason: null, created: ts(), updated: ts()
@@ -1050,6 +1247,7 @@ const commands = {
       if (opt('allowed') !== null) { item.scope.allowed = opt('allowed').split(',').map(s => s.trim()).filter(Boolean); changes.push('scope.allowed updated'); }
       if (opt('forbidden') !== null) { item.scope.forbidden = opt('forbidden').split(',').map(s => s.trim()).filter(Boolean); changes.push('scope.forbidden updated'); }
       if (opt('component') !== null) { item.component = opt('component') || null; changes.push('component = ' + item.component); }
+      if (opt('mock') !== null) { item.mock = opt('mock') || null; changes.push('mock = ' + item.mock); }
       for (const idx of optAll('criterion-remove').map(Number).sort((a, b) => b - a)) {
         if (!item.criteria[idx]) die(`No criterion at index ${idx} (use: forge task show ${item.id}).`);
         changes.push(`criterion removed: '${item.criteria[idx].desc}'`);
@@ -1855,7 +2053,7 @@ const commands = {
   preflight [--full]                     check git, verify commands, graphify, playwright
   config get [path] | set <path> <val>   read/write forge config
   task add --id T1 --title .. --objective .. [--milestone M1] [--deps A,B]
-           [--criterion "desc::check-cmd"]... [--allowed glob,..] [--forbidden glob,..]
+           [--criterion "desc::check-cmd"]... [--allowed glob,..] [--forbidden glob,..] [--mock spec/mocks/x.png]
            (or: task add --json '{...}')
   task list [--status S] | show <id>
   task start <id> [--agent forge-implementer] [--escalate strategy --note why] [--whole-tree --reason r]
@@ -1872,7 +2070,7 @@ const commands = {
   task done <id>                         refuses: no passing verification, tree changed since verification,
                                          checks that were green before work with an unchanged tree
   task fail <id> --note "diagnosis"      record failed attempt (2 failures ⇒ escalation required)
-  task update <id> [--title|--objective|--milestone|--deps|--allowed|--forbidden]
+  task update <id> [--title|--objective|--milestone|--deps|--allowed|--forbidden|--mock]
                    [--criterion-add "d::cmd"]... [--criterion-remove i]... [--reason r]
                                          audited edits; criteria changes after failures require --reason
   task block <id> --reason | cancel <id> --reason [--dependents drop|cancel]

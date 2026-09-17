@@ -39,7 +39,7 @@ session resumes exactly where things stood.
 
 Every claim below is a refusal in code, not an instruction in a prompt —
 and every one is covered by a test in `tests/cli.test.js` (`npm test`,
-50 tests):
+51 tests):
 
 - **DONE requires a passing verification record for the current tree** — no record, a failed record, or evidence older than the latest edit all refuse.
 - **Checks must prove something** — `start` records each criterion check's pre-work result; if everything was green before work and nothing changed, `done` refuses (vacuous or already-satisfied criteria get flagged, not laundered).
@@ -165,6 +165,31 @@ session recovers the full picture from disk — the conversation is never the
 memory.
 
 ## Changelog
+
+### v0.14.0 — the dashboard becomes a product
+Full redesign of the generated dashboard (still one self-contained,
+zero-dependency file):
+
+- **Branded shell** — dark sidebar with the Forge wordmark (embedded),
+  section navigation with live counts, scroll-spy.
+- **Overview that answers "what needs ME?"** — a needs-you banner computed
+  from state (review a milestone / answer a block / building / say
+  continue), then a KPI row: progress ring, ready, in-progress, blocked,
+  first-pass rate.
+- **Pace & forecast strip** — elapsed (calendar vs. active build) and a
+  projected-remaining range computed from YOUR observed pace (p25–p75 of
+  item times), plus the gate count and your median review wait — labeled a
+  projection, recomputed on every change, never a promise.
+- **Milestone rail** — the whole journey as one horizontal timeline: done,
+  awaiting review, active, future, with per-milestone component dots.
+- **Design strip in every screen item's card** — the approved mock beside
+  the latest build capture (intent vs. built). New `--mock` field on
+  `task add/update`, set at the mock stop; fallbacks resolve older items
+  (component mock, spec/mocks path in criteria).
+- Journal, map, telemetry, and system sections restyled to match; work
+  filter, item drawers, and all v0.13 behavior preserved.
+
+1 new test (51 total).
 
 ### v0.13.2 — roadmap review ships with the plugin
 The product-owner intake desk (`forge-roadmap-review`) becomes a plugin skill,

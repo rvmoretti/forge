@@ -87,7 +87,9 @@ At **Step 7** (generate handoff artifacts), in addition to `CLAUDE.md` and
    (`04-logic.md` criteria are mandatory sources). Give every criterion a machine check
    (`--criterion "desc::command"`) wherever one can exist — a criterion
    nobody can run is a weak gate, and the CLI's red-first check will flag
-   vacuous ones. Screen items whose mock exists get a mock-fidelity
+   vacuous ones. Screen items whose mock exists carry `--mock
+   spec/mocks/<screen>.<ext>` (the dashboard shows the mock beside the
+   latest build capture) and get a mock-fidelity
    criterion ("rendered <route> serves the approved mock
    spec/mocks/<screen>") — verified at build time by screenshot
    (`task verify --artifact`) plus the fresh-context UX review from the

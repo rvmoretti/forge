@@ -704,6 +704,26 @@ test('untagged component warning on add, preflight counts untagged, verification
 
 // --- v0.13.1: readable dashboard + saved briefs --------------------------------
 
+test('v0.14: --mock is stored, the dashboard renders the design strip, sidebar shell present', () => {
+  fs.mkdirSync(path.join(dir, 'spec', 'mocks'), { recursive: true });
+  // tiny valid png
+  fs.writeFileSync(path.join(dir, 'spec', 'mocks', 's1.png'), Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==', 'base64'));
+  forge(['task', 'add', '--id', 'S1', '--title', 'screen', '--criterion', 'ok::node -e "process.exit(0)"', '--allowed', 'ui/', '--mock', 'spec/mocks/s1.png']);
+  const w = JSON.parse(fs.readFileSync(path.join(dir, 'forge', 'state', 'work.json'), 'utf8'));
+  assert.strictEqual(w.items.S1.mock, 'spec/mocks/s1.png');
+  forge(['dashboard']);
+  const dash = fs.readFileSync(path.join(dir, 'forge', 'dashboard.html'), 'utf8');
+  assert.match(dash, /Design — intended vs built/);
+  assert.match(dash, /spec\/mocks\/s1\.png/);
+  assert.match(dash, /no screen capture yet/);
+  assert.match(dash, /id="snav"/);           // branded sidebar shell
+  assert.match(dash, /where things stand/);  // overview header
+  // update --mock is audited
+  const up = forge(['task', 'update', 'S1', '--mock', 'spec/mocks/s2.png']);
+  assert.strictEqual(up.code, 0);
+  assert.match(up.out, /mock = spec\/mocks\/s2\.png/);
+});
+
 test('brief --save writes forge/briefs/<id>.md and the dashboard links it in the item card', () => {
   forge(['component', 'add', 'ui', '--name', 'UI', '--kind', 'frontend']);
   forge(['task', 'add', '--id', 'B1', '--title', 'screen', '--objective', 'obj', '--criterion', 'ok::node -e "process.exit(0)"', '--allowed', 'src/', '--milestone', 'M1', '--component', 'ui']);
