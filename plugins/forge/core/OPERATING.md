@@ -108,6 +108,12 @@ from confirmed goals, milestone cut across everything. Then the same loop.
      (fail / block / done); the CLI enforces this. After 2 failures the CLI
      forces `--escalate`: stronger model, different decomposition, revised
      criteria (`forge task update --reason`), or do it yourself.
+     **Stall rule (field-calibrated):** a worker stall (watchdog, no
+     progress) means the brief was too big for one pass — diagnose what
+     specifically failed and retry with a brief narrowed to exactly that
+     diagnosis; decompose into separate items only when no narrowing is
+     possible. A diagnosis-narrowed retry has finished in a fraction of the
+     stalled attempt's time; an unchanged retry has never worked.
 
 6. **Milestone gate** (when `options.gates` is `per-milestone`, the default):
    when the last item of a milestone goes DONE, stop. First run the
@@ -193,6 +199,40 @@ implementer. Doing bounded work yourself is the proportionality exception
 for trivial items, not the default. The measure is cost per completed item,
 not delegation percentage — but zero explorer/tester dispatches over a whole
 project means you are absorbing their work.
+
+## API workers (opt-in — providers phase A, v0.15)
+
+When the user has configured a provider (`providers.model` set and their API
+key exported), a second worker pool exists: `forge worker run <id>` executes
+an already-started item on a cheap fast API model (OpenRouter or any
+OpenAI-compatible endpoint) in a machine-mediated loop — it can read the
+repo, write **only inside the item's allowed scope**, and run **only** the
+configured verify commands. It cannot touch `forge/`, cannot mark the item
+done, and its dispatch (model, turns, tokens, files written) is recorded
+automatically as kind `api`.
+
+Routing rule — be conservative, escalate on evidence:
+
+- Route to an API worker when the item is **small and completely briefed**:
+  narrow scope (a few globs), few criteria with machine checks, a saved
+  brief (`forge brief <id> --save`, completed in place — the API worker
+  reads exactly that file and nothing else, so an incomplete brief is a
+  wasted dispatch).
+- Keep for Claude workers: anything needing repo-wide judgment, shared
+  surfaces, spec interpretation, multi-component integration, or an item
+  that an API worker has already failed once.
+- The ladder on failure: API worker fails once → fresh Claude worker with
+  the diagnosis in the brief. Never retry an API worker on an unchanged
+  brief.
+- **Provider failures are not attempt failures.** A rate limit, outage, or
+  timeout is recorded with `forge task fail <id> --kind provider` — it
+  never counts toward the escalation ladder and carries no approach
+  diagnosis. Retry later, switch models, or fall back to a Claude worker.
+- Verification stays yours and stays independent: `task verify` + review
+  before `done`, exactly as for any worker. The worker's summary is a
+  claim, not evidence.
+- Never handle or echo the user's API key; the CLI reads it from the
+  environment and it is never written to disk or state.
 
 ## Parallel dispatch (opt-in — off by default)
 

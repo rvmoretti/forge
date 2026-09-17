@@ -180,7 +180,11 @@ not shell writes — review covers those) · scope-required start (empty `scope.
 default 1 = serial; higher caps require disjoint scopes — overlap refused) · state-write lock
 (concurrent forge processes serialised by `forge/state/work.lock`; live contention refused,
 dead-process locks broken + traced) · dispatch records (`task dispatch` — agent mix and
-mid-flight messages in state, not transcript inference) · stop gate · state write-guard
+mid-flight messages in state, not transcript inference) · API-worker sandbox (v0.15: `worker run` writes only inside the item's allowed
+scope, never `forge/`; runs only configured verify commands; cannot mark items done —
+verification stays independent) · provider-failure taxonomy (`fail --kind provider` never
+burns the escalation ladder) · item-shape guard (warnings on >8 scope globs, >6 criteria,
+decision-shaped criteria — the T55 rule) · stop gate · state write-guard
 (forge/state and config.json only via CLI) · titled logs (untitled decision/discovery
 refused) · living spec.
 
@@ -209,6 +213,11 @@ refused) · living spec.
 - "write-locked by another forge process" → another forge command is mid-write; wait and retry
   (dead locks break automatically and are traced).
 - "not IN_PROGRESS — dispatch records a handoff" → start the item before recording its dispatch.
+- "No worker model configured" / "No API key" → `forge config set providers.model ...` + export the key.
+- "PROVIDER FAILURE" (worker run, exit 3) → `forge task fail <id> --kind provider` — retry later,
+  switch models, or fall back to a Claude worker; never counts toward escalation.
+- "ITEM-SHAPE WARNING" → the item is probably several items (or smuggles a product decision);
+  decompose or resolve the decision with the owner before starting.
 
 Debugging rule (for the user AND the orchestrator): before working around anything, run
 `forge doctor` (install/state self-check: versions, cache, hooks, lock, orphaned IN_PROGRESS)
@@ -224,7 +233,12 @@ verify: `--artifact`, `--skip-baseline --reason`; add/update: `--criterion "desc
 `--deps`, `--milestone`, `--component`, `--allowed`, `--forbidden`, `--mock`; update requires
 `--reason` when criteria change after failures; cancel: `--reason`, `--dependents drop|cancel`) ·
 `brief <id> [--save]` (--save → forge/briefs/<id>.md, completed in place, linked from the
-dashboard) · `milestone list|security|approve|reopen` · `decision add "title" [--authority
+dashboard) · `worker run <id> [--model --max-turns]` (v0.15: execute an IN_PROGRESS item with an
+API worker on an OpenRouter/OpenAI-compatible model — reads the saved brief; writes only inside
+the item's allowed scope; runs only configured verify commands; records an `api` dispatch with
+turns + token counts; key from env `OPENROUTER_API_KEY` or `providers.keyEnv`, never stored;
+`fail --kind provider|worker` classifies failures — provider failures never count toward
+escalation) · `milestone list|security|approve|reopen` · `decision add "title" [--authority
 human|forge --decision --why]` · `discovery add "title" [--evidence --impact --affects]` ·
 `baseline capture|check` · `component add|update <id> [--name --kind --route --mock --doc] |
 list` · `status` · `dashboard` · `stats` · `usage [--write]` · `session status|takeover
@@ -236,7 +250,9 @@ per-milestone|end-only` · `options.security off` · `options.protect "p1/,p2/"`
 `options.concurrency N` (max items in flight; default 1 = serial; raise only with disjoint
 scopes and the parallel-dispatch rules) · `options.scopeExempt "a/,b/"` (whitelist-exempt dirs;
 default forge/,spec/,docs/; *.md always exempt) · `options.graphify` · `options.web` ·
-`specDir` · `phase spec|build`.
+`specDir` · `phase spec|build` · `providers.model "<id>"` + `providers.url` (default
+https://openrouter.ai/api/v1) + `providers.keyEnv` (default OPENROUTER_API_KEY) +
+`providers.maxTurns` (default 24) — API workers, v0.15.
 
 Project files: `forge/config.json` · `forge/state/` (work.json, preflight, baseline,
 session.json lock, work.lock write-lock, components.json, trace.jsonl — hook-protected,

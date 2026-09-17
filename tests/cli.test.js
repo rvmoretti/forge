@@ -756,3 +756,143 @@ test('dispatch records launches and mid-flight messages on IN_PROGRESS items onl
   assert.strictEqual(w.items.D1.dispatches[0].kind, 'launch');
   assert.strictEqual(w.items.D1.dispatches[1].kind, 'message');
 });
+
+// --- v0.15: API workers (providers phase A), failure taxonomy, item-shape guard ---
+
+const { spawn } = require('child_process');
+function sleepSync(ms) { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); }
+
+// A scripted OpenAI-compatible provider: responds with S[n] per request (last repeats).
+const MOCK_SERVER_SRC = `
+const http=require('http');const fs=require('fs');let n=0;
+const S=JSON.parse(fs.readFileSync(process.argv[1]+'.script','utf8'));
+const srv=http.createServer((req,res)=>{let b='';req.on('data',c=>b+=c);req.on('end',()=>{
+  try{fs.appendFileSync(process.argv[1]+'.log',b+'\\n===\\n')}catch(_){}
+  const r=S[Math.min(n++,S.length-1)];
+  res.writeHead(r.status||200,{'content-type':'application/json'});
+  res.end(JSON.stringify(r.body||{}));});});
+srv.listen(0,'127.0.0.1',()=>fs.writeFileSync(process.argv[1],String(srv.address().port)));
+`;
+
+function withMockProvider(script, fn) {
+  const portFile = path.join(dir, 'provider.port');
+  fs.writeFileSync(portFile + '.script', JSON.stringify(script));
+  const child = spawn(process.execPath, ['-e', MOCK_SERVER_SRC, portFile], { stdio: 'ignore' });
+  try {
+    const t0 = Date.now();
+    while (!fs.existsSync(portFile)) { if (Date.now() - t0 > 5000) throw new Error('mock provider did not start'); sleepSync(50); }
+    return fn(fs.readFileSync(portFile, 'utf8').trim());
+  } finally { child.kill(); }
+}
+const toolCallMsg = (calls, usage) => ({ status: 200, body: { choices: [{ message: { role: 'assistant', content: null, tool_calls: calls } }], usage } });
+
+test('worker run refuses items that are not IN_PROGRESS, and demands model + key config', () => {
+  addItem('W0');
+  const r = forge(['worker', 'run', 'W0']);
+  assert.notStrictEqual(r.code, 0);
+  assert.match(r.out, /not IN_PROGRESS/);
+  forge(['task', 'start', 'W0']);
+  const noModel = forge(['worker', 'run', 'W0'], { env: { OPENROUTER_API_KEY: '' } });
+  assert.notStrictEqual(noModel.code, 0);
+  assert.match(noModel.out, /No worker model configured/);
+  forge(['config', 'set', 'providers.model', 'test-model']);
+  const noKey = forge(['worker', 'run', 'W0'], { env: { OPENROUTER_API_KEY: '' } });
+  assert.notStrictEqual(noKey.code, 0);
+  assert.match(noKey.out, /OPENROUTER_API_KEY is not set/);
+  assert.match(noKey.out, /never stored/);
+});
+
+test('API worker: writes only inside scope, records an api dispatch with tokens, verification stays independent', () => {
+  addItem('W1');
+  forge(['task', 'start', 'W1']);
+  forge(['config', 'set', 'providers.model', 'test-model']);
+  const script = [
+    toolCallMsg([
+      { id: 'c1', type: 'function', function: { name: 'write_file', arguments: JSON.stringify({ path: 'docs/evil.txt', content: 'outside scope' }) } },
+      { id: 'c2', type: 'function', function: { name: 'write_file', arguments: JSON.stringify({ path: 'src/out.txt', content: 'hello' }) } },
+      { id: 'c3', type: 'function', function: { name: 'run_verify', arguments: JSON.stringify({ which: 'all' }) } }
+    ], { prompt_tokens: 100, completion_tokens: 20 }),
+    toolCallMsg([
+      { id: 'c4', type: 'function', function: { name: 'done', arguments: JSON.stringify({ summary: 'wrote src/out.txt and verified', blocked: false }) } }
+    ], { prompt_tokens: 60, completion_tokens: 10 })
+  ];
+  const r = withMockProvider(script, (port) => {
+    forge(['config', 'set', 'providers.url', `http://127.0.0.1:${port}`]);
+    return forge(['worker', 'run', 'W1'], { env: { OPENROUTER_API_KEY: 'test-key' } });
+  });
+  assert.strictEqual(r.code, 0, r.out);
+  assert.match(r.out, /REFUSED \(scope\)/);                       // docs/evil.txt refused, visibly
+  assert.match(r.out, /word proves nothing/);                     // independent verification reminder
+  assert.strictEqual(fs.existsSync(path.join(dir, 'src', 'out.txt')), true);
+  assert.strictEqual(fs.existsSync(path.join(dir, 'docs', 'evil.txt')), false);
+  const w = JSON.parse(fs.readFileSync(path.join(dir, 'forge', 'state', 'work.json'), 'utf8'));
+  const d = w.items.W1.dispatches;
+  assert.strictEqual(d.length, 1);
+  assert.strictEqual(d[0].kind, 'api');
+  assert.strictEqual(d[0].agent, 'test-model');
+  assert.strictEqual(d[0].tokensIn, 160);
+  assert.strictEqual(d[0].tokensOut, 30);
+  assert.deepStrictEqual(d[0].filesWritten, ['src/out.txt']);
+  assert.strictEqual(w.items.W1.status, 'IN_PROGRESS');           // worker cannot close the item
+});
+
+test('API worker: provider 5xx is a PROVIDER FAILURE (exit 3) pointing at fail --kind provider', () => {
+  addItem('W2');
+  forge(['task', 'start', 'W2']);
+  forge(['config', 'set', 'providers.model', 'test-model']);
+  const r = withMockProvider([{ status: 500, body: { error: 'boom' } }], (port) => {
+    forge(['config', 'set', 'providers.url', `http://127.0.0.1:${port}`]);
+    return forge(['worker', 'run', 'W2'], { env: { OPENROUTER_API_KEY: 'test-key' } });
+  });
+  assert.strictEqual(r.code, 3);
+  assert.match(r.out, /PROVIDER FAILURE/);
+  assert.match(r.out, /--kind provider/);
+});
+
+test('API worker: turn cap without done is a WORKER failure, not a provider failure', () => {
+  addItem('W3');
+  forge(['task', 'start', 'W3']);
+  forge(['config', 'set', 'providers.model', 'test-model']);
+  const chatter = { status: 200, body: { choices: [{ message: { role: 'assistant', content: 'thinking...' } }], usage: { prompt_tokens: 5, completion_tokens: 5 } } };
+  const r = withMockProvider([chatter], (port) => {
+    forge(['config', 'set', 'providers.url', `http://127.0.0.1:${port}`]);
+    return forge(['worker', 'run', 'W3', '--max-turns', '2'], { env: { OPENROUTER_API_KEY: 'test-key' } });
+  });
+  assert.notStrictEqual(r.code, 0);
+  assert.match(r.out, /turn cap \(2\)/);
+  assert.match(r.out, /--kind worker/);
+});
+
+test('fail --kind provider never burns the escalation ladder; bogus kinds are refused', () => {
+  addItem('P1');
+  forge(['task', 'start', 'P1']);
+  const bogus = forge(['task', 'fail', 'P1', '--kind', 'gremlins']);
+  assert.notStrictEqual(bogus.code, 0);
+  assert.match(bogus.out, /--kind must be 'provider'/);
+  for (let i = 0; i < 3; i++) {
+    if (i) forge(['task', 'start', 'P1']);
+    const r = forge(['task', 'fail', 'P1', '--kind', 'provider', '--note', 'rate limited']);
+    assert.match(r.out, /PROVIDER failure \(escalation counter unchanged: 0\)/);
+  }
+  // three provider failures later, a plain start still works — no --escalate demanded
+  assert.strictEqual(forge(['task', 'start', 'P1']).code, 0);
+  // but two REAL failures still trip the ladder
+  forge(['task', 'fail', 'P1', '--note', 'wrong approach A']);
+  forge(['task', 'start', 'P1']);
+  forge(['task', 'fail', 'P1', '--note', 'wrong approach B']);
+  const gated = forge(['task', 'start', 'P1']);
+  assert.notStrictEqual(gated.code, 0);
+  assert.match(gated.out, /REQUIRES --escalate|Escalate explicitly/);
+});
+
+test('item-shape guard warns on mega-items and decision-shaped criteria (T55 rule); headers lose component chips', () => {
+  const wide = forge(['task', 'add', '--id', 'G1', '--title', 'mega', '--milestone', 'M1', '--component', 'ui',
+    '--criterion', 'ok::node -e "process.exit(0)"',
+    '--allowed', 'a/,b/,c/,d/,e/,f/,g/,h/,i/,j/']);
+  assert.match(wide.out, /ITEM-SHAPE WARNING: scope has 10 allowed globs/);
+  const dec = forge(['task', 'add', '--id', 'G2', '--title', 'decision smuggled', '--allowed', 'src/',
+    '--criterion', 'the owner has decided whether to add jsdom::']);
+  assert.match(dec.out, /PRODUCT DECISION/);
+  const dash = fs.readFileSync(path.join(dir, 'forge', 'dashboard.html'), 'utf8');
+  assert.doesNotMatch(dash, /mchips/);   // v0.15: milestone headers carry no component pills
+});

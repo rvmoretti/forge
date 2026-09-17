@@ -39,7 +39,7 @@ session resumes exactly where things stood.
 
 Every claim below is a refusal in code, not an instruction in a prompt —
 and every one is covered by a test in `tests/cli.test.js` (`npm test`,
-51 tests):
+57 tests):
 
 - **DONE requires a passing verification record for the current tree** — no record, a failed record, or evidence older than the latest edit all refuse.
 - **Checks must prove something** — `start` records each criterion check's pre-work result; if everything was green before work and nothing changed, `done` refuses (vacuous or already-satisfied criteria get flagged, not laundered).
@@ -165,6 +165,38 @@ session recovers the full picture from disk — the conversation is never the
 memory.
 
 ## Changelog
+
+### v0.15.0 — API workers (providers phase A)
+The first release where Forge workers can run outside your Claude
+subscription — the orchestrator stays where it is; small, well-briefed
+items go to fast, cheap API models:
+
+- **`forge worker run <id>`** — executes an already-started item on any
+  OpenRouter / OpenAI-compatible model in a machine-mediated loop: it can
+  read the repo, write **only inside the item's allowed scope** (refused in
+  code, not in the prompt — `forge/` and forbidden paths always refused),
+  and run **only** the configured verify commands. It cannot mark the item
+  done; verification stays independent. Every run records an `api` dispatch
+  with model, turns, token counts, and files written. Config:
+  `providers.model` / `providers.url` / `providers.keyEnv` /
+  `providers.maxTurns`; the API key is read from the environment
+  (`OPENROUTER_API_KEY` by default) and never stored.
+- **Provider-failure taxonomy** — `forge task fail <id> --kind provider`
+  records a rate limit / outage / timeout without burning the escalation
+  ladder; provider failures also stay out of the brief's
+  "do not repeat these approaches" list. `--kind worker` (default) counts
+  as before.
+- **Item-shape guard (the T55 rule)** — `task add` / `update` / `start`
+  warn on items with more than 8 scope globs, more than 6 criteria, or
+  criteria that read like product decisions ("the owner decides…") —
+  the exact shapes that stalled a real worker for an hour in the field.
+- **Stall rule in the contract** — a stalled worker means diagnose-and-narrow
+  first; decompose only when no narrowing is possible (calibrated by the
+  d2dauto T55 case, where a diagnosis-narrowed retry finished in 24 minutes
+  what a broad brief couldn't in 55).
+- **Dashboard**: milestone headers no longer carry component chip rows
+  (field feedback: pure noise at real-project density) — components remain
+  on item cards, the project map, and the milestone rail dots.
 
 ### v0.14.0 — the dashboard becomes a product
 Full redesign of the generated dashboard (still one self-contained,

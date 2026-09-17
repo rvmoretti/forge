@@ -858,6 +858,18 @@ claude</span>
       <tr><td class="ref-msg">not IN_PROGRESS — dispatch records a handoff</td><td>A dispatch was
         recorded for an item that isn't running.</td><td>Start the item first; dispatch records
         belong to live work.</td></tr>
+      <tr><td class="ref-msg">PROVIDER FAILURE</td><td>An API worker hit a rate limit, outage, or
+        timeout — the platform's fault, not the approach's.</td><td>Record it with
+        <code>forge task fail &lt;id&gt; --kind provider</code> (it never counts toward the escalation
+        ladder), then retry later, switch models, or fall back to a Claude worker.</td></tr>
+      <tr><td class="ref-msg">SCOPE GUARD (API worker)</td><td>The API worker tried to write outside
+        the item's allowed scope, or into <code>forge/</code>; the write was refused in code, not in
+        the prompt.</td><td>Nothing — that is the sandbox working. If the scope itself is wrong,
+        widen it deliberately: <code>forge task update &lt;id&gt; --allowed ...</code>.</td></tr>
+      <tr><td class="ref-msg">ITEM-SHAPE WARNING</td><td>The item is unusually wide (many scope globs
+        or criteria) or a criterion reads like a product decision — the shapes that stalled a real
+        worker for an hour.</td><td>Prefer decomposing into per-surface items; resolve decisions with
+        the owner (<code>forge decision add</code>) before work starts.</td></tr>
     </tbody>
   </table></div>
 
@@ -940,6 +952,12 @@ claude</span>
       <tr><td><code>options.concurrency</code></td><td>Max work items in flight at once. Default <code>1</code> (serial — enforced, not a convention). Raising it is your call, never Forge's; parallel items must have disjoint file scopes and the CLI refuses overlap.</td></tr>
       <tr><td><code>options.scopeExempt</code></td><td>Dirs exempt from the scope whitelist (orchestrator housekeeping). Default <code>forge/,spec/,docs/</code>; <code>*.md</code> is always exempt.</td></tr>
       <tr><td><code>specDir</code></td><td>Where the spec folder lives.</td></tr>
+      <tr><td><code>providers.model / url / keyEnv / maxTurns</code></td><td>v0.15 API workers:
+        the OpenRouter (or any OpenAI-compatible) model that <code>forge worker run</code> uses,
+        its endpoint (default <code>https://openrouter.ai/api/v1</code>), which environment
+        variable holds your key (default <code>OPENROUTER_API_KEY</code> — never written to disk),
+        and the worker's turn cap (default 24). Your orchestrator stays on your subscription;
+        small well-briefed items go to fast cheap models.</td></tr>
     </tbody>
   </table></div>
 
