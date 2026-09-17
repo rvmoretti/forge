@@ -702,7 +702,24 @@ test('untagged component warning on add, preflight counts untagged, verification
   assert.match(dash, /<details class="sec sub" open/);
 });
 
-// --- v0.12: dispatch records ---------------------------------------------------
+// --- v0.13.1: readable dashboard + saved briefs --------------------------------
+
+test('brief --save writes forge/briefs/<id>.md and the dashboard links it in the item card', () => {
+  forge(['component', 'add', 'ui', '--name', 'UI', '--kind', 'frontend']);
+  forge(['task', 'add', '--id', 'B1', '--title', 'screen', '--objective', 'obj', '--criterion', 'ok::node -e "process.exit(0)"', '--allowed', 'src/', '--milestone', 'M1', '--component', 'ui']);
+  forge(['task', 'add', '--id', 'B2', '--title', 'later', '--milestone', 'M2', '--component', 'ui', '--deps', 'B1']);
+  const r = forge(['brief', 'B1', '--save']);
+  assert.strictEqual(r.code, 0);
+  assert.match(r.out, /Saved skeleton to forge\/briefs\/B1\.md/);
+  assert.match(fs.readFileSync(path.join(dir, 'forge', 'briefs', 'B1.md'), 'utf8'), /Work brief — B1/);
+  const dash = fs.readFileSync(path.join(dir, 'forge', 'dashboard.html'), 'utf8');
+  assert.match(dash, /briefs\/B1\.md/);              // brief linked
+  assert.match(dash, /details class="icd"/);          // per-item card
+  assert.match(dash, /Acceptance criteria/);
+  assert.match(dash, /thin item/);                    // B2 has no criteria yet
+  assert.match(dash, /next touched: <b>M1<\/b>/);     // component box next-touch
+  assert.match(dash, /wgfilter/);                     // filter input present
+});
 
 test('dispatch records launches and mid-flight messages on IN_PROGRESS items only', () => {
   addItem('D1');

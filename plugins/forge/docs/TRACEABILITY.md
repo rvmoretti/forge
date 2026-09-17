@@ -101,6 +101,7 @@ an explicitly recorded external source, and each is covered by tests:
 | Component seeding + untagged warnings | v0.13.0 | field: 0-tag projects rendered an empty/partial project map | skills (registry as Step 7/orientation deliverable) + `task add` warning + preflight check |
 | Collapsible dashboard sections; scope warning scoped to the active milestone | v0.13.0 | usability: long graphs unreadable; thin backlog items spammed warnings | generated dashboard |
 | Verification timing in evidence + human gate-wait metric | v0.13.0 | vNext review: measure the time taxonomy before optimizing anything | `run()` ms per check → verification `durationMs`; telemetry panel |
+| Saved briefs (`brief --save` → forge/briefs/) + dashboard item cards, milestone component chips, next-touched, live filter | v0.13.1 | user: briefs were ephemeral/unreadable; "what gets touched when" invisible | CLI `brief --save` + contract step 2 + generated dashboard |
 
 Still deferred, with triggers: the maintain loop (monitoring bands →
 auto-intent) until a Forge project has production traffic; continuous evals
