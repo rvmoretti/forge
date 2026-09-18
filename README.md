@@ -39,7 +39,7 @@ session resumes exactly where things stood.
 
 Every claim below is a refusal in code, not an instruction in a prompt —
 and every one is covered by a test in `tests/cli.test.js` (`npm test`,
-57 tests):
+58 tests):
 
 - **DONE requires a passing verification record for the current tree** — no record, a failed record, or evidence older than the latest edit all refuse.
 - **Checks must prove something** — `start` records each criterion check's pre-work result; if everything was green before work and nothing changed, `done` refuses (vacuous or already-satisfied criteria get flagged, not laundered).
@@ -165,6 +165,32 @@ session recovers the full picture from disk — the conversation is never the
 memory.
 
 ## Changelog
+
+### v0.15.1 — the dashboard, properly finished
+The v0.14 redesign shipped the structure but kept generic browser defaults
+underneath it. This release closes the gap between the approved mockup and
+what the generator actually emits — same single self-contained
+zero-dependency file:
+
+- **Work items are rows, not table cells.** Each item is a clickable row —
+  status stripe, id, title, component and mock/brief chips, and the one fact
+  that matters for its state on the right — that opens a drawer with the
+  design strip, acceptance criteria, dispatches, scope and evidence side by
+  side. Criteria now show **which checks passed** (read from the latest
+  verification record), not just how many exist.
+- **Milestone groups are cards** with their own header row and progress,
+  instead of bare disclosure summaries stacked over a table.
+- **No browser-default disclosure triangles anywhere** — sections use a
+  custom caret, and section headers get real typographic hierarchy.
+- **Quick filters** (All / Needs me / Active / Done) beside the filter box.
+- **Telemetry is charted**: development time as stacked prep/execution bars
+  per agent, tokens as a delegation donut with per-model rows.
+- **Project map** is a responsive grid of component cards (kind badge,
+  progress bar, next-touched milestone, latest capture).
+- **Journal is a timeline** whose markers show authority — a decision you
+  made reads differently from one Forge made.
+- **System** (preflight, baseline) reads as status rows with OK/WARN/FAIL
+  badges instead of two small tables.
 
 ### v0.15.0 — API workers (providers phase A)
 The first release where Forge workers can run outside your Claude

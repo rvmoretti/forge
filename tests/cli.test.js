@@ -896,3 +896,29 @@ test('item-shape guard warns on mega-items and decision-shaped criteria (T55 rul
   const dash = fs.readFileSync(path.join(dir, 'forge', 'dashboard.html'), 'utf8');
   assert.doesNotMatch(dash, /mchips/);   // v0.15: milestone headers carry no component pills
 });
+
+test('v0.15.1 dashboard shell: rows are cards with drawers, sections are styled, no native markers', () => {
+  forge(['component', 'add', 'ui', '--name', 'UI', '--kind', 'frontend']);
+  forge(['task', 'add', '--id', 'R1', '--title', 'screen', '--milestone', 'M1', '--component', 'ui',
+    '--criterion', 'ok::node -e "process.exit(0)"', '--allowed', 'src/']);
+  forge(['task', 'start', 'R1']);
+  forge(['task', 'dispatch', 'R1', '--agent', 'forge-implementer']);
+  touch('w.txt');
+  forge(['task', 'verify', 'R1']);
+  forge(['decision', 'add', 'Cutoff is 4 hours', '--authority', 'human', '--decision', 'four hours', '--why', 'desk practice']);
+  const dash = fs.readFileSync(path.join(dir, 'forge', 'dashboard.html'), 'utf8');
+  assert.match(dash, /<summary class="irow">/);          // item rows, not table rows
+  assert.match(dash, /data-s="IN_PROGRESS"/);            // quick-filter hooks
+  assert.match(dash, /class="st s-prog"/);               // status badge classes
+  assert.match(dash, /<ul class="crit">/);               // criteria with pass/fail marks
+  assert.match(dash, /class="ck ok"/);                   // the passing criterion is marked green
+  assert.match(dash, /class="kv"/);                      // scope & evidence key/value block
+  assert.match(dash, /class="cchip"/);                   // component chip with kind swatch
+  assert.match(dash, /id="wgseg"/);                      // All / Needs me / Active / Done
+  assert.match(dash, /class="mgb"/);                     // milestone body inside the group card
+  assert.match(dash, /class="mapgrid"/);                 // project map is a grid of component cards
+  assert.match(dash, /class="hbar"/);                    // development-time bars
+  assert.match(dash, /class="jitem human"/);             // journal timeline marks human authority
+  assert.match(dash, /details\.sec>summary::-webkit-details-marker\{display:none\}/); // no OS triangles
+  assert.doesNotMatch(dash, /<th>Deps<\/th>/);           // the old work table is gone
+});
