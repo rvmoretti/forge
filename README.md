@@ -39,7 +39,7 @@ session resumes exactly where things stood.
 
 Every claim below is a refusal in code, not an instruction in a prompt —
 and every one is covered by a test in `tests/cli.test.js` (`npm test`,
-58 tests):
+66 tests):
 
 - **DONE requires a passing verification record for the current tree** — no record, a failed record, or evidence older than the latest edit all refuse.
 - **Checks must prove something** — `start` records each criterion check's pre-work result; if everything was green before work and nothing changed, `done` refuses (vacuous or already-satisfied criteria get flagged, not laundered).
@@ -165,6 +165,31 @@ session recovers the full picture from disk — the conversation is never the
 memory.
 
 ## Changelog
+
+### v0.15.2 — the dashboard stops depending on you
+Every number on the page is now either live or honestly labelled as a
+snapshot with its age. Nothing goes quietly stale:
+
+- **The token panel refreshes itself.** `forge usage --write` is no longer
+  something you have to remember. Session transcripts are append-only, so
+  Forge now remembers a byte offset per file and reads only what is new —
+  a full re-scan of a 78MB backlog costs one ~0.5s pass, and every refresh
+  after that is milliseconds. The work is bounded by a time budget and
+  resumes on the next state change, so no command can hang on a backlog;
+  while it catches up the panel says so and shows how far it has got.
+  `forge usage` still prints the full report (`--rescan` rebuilds from
+  scratch); `options.usageAuto false` turns the automatic refresh off.
+- **Durations are computed in your browser, not frozen at generation.**
+  An item's "IN PROGRESS · 14m", the elapsed calendar time, and the age of
+  every snapshot now tick from embedded timestamps, so a dashboard left
+  open keeps telling the truth between CLI calls.
+- **Preflight and baseline state their age** and say what refreshes them —
+  a baseline is explicitly a recorded moment, not a live check.
+- **`task dispatch` requires `--agent` on a launch.** An unattributed launch
+  cannot be costed or compared, and it used to surface as a phantom
+  "(agent not named)" row with no timings. A mid-flight message now inherits
+  the agent of the launch it follows, in new records and when rendering old
+  ones.
 
 ### v0.15.1 — the dashboard, properly finished
 The v0.14 redesign shipped the structure but kept generic browser defaults

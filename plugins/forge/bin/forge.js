@@ -197,7 +197,233 @@ function parseLog(file, limit) {
   } catch (_) { return []; }
 }
 
+
+// ---------------------------------------------------------------------------
+// v0.15.2: incremental usage aggregation.
+// Session transcripts are append-only JSONL, so we remember a byte offset per
+// file and parse only the tail since last time. That turns a full re-scan
+// (hundreds of MB on a long project) into milliseconds, which is what makes it
+// safe to refresh the token panel automatically on every dashboard regen
+// instead of waiting for the user to remember `forge usage --write`.
+// Work is bounded by a time/chunk budget and RESUMES on the next call, so no
+// single CLI command can ever hang on a large backlog.
+// ---------------------------------------------------------------------------
+const USAGE_FILE = path.join(STATE, 'usage.json');
+const USAGE_CACHE = path.join(STATE, 'usage-cache.json');
+const USAGE_AUTO_MS = 2 * 60 * 1000;   // at most one background scan every 2 minutes
+const USAGE_CHUNK = 8 * 1024 * 1024;   // bytes read from one file per pass
+
+function readHead(file, bytes) {
+  const fd = fs.openSync(file, 'r');
+  try {
+    const len = Math.min(fs.fstatSync(fd).size, bytes);
+    const buf = Buffer.allocUnsafe(len);
+    fs.readSync(fd, buf, 0, len, 0);
+    return buf.toString('utf8');
+  } finally { fs.closeSync(fd); }
+}
+
+function usageDirs(cached) {
+  const projectsRoot = process.env.FORGE_CLAUDE_PROJECTS || path.join(os.homedir(), '.claude', 'projects');
+  if (!fs.existsSync(projectsRoot)) return null;
+  // a previously resolved folder is reused — the fallback scan below is the
+  // expensive path and must not run on every dashboard regen
+  if (cached && cached.length && cached.every(d => fs.existsSync(d))) return cached;
+  const sanitized = PROJECT.replace(/[^a-zA-Z0-9]/g, '-');
+  const dirs = [path.join(projectsRoot, sanitized)].filter(fs.existsSync);
+  if (dirs.length) return dirs;
+  try {
+    for (const d of fs.readdirSync(projectsRoot)) {
+      const full = path.join(projectsRoot, d);
+      try {
+        const f = fs.readdirSync(full).find(x => x.endsWith('.jsonl'));
+        if (!f) continue;
+        if (readHead(path.join(full, f), 64 * 1024).includes(`"cwd":${JSON.stringify(PROJECT)}`)) return [full];
+      } catch (_) { /* skip */ }
+    }
+  } catch (_) { /* unreadable root */ }
+  return null;
+}
+
+function usageFiles(dirs) {
+  const files = [];
+  for (const dir2 of dirs) {
+    let entries = []; try { entries = fs.readdirSync(dir2); } catch (_) { continue; }
+    for (const entry of entries) {
+      const full = path.join(dir2, entry);
+      if (entry.endsWith('.jsonl')) { files.push({ f: full, side: false, session: true }); continue; }
+      const sub = path.join(full, 'subagents');
+      try {
+        if (fs.statSync(full).isDirectory() && fs.existsSync(sub))
+          for (const wf of fs.readdirSync(sub).filter(x => x.endsWith('.jsonl')))
+            files.push({ f: path.join(sub, wf), side: true, session: false });
+      } catch (_) { /* skip */ }
+    }
+  }
+  return files;
+}
+
+function emptyUsageCache() {
+  return { v: 2, files: {}, models: {}, byType: {}, perItem: {}, byDay: {},
+           dispatches: 0, tied: 0, firstTs: null, lastTs: null, bytes: 0, total: 0, complete: false };
+}
+
+// Reads the complete lines available after `off`, at most USAGE_CHUNK bytes.
+function readTail(file, off) {
+  const fd = fs.openSync(file, 'r');
+  try {
+    const size = fs.fstatSync(fd).size;
+    if (size <= off) return { text: '', next: off, size };
+    const len = Math.min(size - off, USAGE_CHUNK);
+    const buf = Buffer.allocUnsafe(len);
+    fs.readSync(fd, buf, 0, len, off);
+    let text = buf.toString('utf8');
+    const cut = text.lastIndexOf('\n');            // never consume a half-written line
+    if (cut < 0) return { text: '', next: off, size };
+    text = text.slice(0, cut + 1);
+    return { text, next: off + Buffer.byteLength(text, 'utf8'), size };
+  } finally { fs.closeSync(fd); }
+}
+
+// Folds one chunk of JSONL into an aggregate. Pure accumulation, so the same
+// function serves the persistent cache and the throwaway tail view.
+function consumeUsage(agg, text, side, knownIdRe) {
+  for (const line of text.split('\n')) {
+    if (!line.trim()) continue;
+    let d; try { d = JSON.parse(line); } catch (_) { continue; }
+    const tsv = d.timestamp;
+    if (tsv) {
+      if (!agg.firstTs || tsv < agg.firstTs) agg.firstTs = tsv;
+      if (!agg.lastTs || tsv > agg.lastTs) agg.lastTs = tsv;
+    }
+    if (d.type !== 'assistant' || !d.message) continue;
+    const model = d.message.model || 'unknown';
+    if (model === '<synthetic>') continue;
+    const u = d.message.usage || {};
+    const thread = (side || d.isSidechain) ? 'side' : 'main';
+    const m = (agg.models[model] = agg.models[model] || {});
+    const t = (m[thread] = m[thread] || { calls: 0, in: 0, out: 0, cacheCreate: 0, cacheRead: 0 });
+    t.calls++; t.in += u.input_tokens || 0; t.out += u.output_tokens || 0;
+    t.cacheCreate += u.cache_creation_input_tokens || 0; t.cacheRead += u.cache_read_input_tokens || 0;
+    if (tsv) agg.byDay[tsv.slice(0, 10)] = (agg.byDay[tsv.slice(0, 10)] || 0) + (u.output_tokens || 0);
+    for (const ct of (Array.isArray(d.message.content) ? d.message.content : [])) {
+      if (!ct || ct.type !== 'tool_use' || (ct.name !== 'Task' && ct.name !== 'Agent')) continue;
+      const pr = (ct.input || {}).prompt || '';
+      // tie dispatch → work item, most confident signal first
+      let itemId = null;
+      const m2 = pr.match(/Work brief — (\S+?):/); if (m2) itemId = m2[1];
+      if (!itemId) { const m3 = pr.match(/[Bb]riefs?\/([A-Za-z0-9][\w.-]*?)\.md\b/); if (m3) itemId = m3[1]; }
+      if (!itemId && knownIdRe) { const m4 = pr.match(knownIdRe); if (m4) itemId = m4[1]; }
+      const ty = (ct.input || {}).subagent_type || 'unknown';
+      agg.dispatches++; agg.byType[ty] = (agg.byType[ty] || 0) + 1;
+      if (itemId) { agg.tied++; agg.perItem[itemId] = (agg.perItem[itemId] || 0) + 1; }
+    }
+  }
+}
+
+function collectUsage(opts = {}) {
+  const budgetMs = opts.budgetMs || 0;
+  const t0 = Date.now();
+  let c = opts.rescan ? null : readJson(USAGE_CACHE, null);
+  if (!c || c.v !== 2) c = emptyUsageCache();
+  const dirs = usageDirs(opts.rescan ? null : c.dirs);
+  if (!dirs) return null;
+  c.dirs = dirs;
+  let knownIdRe = null;
+  try {
+    const ids = Object.keys(readJson(WORK_FILE, { items: {} }).items || {})
+      .filter(id => /^[A-Za-z0-9][\w.-]*$/.test(id))
+      .sort((a, b) => b.length - a.length);   // longest first: T20f before T20
+    if (ids.length) knownIdRe = new RegExp(`\\b(${ids.map(id => id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})\\b`);
+  } catch (_) { /* no work graph → inline/path matching only */ }
+
+  const files = usageFiles(dirs);
+  // The running aggregate is a single total, so one rotated or rewritten file
+  // poisons all of it — there is no way to subtract just that file's old
+  // contribution. Detect the shrink and rebuild from scratch instead.
+  for (const { f } of files) {
+    const rec = c.files[f];
+    if (!rec) continue;
+    let size = 0; try { size = fs.statSync(f).size; } catch (_) { continue; }
+    if (size < rec.off) { c = emptyUsageCache(); c.dirs = dirs; break; }
+  }
+  let total = 0, pending = false;
+  for (const { f, side, session } of files) {
+    let size = 0; try { size = fs.statSync(f).size; } catch (_) { continue; }
+    total += size;
+    let rec = c.files[f];
+    if (!rec) rec = c.files[f] = { off: 0, size, side, session };
+    rec.size = size; rec.side = side; rec.session = session;
+    while (rec.off < size) {
+      if (budgetMs && Date.now() - t0 > budgetMs) { pending = true; break; }
+      const { text, next } = readTail(f, rec.off);
+      if (next === rec.off) break;              // only an incomplete line is left
+      consumeUsage(c, text, side, knownIdRe);
+      rec.off = next;
+    }
+    if (pending) break;
+  }
+  let scanned = 0;
+  for (const k of Object.keys(c.files)) scanned += c.files[k].off;
+  c.bytes = scanned; c.total = Math.max(total, scanned);
+  c.complete = !pending;
+  c.sessions = Object.values(c.files).filter(x => x.session).length;
+  try { writeJson(USAGE_CACHE, c); } catch (_) { /* cache is an optimisation, not state */ }
+
+  // A file's last line may have no trailing newline — either it is still being
+  // written, or the writer simply never emits one. The persistent aggregate
+  // stays newline-aligned; that remainder is re-read on every pass and merged
+  // into the RETURNED view only, so it is never counted twice.
+  let view = c;
+  let cloned = false;
+  for (const { f, side } of files) {
+    const rec = c.files[f];
+    if (!rec || rec.off >= rec.size) continue;
+    let tail = '';
+    try {
+      const fd = fs.openSync(f, 'r');
+      try {
+        const len = Math.min(rec.size - rec.off, USAGE_CHUNK);
+        const buf = Buffer.allocUnsafe(len);
+        fs.readSync(fd, buf, 0, len, rec.off);
+        tail = buf.toString('utf8');
+      } finally { fs.closeSync(fd); }
+    } catch (_) { continue; }
+    if (!tail.trim()) continue;
+    if (!cloned) { view = JSON.parse(JSON.stringify(c)); cloned = true; }
+    consumeUsage(view, tail, side, knownIdRe);
+    view.bytes += Buffer.byteLength(tail, 'utf8');
+  }
+  view.dirs = dirs;
+  view.total = Math.max(view.total, view.bytes);
+  return view;
+}
+
+function usageSnapshot(c) {
+  let mainOut = 0, sideOut = 0;
+  for (const threads of Object.values(c.models || {}))
+    for (const [th, t] of Object.entries(threads)) { if (th === 'main') mainOut += t.out; else sideOut += t.out; }
+  return { ts: ts(), models: c.models, dispatches: c.dispatches, byType: c.byType,
+           mainOut, sideOut, complete: !!c.complete,
+           scanPct: c.total ? Math.round(100 * c.bytes / c.total) : 100 };
+}
+
+// Called from the dashboard generator: keeps the token panel current without
+// the user ever running a command. Bounded, resumable, and never fatal.
+function usageAutoRefresh(cfg) {
+  try {
+    if ((((cfg || {}).options) || {}).usageAuto === false) return;
+    const snap = readJson(USAGE_FILE, null);
+    if (snap && snap.complete && Date.now() - Date.parse(snap.ts) < USAGE_AUTO_MS) return;
+    if (snap && !snap.complete && Date.now() - Date.parse(snap.ts) < 5000) return;
+    const c = collectUsage({ budgetMs: parseInt(process.env.FORGE_USAGE_BUDGET_MS || '', 10) || 700 });
+    if (!c) return;
+    writeJson(USAGE_FILE, usageSnapshot(c));
+  } catch (_) { /* telemetry must never block a state operation */ }
+}
+
 function regenDashboard() {
+  try { usageAutoRefresh(readJson(CONFIG_FILE, null)); } catch (_) { /* never block state ops */ }
   try { generateDashboard(); } catch (_) { /* dashboard is best-effort; never block state ops */ }
 }
 
@@ -318,7 +544,7 @@ function generateDashboard() {
       } else if (stat === 'IN_PROGRESS') {
         const st0 = t.attempts.filter(a => a.outcome === 'started').map(a => Date.parse(a.ts)).filter(Number.isFinite).pop();
         const agent = (disp.filter(d => d.kind !== 'message').pop() || {}).agent;
-        meta = `${st0 ? fmtD(Date.now() - st0) : ''}${agent ? ` · ${esc(agent)}` : ''}`;
+        meta = `${st0 ? `<span data-since="${new Date(st0).toISOString()}">${fmtD(Date.now() - st0)}</span>` : ''}${agent ? ` · ${esc(agent)}` : ''}`;
       } else if (stat === 'READY') meta = fails ? `${fails} failed attempt(s)` : 'next up';
       else if (stat === 'BLOCKED') meta = 'needs your answer';
       else if (stat === 'CANCELLED') meta = 'superseded';
@@ -422,8 +648,13 @@ function generateDashboard() {
         const span = Math.max(...passedTs) - Math.min(...startedTs);
         if (span > 0 && span < TRIM) itemSpans.push(span);
       }
+      // v0.15.2: older records may carry a message with no agent — attribute it
+      // to the launch it followed rather than inventing an agent row for it.
+      let lastAgent = null;
       for (const d of (t.dispatches || [])) {
-        const a = d.agent || '(agent not named)';
+        if (d.kind !== 'message' && d.agent) lastAgent = d.agent;
+        const a = d.agent || (d.kind === 'message' ? lastAgent : null);
+        if (!a) continue;                      // unattributable legacy record
         const rec = perAgent[a] = perAgent[a] || { launches: 0, msgs: 0, prep: [], exec: [] };
         if (d.kind === 'message') { rec.msgs++; continue; }
         rec.launches++;
@@ -452,7 +683,7 @@ function generateDashboard() {
       <div style="display:flex;flex-direction:column;gap:9px">${agentRows}</div>`
       : `<p class="mut">No dispatch records yet — they accumulate as items run under v0.12+ (<code>forge task dispatch</code>).</p>`}
       <div class="footnote">Median item start→done <b>${fmtDur(med(itemSpans))}</b>${itemSpans.length ? ` (${itemSpans.length} item(s))` : ''} · median verification run <b>${fmtDur(med(verifDurs))}</b>${gateWaits.length ? ` · your gate wait — ${gateWaits.join(', ')}` : ''}. Windows over 2h are excluded as session breaks; execution is bracketed by CLI events, so it is the window the worker ran in, not its exact runtime (see <code>forge usage</code>).</div></div>`;
-    const usageSnap = readJson(path.join(STATE, 'usage.json'), null);
+    const usageSnap = readJson(USAGE_FILE, null);
     let tokenPanel;
     if (usageSnap) {
       let tokenRows = '';
@@ -464,7 +695,8 @@ function generateDashboard() {
       const delPct = totOut ? Math.round(100 * (usageSnap.sideOut || 0) / totOut) : 0;
       const C = 226; const sideDash = Math.round(C * delPct / 100);
       tokenPanel =
-        `<div class="panel"><h3>Tokens <span class="mut">— observed, snapshot as of ${esc(String(usageSnap.ts || '?').slice(0, 16).replace('T', ' '))}</span></h3>
+        `<div class="panel"><h3>Tokens <span class="mut">— observed, snapshot as of ${esc(String(usageSnap.ts || '?').slice(0, 16).replace('T', ' '))}${usageSnap.ts ? ` (<span data-since="${esc(usageSnap.ts)}" data-post=" ago"></span>)` : ''}</span></h3>
+        ${usageSnap.complete === false ? `<p class="mut">Still reading the transcript backlog — ${usageSnap.scanPct || 0}% scanned. It continues on its own each time state changes; <code>forge usage</code> finishes it in one go.</p>` : ''}
         <div class="donutwrap">
           <svg width="92" height="92" viewBox="0 0 92 92" role="img" aria-label="${delPct} percent of output tokens delegated to workers">
             <circle cx="46" cy="46" r="36" fill="none" stroke="#0c8a70" stroke-width="13" stroke-dasharray="${sideDash} ${C}" transform="rotate(-90 46 46)"/>
@@ -477,11 +709,11 @@ function generateDashboard() {
           </div>
         </div>
         <div>${tokenRows || '<p class="mut">empty snapshot</p>'}</div>
-        <div class="footnote">${delPct}% delegated${byType ? ` · dispatches: ${byType}` : ''}. Per-agent token attribution inside worker threads is not exposed by the logs — absent data is shown as absent, never estimated. Refresh: <code>forge usage --write</code>.</div></div>`;
+        <div class="footnote">${delPct}% delegated${byType ? ` · dispatches: ${byType}` : ''}. Per-agent token attribution inside worker threads is not exposed by the logs — absent data is shown as absent, never estimated. This refreshes itself on every state change; <code>forge usage</code> prints the full report.</div></div>`;
     } else {
-      tokenPanel = `<div class="panel"><h3>Tokens</h3><p class="mut">No usage snapshot yet — run <code>forge usage --write</code> (zero tokens, any terminal) and this panel fills in.</p></div>`;
+      tokenPanel = `<div class="panel"><h3>Tokens</h3><p class="mut">No usage snapshot yet — this fills in by itself once Claude Code session logs exist for this project (or run <code>forge usage</code> now; zero tokens, any terminal).</p></div>`;
     }
-    telemetryBlock = `<details class="sec" open><summary>Telemetry <span class="mut">(time live from state · tokens from the last usage snapshot)</span></summary><div class="telgrid">${timePanel}${tokenPanel}</div></details>`;
+    telemetryBlock = `<details class="sec" open><summary>Telemetry <span class="mut">(time live from state · tokens re-read from session logs on every change)</span></summary><div class="telgrid">${timePanel}${tokenPanel}</div></details>`;
   }
 
   // ---- v0.14: needs-you banner (deterministic, same priority as session guidance) ----
@@ -535,7 +767,7 @@ function generateDashboard() {
       const gatesLeft = milestoneSeq(w).filter(m => !(((w.gates || {})[m]) || {}).approved).length;
       const medGate = pace.gateMs && pace.gateMs.length ? pace.med(pace.gateMs) : null;
       paceBlock = `<div class="pacestrip">
-        <div><div class="pk">ELAPSED</div><div class="pv">${calStr} <small>calendar</small> · ${pace.fmtDur(activeMs)} <small>active build</small></div></div>
+        <div><div class="pk">ELAPSED</div><div class="pv"><span data-since="${new Date(minStart).toISOString()}">${calStr}</span> <small>calendar</small> · ${pace.fmtDur(activeMs)} <small>active build</small></div></div>
         <div class="pdiv"></div>
         <div><div class="pk" style="color:#b3660a">PROJECTED REMAINING — BUILD</div><div class="pv">${remaining ? `≈ ${pace.fmtDur(lo)}–${pace.fmtDur(hi)} <small>active · ${remaining} item(s) at your pace</small>` : 'nothing left to build'}</div></div>
         <div class="pdiv"></div>
@@ -820,7 +1052,7 @@ tbody tr:hover{background:#faf9f5}
     <a href="#journal">Journal <span class="k">${decisions.length + discoveries.length}</span></a>
     <a href="#system">System</a>
   </nav>
-  <div class="sidefoot"><b>Generated projection.</b><br>State wins — never edit this file.<br>${new Date().toISOString().slice(0, 16).replace('T', ' ')} UTC</div>
+  <div class="sidefoot"><b>Generated projection.</b><br>State wins — never edit this file.<br>regenerated <span data-since="${new Date().toISOString()}" data-post=" ago">just now</span> · ${new Date().toISOString().slice(0, 16).replace('T', ' ')} UTC</div>
 </aside>
 <main><div class="wrap">
 
@@ -855,9 +1087,9 @@ ${telemetryBlock.replace('<details class="sec" open>', '<details class="sec" ope
 
 <details class="sec" id="system"><summary>System <span class="mut">(preflight · baseline · spec — the plumbing, collapsed until you need it)</span></summary>
 <div class="jgrid">
-<div><h3 style="margin-bottom:9px">Preflight ${pf ? `<span class="mut">${esc(pf.ts.slice(0, 16).replace('T', ' '))}</span>` : ''}</h3>
+<div><h3 style="margin-bottom:9px">Preflight ${pf ? `<span class="mut">${esc(pf.ts.slice(0, 16).replace('T', ' '))} · <span data-since="${esc(pf.ts)}" data-post=" ago"></span> — rerun with <code>forge preflight</code></span>` : ''}</h3>
 <div class="syscard">${pfBlock}</div></div>
-<div><h3 style="margin-bottom:9px">Baseline ${base ? `<span class="mut">${esc(base.ts.slice(0, 16).replace('T', ' '))}</span>` : ''}</h3>
+<div><h3 style="margin-bottom:9px">Baseline ${base ? `<span class="mut">${esc(base.ts.slice(0, 16).replace('T', ' '))} · a recorded moment, not a live check</span>` : ''}</h3>
 <div class="syscard">${baseBlock}</div></div>
 </div>
 ${specRows ? `<h3 style="margin:18px 0 9px">Specification <span class="mut">(${esc(cfg.specDir)}/ — the source of intent)</span></h3>
@@ -867,6 +1099,26 @@ ${specRows ? `<h3 style="margin:18px 0 9px">Specification <span class="mut">(${e
 </div></main>
 </div>
 <script>
+/* v0.15.2: durations are computed in the browser from embedded ISO timestamps,
+   so an open dashboard keeps telling the truth between CLI calls. */
+(function(){
+  function human(ms){
+    if(ms<0)ms=0; var s=ms/1000;
+    if(s<90)return Math.round(s)+'s';
+    var m=s/60; if(m<90)return Math.round(m)+'m';
+    var h=m/60; if(h<36)return (h<10?h.toFixed(1):Math.round(h))+'h';
+    var d=h/24; return (d<10?d.toFixed(1):Math.round(d))+' days';
+  }
+  function tick(){
+    var now=Date.now();
+    document.querySelectorAll('[data-since]').forEach(function(el){
+      var t=Date.parse(el.getAttribute('data-since'));
+      if(!isFinite(t))return;
+      el.textContent=(el.getAttribute('data-pre')||'')+human(now-t)+(el.getAttribute('data-post')||'');
+    });
+  }
+  tick(); setInterval(tick,30000);
+})();
 (function(){
   var i=document.getElementById('wgfilter'), seg=document.getElementById('wgseg'); if(!i) return;
   var mode='all';
@@ -1550,10 +1802,24 @@ const commands = {
       if (!['launch', 'message'].includes(kind))
         die(`--kind must be 'launch' (handing the brief to a worker) or 'message' (mid-flight message to a running worker).`);
       item.dispatches = item.dispatches || [];
-      item.dispatches.push({ ts: ts(), agent: opt('agent') || null, kind, note: opt('note') || null });
+      // v0.15.2: a launch record without an agent is worthless — it cannot be
+      // attributed, costed, or compared, and it used to surface as a phantom
+      // '(agent not named)' row in telemetry. A mid-flight message inherits the
+      // agent of the launch it follows: it is a message TO that worker.
+      const lastLaunch = item.dispatches.filter(d => d.kind !== 'message').pop();
+      let agent = opt('agent');
+      let inherited = false;
+      if (!agent && kind === 'message' && lastLaunch && lastLaunch.agent) { agent = lastLaunch.agent; inherited = true; }
+      if (!agent)
+        die(kind === 'launch'
+          ? `Refused: dispatch needs --agent "<worker>" — an unattributed launch cannot be costed or compared.\n` +
+            `  forge task dispatch ${item.id} --agent forge-implementer --note "<what it was handed>"`
+          : `Refused: no launch on '${item.id}' to attach this message to (and no --agent given).\n` +
+            `Record the launch first, or name the worker: forge task dispatch ${item.id} --kind message --agent <worker> --note "..."`);
+      item.dispatches.push({ ts: ts(), agent, kind, inherited: inherited || undefined, note: opt('note') || null });
       item.updated = ts();
       saveWork(w);
-      out(`${item.id} dispatch recorded${opt('agent') ? ` → ${opt('agent')}` : ''}${kind === 'message' ? ' (mid-flight message)' : ''} (${item.dispatches.length} total on this item)`);
+      out(`${item.id} dispatch recorded → ${agent}${inherited ? ' (inherited from the last launch)' : ''}${kind === 'message' ? ' (mid-flight message)' : ''} (${item.dispatches.length} total on this item)`);
 
     } else die('Usage: forge task add|list|show|start|dispatch|verify|done|fail|block|cancel|update ...');
   },
@@ -2032,103 +2298,19 @@ const commands = {
 
   // -- usage (v0.4) — OBSERVED telemetry from local Claude Code session logs ------
   usage() {
-    const projectsRoot = process.env.FORGE_CLAUDE_PROJECTS || path.join(os.homedir(), '.claude', 'projects');
-    if (!fs.existsSync(projectsRoot)) die(`UNAVAILABLE: no Claude Code session logs found at ${projectsRoot}.`);
-    // locate this project's transcript folder: sanitized-cwd name, else scan for matching cwd
-    const sanitized = PROJECT.replace(/[^a-zA-Z0-9]/g, '-');
-    let dirCandidates = [path.join(projectsRoot, sanitized)].filter(fs.existsSync);
-    if (!dirCandidates.length) {
-      for (const d of fs.readdirSync(projectsRoot)) {
-        const full = path.join(projectsRoot, d);
-        try {
-          const f = fs.readdirSync(full).find(x => x.endsWith('.jsonl'));
-          if (!f) continue;
-          const head = fs.readFileSync(path.join(full, f), 'utf8').split('\n').slice(0, 20).join('\n');
-          if (head.includes(`"cwd":${JSON.stringify(PROJECT)}`)) { dirCandidates.push(full); break; }
-        } catch (_) { /* skip */ }
-      }
-    }
-    if (!dirCandidates.length)
-      die(`UNAVAILABLE: no session logs for this project under ${projectsRoot}.\n` +
-          `(Logs appear after Claude Code sessions run in ${PROJECT}.)`);
+    // v0.15.2: shares the incremental engine with the dashboard's auto-refresh.
+    // Run manually for the full report; --rescan rebuilds from scratch (also
+    // re-ties dispatches to work items added since the last scan).
+    const c = collectUsage({ budgetMs: 0, rescan: flag('rescan') });
+    if (!c) die(`UNAVAILABLE: no Claude Code session logs for this project.\n` +
+                `(Logs appear under ~/.claude/projects after Claude Code sessions run in ${PROJECT}.)`);
 
-    const agg = {
-      sessions: 0, firstTs: null, lastTs: null,
-      models: {},          // model → {thread: main|side} → {calls,in,out,cacheCreate,cacheRead}
-      dispatches: [],      // {ts, type, itemId|null}
-      byDay: {},           // yyyy-mm-dd → out tokens
-    };
-    // Known work-item ids, for tying dispatches whose prompt names an item
-    // without an inline brief header (e.g. brief passed by file path).
-    let knownIdRe = null;
-    try {
-      const ids = Object.keys(loadWork().items || {})
-        .filter(id => /^[A-Za-z0-9][\w.-]*$/.test(id))
-        .sort((a, b) => b.length - a.length); // longest first: T20f before T20
-      if (ids.length) knownIdRe = new RegExp(`\\b(${ids.map(id => id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})\\b`);
-    } catch (_) { /* no work graph → inline/path matching only */ }
-    const bump = (model, thread, u) => {
-      const m = (agg.models[model] = agg.models[model] || {});
-      const t = (m[thread] = m[thread] || { calls: 0, in: 0, out: 0, cacheCreate: 0, cacheRead: 0 });
-      t.calls++; t.in += u.input_tokens || 0; t.out += u.output_tokens || 0;
-      t.cacheCreate += u.cache_creation_input_tokens || 0; t.cacheRead += u.cache_read_input_tokens || 0;
-    };
-    // main-session transcripts sit in the project dir; worker transcripts sit in
-    // <session-uuid>/subagents/agent-*.jsonl subdirectories (Claude Code >= 2.1)
-    const files = [];
-    for (const dir2 of dirCandidates) {
-      for (const entry of fs.readdirSync(dir2)) {
-        const full = path.join(dir2, entry);
-        if (entry.endsWith('.jsonl')) { files.push({ f: full, forcedSide: false, isSession: true }); continue; }
-        const sub = path.join(full, 'subagents');
-        try {
-          if (fs.statSync(full).isDirectory() && fs.existsSync(sub))
-            for (const wf of fs.readdirSync(sub).filter(x => x.endsWith('.jsonl')))
-              files.push({ f: path.join(sub, wf), forcedSide: true, isSession: false });
-        } catch (_) { /* skip */ }
-      }
-    }
-    {
-      for (const { f, forcedSide, isSession } of files) {
-        if (isSession) agg.sessions++;
-        for (const line of fs.readFileSync(f, 'utf8').split('\n')) {
-          if (!line.trim()) continue;
-          let d; try { d = JSON.parse(line); } catch (_) { continue; }
-          const tsv = d.timestamp;
-          if (tsv) {
-            if (!agg.firstTs || tsv < agg.firstTs) agg.firstTs = tsv;
-            if (!agg.lastTs || tsv > agg.lastTs) agg.lastTs = tsv;
-          }
-          if (d.type !== 'assistant' || !d.message) continue;
-          const model = d.message.model || 'unknown';
-          if (model === '<synthetic>') continue;
-          const u = d.message.usage || {};
-          bump(model, (forcedSide || d.isSidechain) ? 'side' : 'main', u);
-          if (tsv) agg.byDay[tsv.slice(0, 10)] = (agg.byDay[tsv.slice(0, 10)] || 0) + (u.output_tokens || 0);
-          for (const c of (Array.isArray(d.message.content) ? d.message.content : [])) {
-            if (c && c.type === 'tool_use' && (c.name === 'Task' || c.name === 'Agent')) {
-              const p = (c.input || {}).prompt || '';
-              // Tie dispatch → work item. In order of confidence:
-              // 1. inline brief header; 2. brief file path; 3. first known work-item id in the prompt.
-              let itemId = null;
-              const m2 = p.match(/Work brief — (\S+?):/);
-              if (m2) itemId = m2[1];
-              if (!itemId) { const m3 = p.match(/[Bb]riefs?\/([A-Za-z0-9][\w.-]*?)\.md\b/); if (m3) itemId = m3[1]; }
-              if (!itemId && knownIdRe) { const m4 = p.match(knownIdRe); if (m4) itemId = m4[1]; }
-              agg.dispatches.push({ ts: tsv || null, type: (c.input || {}).subagent_type || 'unknown', itemId });
-            }
-          }
-        }
-      }
-    }
-
-    // ---- report ----
     out(`# Forge usage — OBSERVED from local session logs (never estimated)`);
-    out(`Source: ${dirCandidates.join(', ')}`);
-    out(`Sessions: ${agg.sessions} · window: ${agg.firstTs ? agg.firstTs.slice(0, 16) : '?'} → ${agg.lastTs ? agg.lastTs.slice(0, 16) : '?'}`);
+    out(`Source: ${(c.dirs || []).join(', ')}`);
+    out(`Sessions: ${c.sessions || 0} · window: ${c.firstTs ? c.firstTs.slice(0, 16) : '?'} → ${c.lastTs ? c.lastTs.slice(0, 16) : '?'}`);
     out(`\n## Tokens by model and thread (main = orchestrator, side = dispatched subagents)`);
     let mainOut = 0, sideOut = 0;
-    for (const [model, threads] of Object.entries(agg.models)) {
+    for (const [model, threads] of Object.entries(c.models)) {
       for (const [thread, t] of Object.entries(threads)) {
         if (thread === 'main') mainOut += t.out; else sideOut += t.out;
         out(`  ${model} [${thread}]: ${t.calls} calls · in ${t.in.toLocaleString()} · out ${t.out.toLocaleString()} · cache write ${t.cacheCreate.toLocaleString()} / read ${t.cacheRead.toLocaleString()}`);
@@ -2136,30 +2318,26 @@ const commands = {
     }
     const totOut = mainOut + sideOut;
     out(`\n## Delegation`);
-    if (sideOut === 0 && agg.dispatches.length > 0)
+    if (sideOut === 0 && c.dispatches > 0)
       out(`  Output tokens — orchestrator: ${mainOut.toLocaleString()} · subagents: UNAVAILABLE\n` +
           `  (dispatches exist but no subagent-thread usage appears in these logs — this Claude Code version\n` +
           `   likely stores worker transcripts elsewhere; token split by thread cannot be observed here)`);
     else
       out(`  Output tokens — orchestrator: ${mainOut.toLocaleString()} · subagents: ${sideOut.toLocaleString()}` +
           (totOut ? ` · ${Math.round(100 * sideOut / totOut)}% delegated` : ''));
-    const byType = {};
-    for (const disp of agg.dispatches) byType[disp.type] = (byType[disp.type] || 0) + 1;
-    // plugin agents report as "forge:forge-implementer"; bare "forge-implementer" also counts
+    const byType = c.byType || {};
     const forgeCount = Object.entries(byType).filter(([k]) => k.includes('forge-')).reduce((a, [, v]) => a + v, 0);
-    out(`  Dispatches: ${agg.dispatches.length} total — ` +
+    out(`  Dispatches: ${c.dispatches} total — ` +
         (Object.keys(byType).length ? Object.entries(byType).map(([k, v]) => `${k}×${v}`).join(' · ') : 'NONE'));
-    if (agg.dispatches.length)
-      out(`  Through forge roster: ${forgeCount}/${agg.dispatches.length}` +
-          (forgeCount < agg.dispatches.length ? '  ← work is bypassing the forge agents (built-in/other types above)' : ''));
+    if (c.dispatches)
+      out(`  Through forge roster: ${forgeCount}/${c.dispatches}` +
+          (forgeCount < c.dispatches ? '  ← work is bypassing the forge agents (built-in/other types above)' : ''));
     else
       out(`  ← ZERO dispatches: the orchestrator is doing all work itself in the main thread.`);
-    const tied = agg.dispatches.filter(d2 => d2.itemId);
-    const perItem = {};
-    for (const d2 of tied) perItem[d2.itemId] = (perItem[d2.itemId] || 0) + 1;
     out(`  Tied to work items (inline brief, brief file path, or known item id in prompt): ` +
-        (tied.length ? Object.entries(perItem).map(([k, v]) => `${k}×${v}`).join(' · ') : 'none') +
-        (agg.dispatches.length - tied.length ? ` · ${agg.dispatches.length - tied.length} dispatch(es) could not be tied to any work item` : ''));
+        (c.tied ? Object.entries(c.perItem).map(([k, v]) => `${k}×${v}`).join(' · ') : 'none') +
+        (c.dispatches - c.tied ? ` · ${c.dispatches - c.tied} dispatch(es) could not be tied to any work item` : '') +
+        (c.tied ? ` · ties are resolved when a transcript is first scanned — forge usage --rescan re-ties everything` : ''));
 
     // v0.12: dispatch records from state (forge task dispatch) — authoritative
     // when present; the transcript inference above remains the fallback for old logs.
@@ -2169,9 +2347,13 @@ const commands = {
       for (const id of wU.order) {
         const ds = wU.items[id].dispatches || [];
         if (ds.length) dItems++;
+        let lastAgent = null;
         for (const d3 of ds) {
           dTotal++; if (d3.kind === 'message') dMsg++;
-          const a = d3.agent || '(agent not named)';
+          // v0.15.2: a mid-flight message inherits the agent of the launch it
+          // followed — it is a message TO that worker, not a new participant.
+          if (d3.kind !== 'message' && d3.agent) lastAgent = d3.agent;
+          const a = d3.agent || (d3.kind === 'message' ? lastAgent : null) || '(agent not named)';
           dByAgent[a] = (dByAgent[a] || 0) + 1;
         }
       }
@@ -2181,32 +2363,36 @@ const commands = {
             Object.entries(dByAgent).map(([k, v]) => `${k}×${v}`).join(' · '));
     } catch (_) { /* no work file */ }
 
-    // drift: tokens spent after the last forge state change
+    // drift: tokens spent after the last forge state change. Only files touched
+    // since that moment can contain later entries, so the rest are skipped.
     try {
       const stateM = fs.statSync(WORK_FILE).mtime.toISOString();
+      const stateMs = Date.parse(stateM);
       let after = 0;
-      for (const dir2 of dirCandidates)
-        for (const f of fs.readdirSync(dir2).filter(x => x.endsWith('.jsonl')))
-          for (const line of fs.readFileSync(path.join(dir2, f), 'utf8').split('\n')) {
-            if (!line.includes('"assistant"')) continue;
-            let d2; try { d2 = JSON.parse(line); } catch (_) { continue; }
-            if (d2.type === 'assistant' && d2.timestamp > stateM && d2.message && d2.message.usage)
-              after += d2.message.usage.output_tokens || 0;
-          }
+      for (const { f } of usageFiles(c.dirs || [])) {
+        let st; try { st = fs.statSync(f); } catch (_) { continue; }
+        if (st.mtimeMs < stateMs) continue;
+        for (const line of fs.readFileSync(f, 'utf8').split('\n')) {
+          if (!line.includes('"assistant"')) continue;
+          let d2; try { d2 = JSON.parse(line); } catch (_) { continue; }
+          if (d2.type === 'assistant' && d2.timestamp > stateM && d2.message && d2.message.usage)
+            after += d2.message.usage.output_tokens || 0;
+        }
+      }
       out(`\n## Progress vs spend`);
       out(`  Last forge state change: ${stateM.slice(0, 16)} · output tokens spent SINCE then: ${after.toLocaleString()}`);
       if (after > 20000) out(`  ← significant spend with no state movement: work may be happening outside the forge loop. Check what the session is doing.`);
     } catch (_) { /* no work file */ }
 
     out(`\n## Activity by day (output tokens)`);
-    for (const [day, v] of Object.entries(agg.byDay).sort())
+    for (const [day, v] of Object.entries(c.byDay).sort())
       out(`  ${day}: ${'█'.repeat(Math.min(40, Math.ceil(v / 2000)))} ${v.toLocaleString()}`);
     out(`\nCaveats: per-agent-type token attribution inside subagent threads is not exposed by the logs (reported in aggregate as [side]); ` +
         `milestone-level token attribution is not reliably derivable and is therefore not shown. Absent data is absent, never estimated.`);
-    if (flag('write')) {
-      writeJson(path.join(STATE, 'usage.json'), { ts: ts(), models: agg.models, dispatches: agg.dispatches.length, byType, mainOut, sideOut });
-      out('\nSaved snapshot: forge/state/usage.json');
-    }
+    // v0.15.2: the snapshot the dashboard reads is refreshed automatically on
+    // every regen — writing it here just makes the manual run authoritative too.
+    writeJson(USAGE_FILE, usageSnapshot(c));
+    out(`\nSnapshot updated: forge/state/usage.json (the dashboard also refreshes this by itself — ${flag('write') ? '--write is no longer required' : 'no --write needed'}).`);
   },
 
   // -- milestone gates (F9) -------------------------------------------------------
@@ -2272,7 +2458,7 @@ const commands = {
   // -- dashboard ----------------------------------------------------------------
   dashboard() {
     if (!loadConfig()) die('No forge project here (run: forge init).');
-    generateDashboard();
+    regenDashboard();   // v0.15.2: also brings the token snapshot up to date
     out(`Dashboard regenerated: ${path.relative(PROJECT, DASHBOARD_FILE)}`);
     out('Open it in a browser. It also auto-regenerates after every state change — just reload the tab.');
   },
@@ -2522,6 +2708,9 @@ const commands = {
   task update <id> [--title|--objective|--milestone|--deps|--allowed|--forbidden|--mock]
                    [--criterion-add "d::cmd"]... [--criterion-remove i]... [--reason r]
                                          audited edits; criteria changes after failures require --reason
+  task dispatch <id> --agent <worker> [--kind launch|message] [--note]
+                                         --agent is required on a launch; a --kind message inherits
+                                         the agent of the launch it follows
   task block <id> --reason | cancel <id> --reason [--dependents drop|cancel]
   milestone list | approve <m> [--note] | reopen <m> --reason
                                          human gates between milestones (config: options.gates per-milestone|end-only)
@@ -2539,9 +2728,12 @@ const commands = {
   baseline capture | check               brownfield: record and guard pre-existing state
   status                                 project overview
   dashboard                              (re)generate forge/dashboard.html — also auto-regens on every state change
-  usage [--write]                        OBSERVED token/dispatch report from local session logs:
+  usage [--rescan]                       OBSERVED token/dispatch report from local session logs:
                                          by model, orchestrator vs subagents, dispatches by agent type,
-                                         per-item dispatch counts, spend since last state change
+                                         per-item dispatch counts, spend since last state change.
+                                         The dashboard's token panel refreshes ITSELF on every state
+                                         change (incremental: only new transcript bytes are read), so
+                                         running this is optional. --rescan rebuilds from scratch.
   component add|update <id> ... | list   project-map registry (kind/route/mock/doc); items tag via task --component
   trace [--refusals|--hooks|--last N]    flight recorder: every CLI call and hook decision (FORGE_DEBUG=1 = verbose)
   doctor                                 install/state self-check: versions, cache, hooks, lock, orphaned work
@@ -2554,6 +2746,8 @@ const commands = {
                options.concurrency N     max items IN_PROGRESS at once (default 1 = serial; raise only with
                                          disjoint scopes — see OPERATING.md parallel dispatch)
                options.scopeExempt "a/,b/"  dirs exempt from the scope whitelist (default forge/,spec/,docs/; *.md always exempt)
+               options.usageAuto false   stop refreshing the token snapshot automatically (then it is
+                                         only as fresh as your last 'forge usage' run)
                providers.model "<id>" · providers.url (default https://openrouter.ai/api/v1) ·
                providers.keyEnv (default OPENROUTER_API_KEY) · providers.maxTurns (default 24)
   state writes are serialised by forge/state/work.lock (concurrent forge processes wait, then refuse;

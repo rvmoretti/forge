@@ -17,14 +17,17 @@ let dir;
 function forge(args, opts = {}) {
   const r = spawnSync(process.execPath, [CLI, ...args], {
     cwd: dir, encoding: 'utf8', input: opts.stdin || '',
-    env: Object.assign({}, process.env, { CLAUDE_PROJECT_DIR: dir }, opts.env || {})
+    env: Object.assign({}, process.env,
+      { CLAUDE_PROJECT_DIR: dir, FORGE_CLAUDE_PROJECTS: path.join(os.tmpdir(), 'forge-no-such-logs') },
+      opts.env || {})
   });
   return { code: r.status, out: (r.stdout || '') + (r.stderr || '') };
 }
 function hook(name, stdinObj) {
   const r = spawnSync(process.execPath, [CLI, 'hook', name], {
     cwd: dir, encoding: 'utf8', input: JSON.stringify(stdinObj || {}),
-    env: Object.assign({}, process.env, { CLAUDE_PROJECT_DIR: dir })
+    env: Object.assign({}, process.env,
+      { CLAUDE_PROJECT_DIR: dir, FORGE_CLAUDE_PROJECTS: path.join(os.tmpdir(), 'forge-no-such-logs') })
   });
   return { code: r.status, out: (r.stdout || '') + (r.stderr || '') };
 }
@@ -921,4 +924,127 @@ test('v0.15.1 dashboard shell: rows are cards with drawers, sections are styled,
   assert.match(dash, /class="jitem human"/);             // journal timeline marks human authority
   assert.match(dash, /details\.sec>summary::-webkit-details-marker\{display:none\}/); // no OS triangles
   assert.doesNotMatch(dash, /<th>Deps<\/th>/);           // the old work table is gone
+});
+
+// --- v0.15.2: the dashboard keeps itself current ------------------------------
+
+// writes a fake Claude Code transcript folder and returns its root
+function fakeLogs(lines, opts = {}) {
+  const root = opts.root || fs.mkdtempSync(path.join(os.tmpdir(), 'forge-logs-'));
+  const projDir = path.join(root, dir.replace(/[^a-zA-Z0-9]/g, '-'));
+  fs.mkdirSync(projDir, { recursive: true });
+  const file = path.join(projDir, 'session.jsonl');
+  const text = lines.join('\n') + (opts.trailingNewline === false ? '' : '\n');
+  if (opts.append) fs.appendFileSync(file, text); else fs.writeFileSync(file, text);
+  return root;
+}
+const asst = (out, extra = {}) => JSON.stringify(Object.assign({
+  type: 'assistant', timestamp: '2026-09-18T10:00:00.000Z',
+  message: { model: 'test-model', usage: { output_tokens: out, input_tokens: 1 } }
+}, extra));
+
+test('usage snapshot refreshes itself on a state change — no manual forge usage needed', () => {
+  const root = fakeLogs([asst(1000), asst(500)]);
+  addItem('U1');   // any state change regenerates the dashboard
+  forge(['dashboard'], { env: { FORGE_CLAUDE_PROJECTS: root } });
+  const snap = JSON.parse(fs.readFileSync(path.join(dir, 'forge', 'state', 'usage.json'), 'utf8'));
+  assert.strictEqual(snap.mainOut, 1500);
+  assert.strictEqual(snap.complete, true);
+  const dash = fs.readFileSync(path.join(dir, 'forge', 'dashboard.html'), 'utf8');
+  assert.match(dash, /snapshot as of/);
+  assert.doesNotMatch(dash, /No usage snapshot yet/);
+});
+
+test('a second scan reads only the new tail and never double-counts', () => {
+  const root = fakeLogs([asst(1000)]);
+  addItem('U1');
+  forge(['dashboard'], { env: { FORGE_CLAUDE_PROJECTS: root } });
+  const first = JSON.parse(fs.readFileSync(path.join(dir, 'forge', 'state', 'usage.json'), 'utf8'));
+  assert.strictEqual(first.mainOut, 1000);
+  const cache = JSON.parse(fs.readFileSync(path.join(dir, 'forge', 'state', 'usage-cache.json'), 'utf8'));
+  const off = Object.values(cache.files)[0].off;
+  assert.ok(off > 0);
+  // append and rescan: the total grows by exactly the new entry
+  fakeLogs([asst(250)], { root, append: true });
+  forge(['usage'], { env: { FORGE_CLAUDE_PROJECTS: root } });
+  const second = JSON.parse(fs.readFileSync(path.join(dir, 'forge', 'state', 'usage.json'), 'utf8'));
+  assert.strictEqual(second.mainOut, 1250);
+  const cache2 = JSON.parse(fs.readFileSync(path.join(dir, 'forge', 'state', 'usage-cache.json'), 'utf8'));
+  assert.ok(Object.values(cache2.files)[0].off > off);
+});
+
+test('a transcript with no trailing newline is counted once, not once per scan', () => {
+  const root = fakeLogs([asst(700), asst(300)], { trailingNewline: false });
+  addItem('U1');
+  const run = () => {
+    forge(['usage'], { env: { FORGE_CLAUDE_PROJECTS: root } });
+    return JSON.parse(fs.readFileSync(path.join(dir, 'forge', 'state', 'usage.json'), 'utf8')).mainOut;
+  };
+  assert.strictEqual(run(), 1000);
+  assert.strictEqual(run(), 1000);   // the unterminated last line is not re-added
+  assert.strictEqual(run(), 1000);
+});
+
+test('a rewritten (shrunk) transcript is re-read from the start', () => {
+  const root = fakeLogs([asst(100), asst(100), asst(100)]);
+  addItem('U1');
+  forge(['usage'], { env: { FORGE_CLAUDE_PROJECTS: root } });
+  assert.strictEqual(JSON.parse(fs.readFileSync(path.join(dir, 'forge', 'state', 'usage.json'), 'utf8')).mainOut, 300);
+  fakeLogs([asst(42)], { root });   // replaced, now smaller
+  forge(['usage'], { env: { FORGE_CLAUDE_PROJECTS: root } });
+  assert.strictEqual(JSON.parse(fs.readFileSync(path.join(dir, 'forge', 'state', 'usage.json'), 'utf8')).mainOut, 42);
+});
+
+test('auto-refresh is skippable and never breaks a state change when logs are unreadable', () => {
+  forge(['config', 'set', 'options.usageAuto', 'false']);
+  const root = fakeLogs([asst(9999)]);
+  const r = addItem('U1');
+  assert.strictEqual(r.code, 0);
+  assert.strictEqual(fs.existsSync(path.join(dir, 'forge', 'state', 'usage.json')), false);
+  // and with no log folder at all, commands still succeed
+  const r2 = forge(['dashboard'], { env: { FORGE_CLAUDE_PROJECTS: path.join(root, 'nope') } });
+  assert.strictEqual(r2.code, 0);
+});
+
+test('dispatch refuses an unnamed launch; a mid-flight message inherits the agent', () => {
+  addItem('D9');
+  forge(['task', 'start', 'D9']);
+  const bare = forge(['task', 'dispatch', 'D9']);
+  assert.notStrictEqual(bare.code, 0);
+  assert.match(bare.out, /needs --agent/);
+  const orphanMsg = forge(['task', 'dispatch', 'D9', '--kind', 'message', '--note', 'hi']);
+  assert.notStrictEqual(orphanMsg.code, 0);
+  assert.match(orphanMsg.out, /no launch on 'D9'/);
+  assert.strictEqual(forge(['task', 'dispatch', 'D9', '--agent', 'forge-implementer']).code, 0);
+  const msg = forge(['task', 'dispatch', 'D9', '--kind', 'message', '--note', 'clarified']);
+  assert.strictEqual(msg.code, 0);
+  assert.match(msg.out, /inherited from the last launch/);
+  const w = JSON.parse(fs.readFileSync(path.join(dir, 'forge', 'state', 'work.json'), 'utf8'));
+  assert.strictEqual(w.items.D9.dispatches[1].agent, 'forge-implementer');
+  assert.strictEqual(w.items.D9.dispatches[1].kind, 'message');
+});
+
+test('a legacy unnamed message does not create a phantom agent row', () => {
+  addItem('D8');
+  forge(['task', 'start', 'D8']);
+  forge(['task', 'dispatch', 'D8', '--agent', 'forge-implementer']);
+  // simulate a pre-v0.15.2 record written without an agent
+  const wf = path.join(dir, 'forge', 'state', 'work.json');
+  const w = JSON.parse(fs.readFileSync(wf, 'utf8'));
+  w.items.D8.dispatches.push({ ts: new Date().toISOString(), agent: null, kind: 'message', note: 'legacy' });
+  fs.writeFileSync(wf, JSON.stringify(w, null, 2));
+  forge(['dashboard']);
+  const dash = fs.readFileSync(path.join(dir, 'forge', 'dashboard.html'), 'utf8');
+  assert.doesNotMatch(dash, /agent not named/);
+  assert.match(dash, /forge-implementer/);
+});
+
+test('durations on the page are computed in the browser, not frozen at generation', () => {
+  addItem('L1');
+  forge(['task', 'start', 'L1']);
+  forge(['task', 'dispatch', 'L1', '--agent', 'forge-implementer']);
+  const dash = fs.readFileSync(path.join(dir, 'forge', 'dashboard.html'), 'utf8');
+  assert.match(dash, /data-since="\d{4}-\d{2}-\d{2}T/);    // in-progress elapsed
+  assert.match(dash, /setInterval\(tick,30000\)/);          // and it keeps ticking
+  assert.match(dash, /regenerated <span data-since=/);      // the file states its own age
 });

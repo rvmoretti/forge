@@ -164,6 +164,12 @@ blocked-with-reason / failed-with-diagnosis).
 - `/forge:usage` — observed tokens by model, orchestrator vs workers, dispatches tied to items,
   output tokens since last state change (drift detector). Read from Claude Code session logs;
   never estimated.
+  v0.15.2: nothing on the page waits for you to refresh it — the token panel
+  updates itself on every state change (incremental transcript scan, bounded and
+  resumable; `options.usageAuto false` disables it, `forge usage` still prints the
+  full report and `--rescan` rebuilds), durations tick in the browser from embedded
+  timestamps rather than being frozen at generation, and preflight/baseline state
+  their own age. Only the baseline is a deliberate recorded moment.
   v0.15.1: the finish pass — work items are clickable rows that open a detail drawer
   (design strip, criteria with per-check pass marks, dispatches, scope and evidence),
   milestone groups are cards, quick filters (All / Needs me / Active / Done) sit beside
@@ -233,7 +239,8 @@ and `forge trace --refusals` (flight recorder: every CLI call + hook decision, v
 
 `init` · `config get|set` · `preflight [--full]` ·
 `task add|list|show|start|dispatch|verify|done|fail|block|cancel|update` (start: `--agent`,
-`--escalate`, `--whole-tree --reason`; dispatch: `--agent`, `--kind launch|message`, `--note`;
+`--escalate`, `--whole-tree --reason`; dispatch: `--agent` (REQUIRED on a launch; a
+`--kind message` inherits the launch's agent), `--kind launch|message`, `--note`;
 verify: `--artifact`, `--skip-baseline --reason`; add/update: `--criterion "desc::cmd"`,
 `--deps`, `--milestone`, `--component`, `--allowed`, `--forbidden`, `--mock`; update requires
 `--reason` when criteria change after failures; cancel: `--reason`, `--dependents drop|cancel`) ·
@@ -254,7 +261,7 @@ Config: `verify.test|lint|typecheck|security|…` (all run in every verify) · `
 per-milestone|end-only` · `options.security off` · `options.protect "p1/,p2/"` ·
 `options.concurrency N` (max items in flight; default 1 = serial; raise only with disjoint
 scopes and the parallel-dispatch rules) · `options.scopeExempt "a/,b/"` (whitelist-exempt dirs;
-default forge/,spec/,docs/; *.md always exempt) · `options.graphify` · `options.web` ·
+default forge/,spec/,docs/; *.md always exempt) · `options.usageAuto` (false stops the automatic token-snapshot refresh) · `options.graphify` · `options.web` ·
 `specDir` · `phase spec|build` · `providers.model "<id>"` + `providers.url` (default
 https://openrouter.ai/api/v1) + `providers.keyEnv` (default OPENROUTER_API_KEY) +
 `providers.maxTurns` (default 24) — API workers, v0.15.
