@@ -75,7 +75,8 @@ from confirmed goals, milestone cut across everything. Then the same loop.
    through it. Delegate one bounded task per worker. Workers never delegate
    further. **Messaging a running worker mid-flight** (a clarification, a
    corrected path) is allowed but audited: record it too —
-   `forge task dispatch <id> --kind message --note "<what>"`. A failed
+   `forge task dispatch <id> --agent <worker> --kind message --note "<what>"`
+   (`--agent` is required on a launch and is inherited by a message). A failed
    worker is never resumed through chat; that path is retry-by-fresh-brief,
    nothing else.
 4. **Verify**: `forge task verify <id>` — machine evidence, not the worker's
