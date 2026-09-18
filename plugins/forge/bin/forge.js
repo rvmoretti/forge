@@ -226,11 +226,14 @@ function generateDashboard() {
 
   const sColor = { DONE: '#15803d', IN_PROGRESS: '#3b3f8f', BLOCKED: '#b91c1c', TODO: '#57606f', CANCELLED: '#9aa0ad', READY: '#0f766e' };
   const chip = (label, color) =>
-    `<span style="display:inline-block;font-size:10.5px;font-weight:700;letter-spacing:.04em;padding:1px 8px;border-radius:99px;border:1px solid ${color}44;color:${color};background:${color}12">${esc(label)}</span>`;
+    `<span class="pill" style="border:1px solid ${color}33;color:${color};background:${color}12">${esc(label)}</span>`;
   // v0.13.1: components loaded early — milestone sections show which components they touch
   const comps = readJson(COMPONENTS_FILE, { schema: 1, components: {} }).components;
   const kindColor = { frontend: '#3b3f8f', backend: '#0f766e', db: '#b45309', job: '#57606f', integration: '#7c3aed' };
-  const compChip = (cid) => chip(cid, kindColor[(comps[cid] || {}).kind] || '#57606f');
+  // v0.15.1: component chips carry a kind swatch instead of being coloured pills —
+  // quieter beside a status pill, and the colour still says which kind it is.
+  const compChip = (cid) => `<span class="cchip"><i style="background:${kindColor[(comps[cid] || {}).kind] || '#57606f'}"></i>${esc(cid)}</span>`;
+  const fmtD = ms2 => ms2 == null ? '\u2014' : (ms2 < 90000 ? Math.round(ms2 / 1000) + 's' : (ms2 < 5400000 ? Math.round(ms2 / 60000) + 'm' : (ms2 / 3600000).toFixed(1) + 'h'));
 
   // spec files
   let specRows = '';
@@ -256,12 +259,11 @@ function generateDashboard() {
     const rows = items.map(({ t, isReady }) => {
       const fails = t.attempts.filter(a => a.outcome === 'failed').length;
       const lastV = t.verifications.length ? t.verifications[t.verifications.length - 1] : null;
-      // v0.13.1: everything known about the item, one click away — plus the saved brief when it exists
       const disp = t.dispatches || [];
-      const launches = disp.filter(d => d.kind !== 'message');
-      const msgs = disp.length - launches.length;
-      const agents = [...new Set(disp.map(d => d.agent).filter(Boolean))];
       const hasBrief = t.id && fs.existsSync(path.join(FORGE, 'briefs', `${t.id}.md`));
+      const stat = isReady ? 'READY' : t.status;
+      const sCls = { DONE: 's-done', IN_PROGRESS: 's-prog', READY: 's-ready', BLOCKED: 's-block', TODO: 's-todo', CANCELLED: 's-cancel' }[stat] || 's-todo';
+      const sVar = { DONE: 'var(--done)', IN_PROGRESS: 'var(--progc)', READY: 'var(--readyc)', BLOCKED: 'var(--blockc)', TODO: 'var(--line)', CANCELLED: 'var(--line2)' }[stat] || 'var(--line)';
       // v0.14: design strip — the approved mock beside the latest build capture (intent vs built)
       let designStrip = '';
       {
@@ -271,33 +273,78 @@ function generateDashboard() {
         for (const v of (t.verifications || [])) for (const a of (v.artifacts || [])) if (/\.(png|jpe?g|webp|gif|svg)$/i.test(a)) capP = a;
         const mockOk = mockP && fs.existsSync(path.join(PROJECT, mockP));
         const capOk = capP && fs.existsSync(path.join(PROJECT, capP));
-        if (mockOk || capOk) designStrip = `<div class="design"><b>Design — intended vs built</b><div class="dpair">
+        if (mockOk || capOk) designStrip = `<div class="design"><h4>Design — intended vs built</h4><div class="dpair">
           ${mockOk ? `<a href="../${esc(mockP)}"><img src="../${esc(mockP)}" alt="approved mock"><span>approved mock · <code>${esc(mockP)}</code></span></a>` : `<div class="dmiss">no mock recorded for this screen</div>`}
           ${capOk ? `<a href="../${esc(capP)}"><img src="../${esc(capP)}" alt="latest build capture"><span>latest capture · <code>${esc(capP)}</code></span></a>` : `<div class="dmiss">no screen capture yet — <code>task verify --artifact</code></div>`}
         </div></div>`;
       }
-      const card = `<details class="icd"><summary>details${designStrip ? ' · 🎨 design' : ''}${hasBrief ? ' · 📄 brief' : ''}</summary><div class="icdb">
+      // v0.15.1: per-criterion pass/fail read from the latest verification record — the
+      // drawer shows which checks are green, not just how many exist.
+      const critRes = {};
+      if (lastV) for (const r of (lastV.results || [])) {
+        const k = String(r.kind || '');
+        if (k.indexOf('criterion: ') === 0) critRes[k.slice(11)] = r.exit === 0;
+      }
+      const critList = t.criteria.length
+        ? `<ul class="crit">${t.criteria.map(c => {
+            const v = critRes[c.desc];
+            const ck = v === true ? '<span class="ck ok">✓</span>' : v === false ? '<span class="ck no">✕</span>' : '<span class="ck un">·</span>';
+            return `<li>${ck}<span>${esc(c.desc)}${c.check ? ` — <code>${esc(c.check)}</code>` : ' <span class="mut">(no machine check)</span>'}</span></li>`;
+          }).join('')}</ul>`
+        : `<p class="mut">none yet — thin item; criteria and scope are added when its milestone approaches</p>`;
+      const evid = lastV && (lastV.artifacts || []).length
+        ? `<div class="row"><span class="k">Evidence</span><span class="vl">${lastV.artifacts.map(a => `<a href="../${esc(a)}">${esc(a)}</a>`).join(' · ')}</span></div>` : '';
+      const kv = `<div class="kv">
+        <div class="row"><span class="k">Allowed</span><span class="vl">${((t.scope || {}).allowed || []).length ? `<code>${esc(t.scope.allowed.join(', '))}</code>` : '<span class="mut">not set</span>'}</span></div>
+        ${((t.scope || {}).forbidden || []).length ? `<div class="row"><span class="k">Forbidden</span><span class="vl"><code>${esc(t.scope.forbidden.join(', '))}</code></span></div>` : ''}
+        ${t.deps.length ? `<div class="row"><span class="k">Depends on</span><span class="vl">${t.deps.map(esc).join(', ')}</span></div>` : ''}
+        ${t.component ? `<div class="row"><span class="k">Component</span><span class="vl">${compChip(t.component)}</span></div>` : ''}
+        <div class="row"><span class="k">Verification</span><span class="vl">${lastV
+          ? `${lastV.passed ? 'passed' : 'failed'} · ${esc(lastV.ts.slice(0, 16).replace('T', ' '))}${lastV.durationMs ? ` · ran ${fmtD(lastV.durationMs)}` : ''}${lastV.tree ? ' · tree-bound ✓' : ''}`
+          : '<span class="mut">never run</span>'}</span></div>
+        ${fails ? `<div class="row"><span class="k">Attempts</span><span class="vl">${fails} failed — a third identical retry is refused</span></div>` : ''}
+        ${evid}
+      </div>`;
+      const dspList = disp.length ? `<h4>Dispatches</h4><ul class="dsp">${disp.slice(-6).map(d =>
+        `<li><span class="t">${esc(String(d.ts || '').slice(5, 16).replace('T', ' '))}</span><span>${d.kind === 'message'
+          ? `mid-flight message${d.agent ? ` → ${esc(d.agent)}` : ''}`
+          : `→ ${esc(d.agent || 'worker')}${d.kind === 'api' ? ' <span class="mut">(api worker)</span>' : ''}`}${d.note
+          ? ` <span class="mut">— ${esc(String(d.note).slice(0, 120))}</span>` : ''}</span></li>`).join('')}</ul>` : '';
+      // the one fact that matters for this state, right-aligned on the row
+      let meta = '';
+      if (stat === 'DONE') {
+        const tries = t.attempts.filter(a => a.outcome === 'started').length;
+        meta = `${lastV && lastV.durationMs ? `verified ${fmtD(lastV.durationMs)}` : 'verified'}${tries > 1 ? ` · ${tries} attempts` : ''}`;
+      } else if (stat === 'IN_PROGRESS') {
+        const st0 = t.attempts.filter(a => a.outcome === 'started').map(a => Date.parse(a.ts)).filter(Number.isFinite).pop();
+        const agent = (disp.filter(d => d.kind !== 'message').pop() || {}).agent;
+        meta = `${st0 ? fmtD(Date.now() - st0) : ''}${agent ? ` · ${esc(agent)}` : ''}`;
+      } else if (stat === 'READY') meta = fails ? `${fails} failed attempt(s)` : 'next up';
+      else if (stat === 'BLOCKED') meta = 'needs your answer';
+      else if (stat === 'CANCELLED') meta = 'superseded';
+      else meta = t.criteria.length ? 'planned' : 'thin item';
+      const noScope = !((t.scope || {}).allowed || []).length && !['DONE', 'CANCELLED'].includes(t.status) && (m === actM || m === '(no milestone)');
+      const subline = t.status === 'BLOCKED' ? `<span class="sub">⛔ ${esc(t.blockReason || '')}</span>`
+        : t.status === 'CANCELLED' ? `<span class="sub">✕ ${esc(t.cancelReason || '')}</span>`
+        : noScope ? `<span class="warnv">⚠ no file scope — start will refuse (task update --allowed)</span>` : '';
+      return `<details class="icd" data-s="${stat}"><summary class="irow">
+        <span class="stripe" style="background:${sVar}"></span>
+        <span class="iid">${esc(t.id || '')}</span>
+        <span class="itt">${stat === 'IN_PROGRESS' ? '<span class="dot-open"></span>' : ''}${esc(t.title)}${t.component ? compChip(t.component) : ''}${designStrip ? '<span class="cchip">🎨 mock</span>' : ''}${hasBrief ? '<span class="cchip">📄 brief</span>' : ''}${subline}</span>
+        <span class="imeta"><span class="st ${sCls}">${stat === 'IN_PROGRESS' ? 'IN PROGRESS' : stat}</span>${meta ? `<span>${meta}</span>` : ''}</span>
+      </summary><div class="icdb">
         ${designStrip}
-        ${t.objective ? `<p><b>Objective</b> — ${esc(t.objective)}</p>` : ''}
-        <p><b>Acceptance criteria</b></p><ol>${t.criteria.length ? t.criteria.map(c => `<li>${esc(c.desc)}${c.check ? ` — <code>${esc(c.check)}</code>` : ' <span class="mut">(no machine check)</span>'}</li>`).join('') : '<li class="mut">none yet (thin item — added when its milestone approaches)</li>'}</ol>
-        <p><b>Scope</b> — ${((t.scope || {}).allowed || []).length ? `<code>${esc(t.scope.allowed.join(', '))}</code>` : '<span class="mut">not set</span>'}${((t.scope || {}).forbidden || []).length ? ` · forbidden: <code>${esc(t.scope.forbidden.join(', '))}</code>` : ''}${t.component ? ` · component: ${compChip(t.component)}` : ''}</p>
-        ${disp.length ? `<p><b>Dispatches</b> — ${launches.length} launch(es)${msgs ? `, ${msgs} mid-flight message(s)` : ''}${agents.length ? ` · ${agents.map(esc).join(', ')}` : ''}</p>` : ''}
-        ${lastV ? `<p><b>Last verification</b> — ${lastV.passed ? 'passed' : 'failed'} ${esc(lastV.ts.slice(0, 16).replace('T', ' '))}${lastV.durationMs ? ` · ran ${Math.round(lastV.durationMs / 1000)}s` : ''}${(lastV.artifacts || []).length ? ` · evidence: ${lastV.artifacts.map(a => `<a href="../${esc(a)}">${esc(a)}</a>`).join(' · ')}` : ''}</p>` : ''}
-        ${hasBrief ? `<p>📄 <a href="briefs/${esc(t.id)}.md"><b>Read the full brief</b></a></p>` : ''}
+        <div class="dgrid">
+          <div><h4>Acceptance criteria</h4>${critList}${dspList}</div>
+          <div><h4>Scope &amp; evidence</h4>${kv}${hasBrief ? `<a class="briefbtn" href="briefs/${esc(t.id)}.md">📄 Read the full brief — exactly what the worker was told</a>` : ''}</div>
+        </div>
+        ${t.objective ? `<p style="margin-top:14px"><b>Objective</b> — ${esc(t.objective)}</p>` : ''}
       </div></details>`;
-      return `<tr>
-        <td>${chip(isReady ? 'READY' : t.status, sColor[isReady ? 'READY' : t.status] || '#57606f')}</td>
-        <td><b>${esc(t.id || '')}</b> ${esc(t.title)}${t.status === 'BLOCKED' ? `<div class="mut">⛔ ${esc(t.blockReason)}</div>` : ''}${t.status === 'CANCELLED' ? `<div class="mut">✕ ${esc(t.cancelReason)}</div>` : ''}${!((t.scope || {}).allowed || []).length && !['DONE', 'CANCELLED'].includes(t.status) && (m === actM || m === '(no milestone)') ? `<div class="mut" style="color:#b45309">⚠ no file scope — start will refuse (task update --allowed)</div>` : ''}${card}</td>
-        <td class="mut">${t.deps.length ? t.deps.map(esc).join(', ') : '—'}</td>
-        <td class="mut">${t.criteria.length}${t.criteria.some(c => c.check) ? ' ✓' : ''}</td>
-        <td>${fails ? chip(fails + ' failed', '#b45309') : '<span class="mut">—</span>'}</td>
-        <td>${lastV ? chip(lastV.passed ? 'passed' : 'failed', lastV.passed ? '#15803d' : '#b91c1c') + `<span class="mut" style="margin-left:6px">${esc(lastV.ts.slice(0, 16).replace('T', ' '))}</span>` : '<span class="mut">never</span>'}</td>
-      </tr>`;
     }).join('');
     // v0.15: component chips removed from milestone headers (user feedback: pure noise at
     // real-project density — components remain on item cards, the map, and the rail dots)
     return `<details class="sec sub"${openAttr}><summary>${esc(m)} <span class="mut">${done}/${items.length} done</span> ${gateChip}</summary>
-      <div class="tblwrap" style="margin-top:8px"><table><thead><tr><th>Status</th><th>Item</th><th>Deps</th><th>Criteria</th><th>Attempts</th><th>Last verification</th></tr></thead><tbody>${rows}</tbody></table></div></details>`;
+      <div class="mgb">${rows}</div></details>`;
   }).join('');
 
   // v0.10: project map — one box per registered component
@@ -319,22 +366,24 @@ function generateDashboard() {
       for (const t of items) for (const v of t.verifications) for (const a of (v.artifacts || []))
         if (/\.(png|jpe?g|webp|gif)$/i.test(a)) img = a;
       const imgTag = img && fs.existsSync(path.join(PROJECT, img))
-        ? `<a href="../${esc(img)}"><img src="../${esc(img)}" alt="${esc(c.name)}" style="width:100%;max-height:110px;object-fit:cover;object-position:top;border-radius:8px;border:1px solid #e6e4de;margin-top:8px"></a>` : '';
+        ? `<a href="../${esc(img)}"><img src="../${esc(img)}" alt="${esc(c.name)}"></a>` : '';
       const pctC = items.length ? Math.round(100 * done / items.length) : 0;
-      return `<div class="card" style="min-width:220px;max-width:280px;flex:1">
-        <div style="display:flex;justify-content:space-between;gap:8px;align-items:baseline">
-          <b style="font-size:14px">${esc(c.name)}</b>${chip(c.kind, kindColor[c.kind] || '#57606f')}
-        </div>
+      const kc = kindColor[c.kind] || '#57606f';
+      return `<div class="comp">
+        <div class="ch"><b>${esc(c.name)}</b><span class="kind" style="color:${kc};background:${kc}14">${esc(c.kind)}</span></div>
         ${c.route ? `<div class="mut"><code>${esc(c.route)}</code></div>` : ''}
-        <div class="bar" style="margin:8px 0 4px"><div style="width:${pctC}%"></div></div>
-        <div class="mut">${done}/${items.length} done${inProg.length ? ` · <b style="color:#3b3f8f">${inProg.map(t => esc(t.id)).join(',')} in progress</b>` : ''}${blocked.length ? ` · <b style="color:#b91c1c">${blocked.length} blocked</b>` : ''}${fails ? ` · ${fails} failed attempt(s)` : ''}${nextM ? ` · next touched: <b>${esc(nextM)}</b>` : (items.length ? ' · no open work' : '')}</div>
+        <div class="pbar"><i style="width:${pctC}%"></i></div>
+        <div class="cfoot">
+          <span>${done}/${items.length} done${inProg.length ? ` · <b style="color:var(--progc)">${inProg.map(t => esc(t.id)).join(',')} running</b>` : ''}${blocked.length ? ` · <b style="color:var(--blockc)">${blocked.length} blocked</b>` : ''}${fails ? ` · ${fails} failed` : ''}</span>
+          <span>${nextM ? `next touched: <b>${esc(nextM)}</b>` : (items.length ? 'no open work' : '')}</span>
+        </div>
         ${c.doc ? `<div class="mut">📄 <code>${esc(c.doc)}</code></div>` : ''}
         ${imgTag}
       </div>`;
     }).join('');
     const untagged = w.order.filter(id => !w.items[id].component).length;
     mapBlock = `<details class="sec" open><summary>Project map <span class="mut">(components — forge component add/update · items tagged via --component)</span></summary>
-      <div class="cards" style="align-items:stretch">${boxes}</div>
+      <div class="mapgrid">${boxes}</div>
       ${untagged ? `<p class="mut">${untagged} work item(s) not tagged to any component.</p>` : ''}</details>`;
   }
 
@@ -386,31 +435,53 @@ function generateDashboard() {
       }
     }
     pace.med = med; pace.quant = quant; pace.fmtDur = fmtDur; pace.itemSpans = itemSpans;
-    const agentRows = Object.entries(perAgent).map(([a, r]) =>
-      `<tr><td><code>${esc(a)}</code></td><td class="mut">${r.launches}${r.msgs ? ` (+${r.msgs} msg)` : ''}</td><td>${fmtDur(med(r.prep))}</td><td>${fmtDur(med(r.exec))}</td></tr>`).join('');
+    // v0.15.1: agent timings as stacked bars — prep and execution are comparable at a glance
+    const agentStats = Object.entries(perAgent).map(([a, r]) =>
+      ({ a, launches: r.launches, msgs: r.msgs, prep: med(r.prep) || 0, exec: med(r.exec) || 0 }))
+      .sort((x, y) => (y.prep + y.exec) - (x.prep + x.exec));
+    const maxT = Math.max(1, ...agentStats.map(x => x.prep + x.exec));
+    const agentRows = agentStats.map(x => {
+      const pw = Math.round(100 * x.prep / maxT), ew = Math.round(100 * x.exec / maxT);
+      return `<div class="hbar"><span class="lab" title="${esc(x.a)} — ${x.launches} launch(es)${x.msgs ? `, ${x.msgs} message(s)` : ''}">${esc(x.a)}</span>
+        <span class="tr"><i style="left:0;width:${pw}%;background:#a9b1e8"></i><i style="left:${pw}%;width:${ew}%;background:var(--progc)"></i></span>
+        <span class="vv">${fmtDur(x.prep)} + ${fmtDur(x.exec)}</span></div>`;
+    }).join('');
     const timePanel =
-      `<div><h3>Development time <span class="mut" style="font-weight:400">(live from state — wall-clock, not agent runtime)</span></h3>
-      <div class="tblwrap"><table><thead><tr><th>Agent</th><th>Dispatches</th><th>Median prep (start→dispatch)</th><th>Median execution (dispatch→verify)</th></tr></thead>
-      <tbody>${agentRows || `<tr><td colspan="4" class="mut">No dispatch records yet — they accumulate as items run under v0.12+ (forge task dispatch).</td></tr>`}</tbody></table></div>
-      <p class="mut" style="margin-top:6px">Median item start→done: <b>${fmtDur(med(itemSpans))}</b>${itemSpans.length ? ` (${itemSpans.length} item(s))` : ''} · median verification run: <b>${fmtDur(med(verifDurs))}</b>${gateWaits.length ? ` · human gate wait: <b>${gateWaits.join(' · ')}</b>` : ''} · trimmed medians — windows over 2h excluded as session breaks. Execution is the window the worker ran in, bracketed by CLI events; the worker's exact runtime lives only in transcripts (see forge usage).</p></div>`;
+      `<div class="panel"><h3>Development time <span class="mut">— trimmed medians, wall-clock (not agent runtime)</span></h3>
+      ${agentRows ? `<div class="legend"><span><i style="background:#a9b1e8"></i>Prep (start→dispatch)</span><span><i style="background:var(--progc)"></i>Execution (dispatch→verify)</span></div>
+      <div style="display:flex;flex-direction:column;gap:9px">${agentRows}</div>`
+      : `<p class="mut">No dispatch records yet — they accumulate as items run under v0.12+ (<code>forge task dispatch</code>).</p>`}
+      <div class="footnote">Median item start→done <b>${fmtDur(med(itemSpans))}</b>${itemSpans.length ? ` (${itemSpans.length} item(s))` : ''} · median verification run <b>${fmtDur(med(verifDurs))}</b>${gateWaits.length ? ` · your gate wait — ${gateWaits.join(', ')}` : ''}. Windows over 2h are excluded as session breaks; execution is bracketed by CLI events, so it is the window the worker ran in, not its exact runtime (see <code>forge usage</code>).</div></div>`;
     const usageSnap = readJson(path.join(STATE, 'usage.json'), null);
     let tokenPanel;
     if (usageSnap) {
       let tokenRows = '';
       for (const [model, threads] of Object.entries(usageSnap.models || {}))
         for (const [thread, t2] of Object.entries(threads))
-          tokenRows += `<tr><td><code>${esc(model)}</code> <span class="mut">[${thread === 'main' ? 'orchestrator' : 'workers'}]</span></td><td class="mut">${t2.calls || 0}</td><td>${(t2.out || 0).toLocaleString()}</td><td class="mut">${(t2.in || 0).toLocaleString()}</td></tr>`;
+          tokenRows += `<div class="tokrow"><span class="m"><i style="background:${thread === 'main' ? 'var(--progc)' : 'var(--readyc)'}"></i><code>${esc(model)}</code> <span class="mut">${thread === 'main' ? 'orchestrator' : 'workers'} · ${t2.calls || 0} call(s)</span></span><b>${(t2.out || 0).toLocaleString()}</b><span class="n">out · ${(t2.in || 0).toLocaleString()} in</span></div>`;
       const byType = Object.entries(usageSnap.byType || {}).map(([k, v2]) => `${esc(k)}×${v2}`).join(' · ');
       const totOut = (usageSnap.mainOut || 0) + (usageSnap.sideOut || 0);
+      const delPct = totOut ? Math.round(100 * (usageSnap.sideOut || 0) / totOut) : 0;
+      const C = 226; const sideDash = Math.round(C * delPct / 100);
       tokenPanel =
-        `<div><h3>Tokens <span class="mut" style="font-weight:400">(observed — snapshot as of ${esc(String(usageSnap.ts || '?').slice(0, 16).replace('T', ' '))})</span></h3>
-        <div class="tblwrap"><table><thead><tr><th>Model [thread]</th><th>Calls</th><th>Output</th><th>Input</th></tr></thead><tbody>${tokenRows || '<tr><td colspan="4" class="mut">empty snapshot</td></tr>'}</tbody></table></div>
-        <p class="mut" style="margin-top:6px">Output — orchestrator: <b>${(usageSnap.mainOut || 0).toLocaleString()}</b> · workers: <b>${(usageSnap.sideOut || 0).toLocaleString()}</b>${totOut ? ` (${Math.round(100 * (usageSnap.sideOut || 0) / totOut)}% delegated)` : ''}${byType ? ` · dispatches: ${byType}` : ''}.
-        Per-agent token attribution inside worker threads is not exposed by the logs — absent data is absent, never estimated. Refresh: <code>forge usage --write</code>.</p></div>`;
+        `<div class="panel"><h3>Tokens <span class="mut">— observed, snapshot as of ${esc(String(usageSnap.ts || '?').slice(0, 16).replace('T', ' '))}</span></h3>
+        <div class="donutwrap">
+          <svg width="92" height="92" viewBox="0 0 92 92" role="img" aria-label="${delPct} percent of output tokens delegated to workers">
+            <circle cx="46" cy="46" r="36" fill="none" stroke="#0c8a70" stroke-width="13" stroke-dasharray="${sideDash} ${C}" transform="rotate(-90 46 46)"/>
+            <circle cx="46" cy="46" r="36" fill="none" stroke="#4553c4" stroke-width="13" stroke-dasharray="${C - sideDash} ${C}" stroke-dashoffset="${-sideDash}" transform="rotate(-90 46 46)"/>
+            <text x="46" y="44" text-anchor="middle" font-size="15" font-weight="700" fill="#1b1d24">${delPct}%</text>
+            <text x="46" y="58" text-anchor="middle" font-size="9" fill="#8a8e9a">delegated</text></svg>
+          <div style="flex:1;min-width:170px">
+            <div class="tokrow"><span class="m"><i style="background:var(--readyc)"></i>Workers</span><b>${(usageSnap.sideOut || 0).toLocaleString()}</b><span class="n">out</span></div>
+            <div class="tokrow"><span class="m"><i style="background:var(--progc)"></i>Orchestrator</span><b>${(usageSnap.mainOut || 0).toLocaleString()}</b><span class="n">out</span></div>
+          </div>
+        </div>
+        <div>${tokenRows || '<p class="mut">empty snapshot</p>'}</div>
+        <div class="footnote">${delPct}% delegated${byType ? ` · dispatches: ${byType}` : ''}. Per-agent token attribution inside worker threads is not exposed by the logs — absent data is shown as absent, never estimated. Refresh: <code>forge usage --write</code>.</div></div>`;
     } else {
-      tokenPanel = `<div><h3>Tokens</h3><p class="mut">No usage snapshot yet — run <code>forge usage --write</code> (zero tokens, any terminal) and this panel fills in.</p></div>`;
+      tokenPanel = `<div class="panel"><h3>Tokens</h3><p class="mut">No usage snapshot yet — run <code>forge usage --write</code> (zero tokens, any terminal) and this panel fills in.</p></div>`;
     }
-    telemetryBlock = `<details class="sec" open><summary>Telemetry <span class="mut">(time live from state · tokens from the last usage snapshot)</span></summary><div class="grid2" style="margin-top:8px">${timePanel}${tokenPanel}</div></details>`;
+    telemetryBlock = `<details class="sec" open><summary>Telemetry <span class="mut">(time live from state · tokens from the last usage snapshot)</span></summary><div class="telgrid">${timePanel}${tokenPanel}</div></details>`;
   }
 
   // ---- v0.14: needs-you banner (deterministic, same priority as session guidance) ----
@@ -472,7 +543,7 @@ function generateDashboard() {
         <div class="pnote">Projection from YOUR observed pace (p25–p75 of item times; thin items assumed median-sized) — recomputed on every change, never a promise.</div>
       </div>`;
     } else if (minStart) {
-      paceBlock = `<div class="pacestrip"><div class="pnote">Pace & forecast appear after a few items complete — Forge projects only from observed data.</div></div>`;
+      paceBlock = `<div class="pacestrip"><div class="pnote" style="margin-left:0;max-width:none">Pace &amp; forecast appear once a few items complete — Forge projects only from observed data.</div></div>`;
     }
   }
 
@@ -496,17 +567,30 @@ function generateDashboard() {
     }
   }
 
+  // v0.15.1: journal entries render as a timeline — the authority of a decision
+  // (you vs Forge) is the thing worth seeing first, so it becomes a marker + tag.
   const logBlock = (entries, empty) => entries.length
-    ? entries.map(e => `<div class="log"><b>${esc(e.title)}</b><pre>${esc(e.body)}</pre></div>`).join('')
+    ? entries.map(e => {
+        const parts = String(e.title).split(' — ');
+        const when = parts.length > 1 ? parts.shift() : '';
+        const label = parts.join(' — ');
+        const auth = (String(e.body).match(/^-\s*Authority:\s*(\w+)/im) || [])[1];
+        const human = auth && auth.toLowerCase() === 'human';
+        const body = String(e.body).split('\n')
+          .filter(l => l.trim() && !/^-\s*Authority:/i.test(l))
+          .map(l => l.replace(/^-\s*/, '').replace(/^(Decision|Why|Evidence|Impact|Affects):\s*/i, (x) => x))
+          .join(' · ');
+        return `<div class="jitem${human ? ' human' : ''}"><b>${esc(label)}${auth ? `<span class="tag ${human ? 'h' : 'f'}">${human ? 'you' : 'forge'}</span>` : ''}</b>${body ? `<p>${esc(body)}</p>` : ''}<span class="ts">${esc(when.slice(0, 16).replace('T', ' '))}</span></div>`;
+      }).join('')
     : `<p class="mut">${empty}</p>`;
 
   const pfBlock = pf
-    ? pf.results.map(r => `<tr><td>${chip(r.ok ? 'OK' : r.severity.toUpperCase(), r.ok ? '#15803d' : (r.severity === 'mandatory' ? '#b91c1c' : '#b45309'))}</td><td>${esc(r.name)}</td><td class="mut">${esc(r.note)}</td></tr>`).join('')
-    : '<tr><td colspan="3" class="mut">never run</td></tr>';
+    ? pf.results.map(r => `<div class="sysrow"><span class="bdg ${r.ok ? 'ok' : (r.severity === 'mandatory' ? 'bad' : 'warn')}">${r.ok ? 'OK' : (r.severity === 'mandatory' ? 'FAIL' : 'WARN')}</span><span class="n">${esc(r.name)}</span><span class="d">${esc(r.note)}</span></div>`).join('')
+    : '<div class="sysrow"><span class="bdg warn">—</span><span class="n">Preflight</span><span class="d">never run — <code>forge preflight</code></span></div>';
 
   const baseBlock = base
-    ? base.results.map(r => `<tr><td>${chip(r.exit === 0 ? 'GREEN' : 'RED (pre-existing)', r.exit === 0 ? '#15803d' : '#b45309')}</td><td>${esc(r.kind)}</td><td class="mut"><code>${esc(r.cmd)}</code></td></tr>`).join('')
-    : '<tr><td colspan="3" class="mut">not captured (greenfield, or run: forge baseline capture)</td></tr>';
+    ? base.results.map(r => `<div class="sysrow"><span class="bdg ${r.exit === 0 ? 'ok' : 'warn'}">${r.exit === 0 ? 'GREEN' : 'RED'}</span><span class="n">${esc(r.kind)}</span><span class="d">${r.exit === 0 ? '' : 'pre-existing failure — recorded, not blamed on new work · '}<code>${esc(r.cmd)}</code></span></div>`).join('')
+    : '<div class="sysrow"><span class="bdg warn">—</span><span class="n">Baseline</span><span class="d">not captured (greenfield, or run <code>forge baseline capture</code>)</span></div>';
 
   const html = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -514,106 +598,211 @@ function generateDashboard() {
 <link rel="icon" type="image/png" href="data:image/png;base64,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">
 <style>
 :root{--ink:#1b1d24;--ink2:#565b68;--ink3:#8a8e9a;--ground:#f4f3ef;--surface:#fff;--line:#e6e4dd;--line2:#efede8;
---side:#15171e;--sideink:#c6c9d3;--sidemut:#787d8b;--sideline:#262a35;--accent:#d4551a;
---done:#178744;--readyc:#0c8a70;--progc:#4553c4;--blockc:#bb2d2d;--awaitc:#b3660a}
+--side:#15171e;--sideink:#c6c9d3;--sidemut:#787d8b;--sideline:#262a35;--accent:#d4551a;--accsoft:#d4551a14;
+--done:#178744;--readyc:#0c8a70;--progc:#4553c4;--blockc:#bb2d2d;--awaitc:#b3660a;--todoc:#8a8e9a;
+--mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+--shadow:0 1px 2px rgba(27,29,36,.05),0 10px 30px -18px rgba(27,29,36,.18);--r:12px}
 *{box-sizing:border-box;margin:0;padding:0}
 html{scroll-behavior:smooth}
-body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;background:var(--ground);color:var(--ink);line-height:1.5;font-size:14px}
-h1{font-size:23px;letter-spacing:-.02em} h2{font-size:17px} h3{font-size:14.5px;margin:0 0 8px}
-.mut{color:var(--ink3);font-size:12.5px}
-code{font-family:ui-monospace,Menlo,monospace;font-size:.9em;background:var(--line2);border-radius:4px;padding:1px 4px}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,Helvetica,Arial,sans-serif;background:var(--ground);color:var(--ink);line-height:1.55;font-size:14px;-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}
+h1,h2,h3,h4{letter-spacing:-.015em}
+h1{font-size:24px;font-weight:700} h2{font-size:17px;font-weight:700} h3{font-size:14px;font-weight:700;margin:0}
+.mut{color:var(--ink3);font-size:12.5px;font-weight:400}
+.num{font-variant-numeric:tabular-nums}
+code{font-family:var(--mono);font-size:.88em;background:var(--line2);border-radius:5px;padding:1px 5px}
 a{color:var(--accent);text-decoration:none} a:hover{text-decoration:underline}
+/* ---- shell ---- */
 .shell{display:flex;min-height:100vh}
-aside{width:222px;flex:none;background:var(--side);color:var(--sideink);display:flex;flex-direction:column;position:sticky;top:0;height:100vh;padding:20px 0 14px}
-.brand{padding:0 18px 16px;border-bottom:1px solid var(--sideline)}
-.brand img{height:26px;display:block;margin-bottom:10px}
-.proj{font-size:12px;color:var(--sidemut)} .proj b{display:block;color:var(--sideink);font-size:13.5px}
+aside{width:228px;flex:none;background:var(--side);color:var(--sideink);display:flex;flex-direction:column;position:sticky;top:0;height:100vh;padding:22px 0 16px}
+.brand{padding:0 20px 18px;border-bottom:1px solid var(--sideline)}
+.brand img{height:29px;display:block;margin-bottom:12px}
+.proj{font-size:12.5px;color:var(--sidemut)} .proj b{display:block;color:var(--sideink);font-size:13.5px;font-weight:600}
 .phase{display:inline-block;margin-top:7px;font-size:9.5px;font-weight:700;letter-spacing:.09em;text-transform:uppercase;color:#e9b98a;border:1px solid #6b4a2b;background:#d4551a1f;border-radius:99px;padding:2px 9px}
-#snav{padding:12px 8px;display:flex;flex-direction:column;gap:2px;flex:1;overflow-y:auto}
-#snav a{display:flex;justify-content:space-between;color:var(--sidemut);font-size:13px;font-weight:500;padding:7px 12px;border-radius:8px}
+#snav{padding:14px 10px;display:flex;flex-direction:column;gap:2px;flex:1;overflow-y:auto}
+#snav a{display:flex;justify-content:space-between;align-items:center;color:var(--sidemut);font-size:13px;font-weight:500;padding:8px 12px;border-radius:8px}
 #snav a:hover{color:var(--sideink);background:#ffffff0a;text-decoration:none}
 #snav a.on{color:#fff;background:#ffffff12}
 #snav a .k{font-size:11px;color:var(--sidemut);font-variant-numeric:tabular-nums}
-.sidefoot{padding:12px 18px 0;border-top:1px solid var(--sideline);font-size:10.5px;color:var(--sidemut);line-height:1.5}
+.sidefoot{padding:14px 20px 0;border-top:1px solid var(--sideline);font-size:10.5px;color:var(--sidemut);line-height:1.5}
 .sidefoot b{color:var(--sideink)}
-main{flex:1;min-width:0;padding:24px clamp(16px,3vw,40px) 70px}
-.wrap{max-width:1120px;margin:0 auto}
-.tophead{display:flex;flex-wrap:wrap;align-items:flex-end;justify-content:space-between;gap:10px;margin-bottom:14px}
-.stamp{font-size:11px;color:var(--ink3);text-align:right}
-.needsyou{border:1px solid var(--line);border-left:4px solid var(--awaitc);border-radius:12px;display:flex;gap:14px;align-items:flex-start;padding:15px 18px;background:linear-gradient(0deg,#b3660a08,#b3660a08),var(--surface);margin-bottom:14px;box-shadow:0 1px 2px rgba(27,29,36,.05)}
-.needsyou .glyph{width:36px;height:36px;flex:none;border-radius:10px;background:#b3660a1a;display:grid;place-items:center;font-size:17px}
-.needsyou h3{font-size:14.5px;margin:0} .needsyou p{font-size:12.5px;color:var(--ink2);margin-top:3px;max-width:80ch}
-.kpis{display:grid;grid-template-columns:1.35fr repeat(4,1fr);gap:10px}
-.kpi{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:14px 16px;display:flex;flex-direction:column;gap:1px;justify-content:center;box-shadow:0 1px 2px rgba(27,29,36,.05)}
-.kpi.hero{flex-direction:row;align-items:center;gap:14px}
-.kpi .v{font-weight:700;font-size:24px;letter-spacing:-.02em;font-variant-numeric:tabular-nums}
-.kpi .v small{font-size:13px;color:var(--ink3);font-weight:500}
-.kpi .l{font-size:10.5px;color:var(--ink3);font-weight:600;letter-spacing:.04em}
+main{flex:1;min-width:0;padding:26px clamp(16px,3.5vw,44px) 80px}
+.wrap{max-width:1140px;margin:0 auto}
+/* ---- overview ---- */
+.tophead{display:flex;flex-wrap:wrap;align-items:flex-end;justify-content:space-between;gap:12px;margin-bottom:14px}
+.stamp{font-size:11px;color:var(--ink3);text-align:right;line-height:1.5}
+.stamp code{background:#fff}
+.needsyou{border:1px solid var(--line);border-left:4px solid var(--awaitc);border-radius:var(--r);display:flex;gap:16px;align-items:flex-start;padding:16px 20px;background:linear-gradient(0deg,#b3660a08,#b3660a08),var(--surface);margin-bottom:14px;box-shadow:var(--shadow)}
+.needsyou .glyph{width:38px;height:38px;flex:none;border-radius:10px;background:#b3660a1a;display:grid;place-items:center;font-size:18px}
+.needsyou h3{font-size:15px} .needsyou p{font-size:13px;color:var(--ink2);margin-top:3px;max-width:78ch}
+.kpis{display:grid;grid-template-columns:1.35fr repeat(4,1fr);gap:12px}
+.kpi{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:16px 18px;display:flex;flex-direction:column;gap:1px;justify-content:center;box-shadow:var(--shadow)}
+.kpi.hero{flex-direction:row;align-items:center;justify-content:flex-start;gap:16px}
+.kpi .v{font-weight:700;font-size:26px;letter-spacing:-.025em;font-variant-numeric:tabular-nums;line-height:1.15}
+.kpi .v small{font-size:14px;color:var(--ink3);font-weight:500;letter-spacing:0}
+.kpi .l{font-size:10.5px;color:var(--ink3);font-weight:600;letter-spacing:.05em;margin-top:2px}
 .kpi .d{font-size:11.5px;color:var(--ink2)}
-.pacestrip{background:var(--surface);border:1px solid var(--line);border-radius:12px;margin-top:10px;padding:12px 18px;display:flex;flex-wrap:wrap;gap:8px 30px;align-items:center;box-shadow:0 1px 2px rgba(27,29,36,.05)}
-.pk{font-size:10px;font-weight:700;letter-spacing:.07em;color:var(--ink3)}
-.pv{font-weight:700;font-size:15.5px;font-variant-numeric:tabular-nums}
-.pv small{font-size:11.5px;color:var(--ink3);font-weight:500}
-.pdiv{width:1px;height:30px;background:var(--line)}
-.pnote{font-size:10.5px;color:var(--ink3);max-width:280px;line-height:1.45;margin-left:auto}
+.pacestrip{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);margin-top:12px;padding:14px 20px;display:flex;flex-wrap:wrap;gap:8px 34px;align-items:center;box-shadow:var(--shadow)}
+.pk{font-size:10px;font-weight:700;letter-spacing:.08em;color:var(--ink3)}
+.pv{font-weight:700;font-size:17px;letter-spacing:-.02em;font-variant-numeric:tabular-nums}
+.pv small{font-size:12px;color:var(--ink3);font-weight:500;letter-spacing:0}
+.pdiv{width:1px;height:34px;background:var(--line)}
+.pnote{font-size:11px;color:var(--ink3);max-width:280px;line-height:1.45;margin-left:auto}
+/* ---- sections ---- */
+details.sec{margin:32px 0 0;scroll-margin-top:16px}
+details.sec>summary{cursor:pointer;user-select:none;list-style:none;display:flex;align-items:baseline;gap:9px;padding:0 0 12px;font-size:17px;font-weight:700;letter-spacing:-.015em}
+details.sec>summary::-webkit-details-marker{display:none}
+details.sec>summary::before{content:"";flex:none;width:0;height:0;border:5px solid transparent;border-left-color:var(--ink3);transform:translateY(-1px);transition:transform .15s ease}
+details.sec[open]>summary::before{transform:rotate(90deg) translateY(0)}
+details.sec>summary:hover{color:var(--accent)}
+details.sec>summary:hover::before{border-left-color:var(--accent)}
+details.sec>summary .mut{font-weight:400;font-size:12.5px}
+/* ---- milestone groups ---- */
+details.sec.sub{margin:12px 0 0;background:var(--surface);border:1px solid var(--line);border-radius:var(--r);box-shadow:var(--shadow);overflow:hidden}
+details.sec.sub>summary{padding:13px 18px;font-size:14.5px;align-items:center;flex-wrap:wrap;gap:10px}
+details.sec.sub>summary:hover{background:var(--line2);color:inherit}
+details.sec.sub>summary:hover::before{border-left-color:var(--ink3)}
+details.sec.sub>summary .mut{font-variant-numeric:tabular-nums}
+.mgb{border-top:1px solid var(--line)}
+/* ---- item rows + drawer ---- */
+details.icd{border-bottom:1px solid var(--line2)}
+details.icd:last-child{border-bottom:0}
+summary.irow{display:grid;grid-template-columns:4px 84px minmax(0,1fr) auto;gap:0 14px;align-items:center;padding-right:18px;cursor:pointer;user-select:none;list-style:none;font-size:13px}
+summary.irow::-webkit-details-marker{display:none}
+summary.irow:hover{background:#faf9f5}
+details.icd[open]>summary.irow{background:#faf9f5}
+.stripe{align-self:stretch;min-height:44px}
+.iid{font-family:var(--mono);font-size:11.5px;color:var(--ink2);padding:12px 0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.itt{padding:12px 0;display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-weight:500;min-width:0}
+.itt .sub{font-size:11.5px;color:var(--ink3);font-weight:400;flex-basis:100%}
+.itt .warnv{font-size:11.5px;color:var(--awaitc);font-weight:500;flex-basis:100%}
+.imeta{display:flex;align-items:center;gap:12px;font-size:11.5px;color:var(--ink3);padding:12px 0;justify-content:flex-end;font-variant-numeric:tabular-nums;white-space:nowrap}
+.st{font-size:9.5px;font-weight:700;letter-spacing:.06em;border-radius:6px;padding:3px 7px;white-space:nowrap}
+.st.s-done{color:var(--done);background:#17874414}
+.st.s-prog{color:var(--progc);background:#4553c414}
+.st.s-ready{color:var(--readyc);background:#0c8a7014}
+.st.s-block{color:var(--blockc);background:#bb2d2d12}
+.st.s-todo{color:var(--ink3);background:var(--line2)}
+.st.s-cancel{color:var(--ink3);background:var(--line2);text-decoration:line-through}
+.dot-open{display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--progc);margin-right:2px;vertical-align:1px}
+.icdb{background:#faf9f5;border-top:1px dashed var(--line);padding:16px 22px 18px 36px;font-size:12.5px;color:#464b58}
+.icdb h4{font-size:10.5px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--ink3);margin:0 0 8px}
+.icdb h4+h4,.dgrid h4:not(:first-child){margin-top:16px}
+.dgrid{display:grid;grid-template-columns:1.25fr 1fr;gap:24px}
+.crit{list-style:none;display:flex;flex-direction:column;gap:7px;font-size:12.5px}
+.crit li{display:flex;gap:9px;align-items:baseline}
+.crit .ck{flex:none;width:16px;height:16px;border-radius:5px;display:grid;place-items:center;font-size:10px;font-weight:800;transform:translateY(3px)}
+.ck.ok{background:#17874418;color:var(--done)} .ck.no{background:#bb2d2d14;color:var(--blockc)} .ck.un{background:var(--line2);color:var(--ink3)}
+.kv{display:flex;flex-direction:column;gap:8px;font-size:12.5px}
+.kv .row{display:flex;gap:10px}
+.kv .k{flex:none;width:92px;color:var(--ink3);font-size:11.5px;padding-top:1px}
+.kv .vl{min-width:0;word-break:break-word}
+.dsp{list-style:none;display:flex;flex-direction:column;gap:6px;font-size:12px}
+.dsp li{display:flex;gap:9px;align-items:baseline}
+.dsp .t{color:var(--ink3);font-size:11px;flex:none;width:82px;font-family:var(--mono)}
+.briefbtn{display:inline-flex;align-items:center;gap:7px;margin-top:14px;font-weight:600;font-size:12.5px;color:var(--accent);border:1px solid #d4551a3d;background:var(--accsoft);border-radius:9px;padding:7px 13px}
+.briefbtn:hover{text-decoration:none;background:#d4551a22}
+.cchip{display:inline-flex;align-items:center;gap:5px;font-size:10.5px;font-weight:600;border-radius:7px;padding:2px 8px;background:var(--line2);color:var(--ink2);white-space:nowrap}
+.cchip i{width:7px;height:7px;border-radius:2px;display:block;flex:none}
+.pill{display:inline-block;font-size:9.5px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;border-radius:99px;padding:3px 9px;white-space:nowrap}
+/* ---- workbar ---- */
+.workbar{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin:0 0 4px}
+.filter{flex:1;min-width:220px;max-width:420px;font:inherit;font-size:13px;padding:9px 14px;border:1px solid var(--line);border-radius:10px;background:var(--surface);outline:none}
+.filter:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accsoft)}
+.seg{display:flex;border:1px solid var(--line);border-radius:10px;overflow:hidden;background:var(--surface)}
+.seg button{font:inherit;font-size:12px;font-weight:600;padding:8px 13px;border:0;border-right:1px solid var(--line);background:none;color:var(--ink3);cursor:pointer}
+.seg button:last-child{border-right:0}
+.seg button:hover{color:var(--ink)}
+.seg button.on{background:var(--ink);color:#fff}
+/* ---- milestone rail ---- */
 .railwrap{overflow-x:auto;padding:10px 2px 8px}
 .rail{display:flex;min-width:max-content}
-.mnode{position:relative;width:106px;flex:none;display:flex;flex-direction:column;align-items:center;gap:5px;padding-top:2px;color:inherit}
-.mnode:hover{text-decoration:none}
-.mnode::before{content:"";position:absolute;top:14px;left:-50%;width:100%;height:2px;background:var(--line)}
+.mnode{position:relative;width:112px;flex:none;display:flex;flex-direction:column;align-items:center;gap:6px;padding-top:4px;color:inherit}
+.mnode:hover{text-decoration:none} .mnode:hover .mn{color:var(--accent)}
+.mnode::before{content:"";position:absolute;top:16px;left:-50%;width:100%;height:2px;background:var(--line)}
 .mnode:first-child::before{display:none}
 .mnode.done::before{background:var(--done)}
-.mdot{width:24px;height:24px;border-radius:50%;display:grid;place-items:center;font-size:11px;font-weight:700;z-index:1;background:var(--surface);border:2px solid var(--line);color:var(--ink3)}
+.mdot{width:26px;height:26px;border-radius:50%;display:grid;place-items:center;font-size:11.5px;font-weight:700;z-index:1;background:var(--surface);border:2px solid var(--line);color:var(--ink3)}
 .mnode.done .mdot{background:var(--done);border-color:var(--done);color:#fff}
 .mnode.awaitg .mdot{border-color:var(--awaitc);color:var(--awaitc);box-shadow:0 0 0 4px #b3660a1f}
-.mnode.activeg .mdot{border-color:var(--accent);color:var(--accent);box-shadow:0 0 0 4px #d4551a14}
-.mn{font-size:10.5px;font-weight:600;text-align:center;line-height:1.2;max-width:96px;color:var(--ink)}
+.mnode.activeg .mdot{border-color:var(--accent);color:var(--accent);box-shadow:0 0 0 4px var(--accsoft)}
+.mn{font-size:10.5px;font-weight:600;text-align:center;line-height:1.22;max-width:102px;color:var(--ink)}
 .mnode.futureg .mn{color:var(--ink3);font-weight:500}
 .mi{font-size:10px;color:var(--ink3);font-variant-numeric:tabular-nums}
 .cdots{display:flex;gap:3px} .cdots i{width:6px;height:6px;border-radius:50%;display:block}
-.cards{display:flex;gap:12px;flex-wrap:wrap;margin:12px 0}
-.card{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:12px 16px;box-shadow:0 1px 2px rgba(27,29,36,.05)}
-.bar{height:7px;background:var(--line2);border-radius:99px;overflow:hidden;margin:8px 0 4px}
-.bar div{height:100%;background:var(--done);border-radius:99px}
-.tblwrap{overflow-x:auto;background:var(--surface);border:1px solid var(--line);border-radius:12px;box-shadow:0 1px 2px rgba(27,29,36,.05)}
-table{width:100%;border-collapse:collapse;font-size:13px}
-th{font-size:10.5px;text-transform:uppercase;letter-spacing:.06em;color:var(--ink3);text-align:left;padding:8px 12px;border-bottom:1px solid var(--line)}
-td{padding:9px 12px;border-bottom:1px solid var(--line2);vertical-align:top} tr:last-child td{border-bottom:none}
-tbody tr:hover{background:#faf9f4}
-.log{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:10px 14px;margin-bottom:8px;font-size:13px;box-shadow:0 1px 2px rgba(27,29,36,.04)}
-.log pre{font-family:inherit;white-space:pre-wrap;color:#464b58;font-size:12.5px;margin-top:2px}
-.grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
-.stamp code{background:#fff}
-details.sec{margin:26px 0 6px;scroll-margin-top:14px}
-details.sec>summary{cursor:pointer;user-select:none;font-weight:700;font-size:16.5px;padding:8px 10px;letter-spacing:-.01em;border-radius:10px}
-details.sec>summary:hover{background:#eceae3}
-details.sec>summary .mut{font-weight:400}
-details.sec.sub{margin:10px 0}
-details.sec.sub>summary{font-size:14px;padding:6px 10px}
-details.sec>summary::marker{color:var(--ink3)}
-details.icd{margin-top:5px}
-details.icd>summary{cursor:pointer;font-size:11.5px;color:var(--ink3);user-select:none;width:max-content;padding:1px 7px;border:1px solid var(--line);border-radius:6px;background:var(--ground)}
-details.icd>summary:hover{color:var(--accent);border-color:#d4551a55}
-details.icd[open]>summary{color:var(--accent)}
-.icdb{background:#faf9f5;border:1px solid var(--line);border-radius:10px;padding:12px 15px;margin-top:6px;font-size:12.5px;color:#464b58}
-.icdb p{margin:4px 0} .icdb ol{margin:2px 0 6px 18px;padding:0} .icdb li{margin:2px 0}
-.design{margin-bottom:10px} .design>b{font-size:12px}
-.dpair{display:grid;grid-template-columns:1fr 1fr;gap:10px;max-width:620px;margin-top:6px}
-.dpair a{display:block} .dpair img{width:100%;max-height:170px;object-fit:cover;object-position:top;border-radius:8px;border:1px solid var(--line);background:#fff}
-.dpair span{display:block;font-size:10.5px;color:var(--ink3);margin-top:3px}
-.dmiss{border:1px dashed var(--line);border-radius:8px;display:grid;place-items:center;min-height:70px;font-size:11px;color:var(--ink3);padding:8px;text-align:center}
-.filter{width:100%;max-width:400px;font:inherit;font-size:13px;padding:9px 13px;border:1px solid var(--line);border-radius:10px;background:var(--surface);margin:2px 0 4px;outline:none}
-.filter:focus{border-color:var(--accent);box-shadow:0 0 0 3px #d4551a14}
-@media (max-width:900px){
+/* ---- project map ---- */
+.mapgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(238px,1fr));gap:12px;align-items:start}
+.comp{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);box-shadow:var(--shadow);padding:15px 16px;display:flex;flex-direction:column;gap:9px}
+.comp .ch{display:flex;justify-content:space-between;align-items:center;gap:8px}
+.comp .ch b{font-size:14px;letter-spacing:-.01em}
+.kind{font-size:9px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;border-radius:6px;padding:2px 7px;white-space:nowrap}
+.pbar{height:6px;border-radius:99px;background:var(--line2);overflow:hidden}
+.pbar i{display:block;height:100%;border-radius:99px;background:var(--done)}
+.cfoot{display:flex;justify-content:space-between;flex-wrap:wrap;gap:3px 10px;font-size:11.5px;color:var(--ink3);font-variant-numeric:tabular-nums}
+.cfoot>span:last-child{white-space:nowrap;margin-left:auto}
+.comp img{width:100%;max-height:96px;object-fit:cover;object-position:top;border-radius:8px;border:1px solid var(--line);display:block}
+/* ---- telemetry ---- */
+.telgrid{display:grid;grid-template-columns:1.15fr 1fr;gap:12px;align-items:start}
+.panel{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);box-shadow:var(--shadow);padding:18px 20px;display:flex;flex-direction:column;gap:13px}
+.panel h3 .mut{font-weight:400;font-size:11.5px}
+.hbar{display:grid;grid-template-columns:118px 1fr 78px;gap:10px;align-items:center}
+.hbar .lab{font-family:var(--mono);font-size:11px;color:var(--ink2);text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.hbar .tr{height:16px;border-radius:5px;background:var(--line2);position:relative;overflow:hidden}
+.hbar .tr i{position:absolute;top:0;bottom:0;border-radius:5px}
+.hbar .vv{font-size:11.5px;color:var(--ink2);text-align:right;font-variant-numeric:tabular-nums}
+.legend{display:flex;gap:16px;font-size:11.5px;color:var(--ink2);flex-wrap:wrap}
+.legend i{width:10px;height:10px;border-radius:3px;display:inline-block;margin-right:5px;vertical-align:-1px}
+.tokrow{display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:10px;font-size:12.5px;padding:7px 0;border-bottom:1px solid var(--line2);align-items:baseline}
+.tokrow:last-child{border-bottom:0}
+.tokrow b{font-variant-numeric:tabular-nums} .tokrow .n{color:var(--ink3);font-size:11px}
+.tokrow .m{color:var(--ink2);overflow:hidden;text-overflow:ellipsis}
+.tokrow .m i{display:inline-block;width:9px;height:9px;border-radius:3px;margin-right:6px}
+.donutwrap{display:flex;gap:18px;align-items:center;flex-wrap:wrap}
+.footnote{font-size:11px;color:var(--ink3);line-height:1.5}
+/* ---- journal ---- */
+.jgrid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.jcol{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);box-shadow:var(--shadow);padding:18px 20px}
+.jcol h3{margin-bottom:13px}
+.jitem{position:relative;padding:0 0 15px 20px;border-left:2px solid var(--line);margin-left:5px}
+.jitem:last-child{padding-bottom:2px;border-left-color:transparent}
+.jitem::before{content:"";position:absolute;left:-6px;top:4px;width:10px;height:10px;border-radius:50%;background:var(--surface);border:2.5px solid var(--ink3)}
+.jitem.human::before{border-color:var(--accent)}
+.jitem b{font-size:13px;display:block;font-weight:600;letter-spacing:-.01em}
+.jitem p{font-size:12.5px;color:var(--ink2);margin-top:3px}
+.jitem .ts{font-size:10.5px;color:var(--ink3);font-variant-numeric:tabular-nums}
+.tag{font-size:9px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;border-radius:5px;padding:2px 6px;margin-left:7px;vertical-align:1px}
+.tag.h{color:var(--accent);background:var(--accsoft)} .tag.f{color:var(--ink3);background:var(--line2)}
+/* ---- system ---- */
+.syscard{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);box-shadow:var(--shadow);overflow:hidden}
+.sysrow{display:flex;align-items:baseline;gap:12px;padding:10px 18px;border-bottom:1px solid var(--line2);font-size:13px}
+.sysrow:last-child{border-bottom:0}
+.sysrow .bdg{font-size:9.5px;font-weight:700;letter-spacing:.06em;width:46px;flex:none}
+.sysrow .n{width:168px;flex:none;font-weight:500}
+.sysrow .d{color:var(--ink3);font-size:12.5px;min-width:0}
+.ok{color:var(--done)} .warn{color:var(--awaitc)} .bad{color:var(--blockc)}
+/* ---- shared ---- */
+.tblwrap{overflow-x:auto;background:var(--surface);border:1px solid var(--line);border-radius:var(--r);box-shadow:var(--shadow)}
+table{width:100%;border-collapse:collapse;font-size:12.5px}
+th{font-size:10px;text-transform:uppercase;letter-spacing:.07em;color:var(--ink3);text-align:left;padding:9px 14px;border-bottom:1px solid var(--line);font-weight:600}
+td{padding:9px 14px;border-bottom:1px solid var(--line2);vertical-align:top} tr:last-child td{border-bottom:none}
+tbody tr:hover{background:#faf9f5}
+.design{margin-bottom:14px} .design>h4{margin-bottom:8px}
+.dpair{display:grid;grid-template-columns:1fr 1fr;gap:12px;max-width:640px}
+.dpair a{display:block} .dpair img{width:100%;max-height:170px;object-fit:cover;object-position:top;border-radius:8px;border:1px solid var(--line);background:#fff;display:block}
+.dpair span{display:block;font-size:10.5px;color:var(--ink3);margin-top:4px}
+.dmiss{border:1px dashed var(--line);border-radius:8px;display:grid;place-items:center;min-height:80px;font-size:11px;color:var(--ink3);padding:10px;text-align:center;background:repeating-linear-gradient(45deg,#f1efe9 0 8px,#eceae3 8px 16px)}
+@media (max-width:940px){
   .shell{flex-direction:column}
-  aside{position:static;width:100%;height:auto;flex-direction:row;align-items:center;flex-wrap:wrap;gap:8px;padding:12px 16px}
+  aside{position:static;width:100%;height:auto;flex-direction:row;align-items:center;flex-wrap:wrap;gap:10px;padding:12px 16px}
   .brand{border:0;padding:0} .brand img{margin:0 10px 0 0;display:inline-block;vertical-align:middle}
-  #snav{flex-direction:row;flex-wrap:wrap;padding:0} #snav a .k{display:none}
+  #snav{flex-direction:row;flex-wrap:wrap;padding:0;overflow:visible} #snav a .k{display:none}
   .sidefoot{display:none}
   .kpis{grid-template-columns:1fr 1fr} .kpi.hero{grid-column:1/-1}
-  .grid2{grid-template-columns:1fr} .dpair{grid-template-columns:1fr}
+  .telgrid,.jgrid,.dgrid,.dpair{grid-template-columns:1fr}
+  summary.irow{grid-template-columns:4px minmax(0,1fr) auto} .iid{display:none}
+  .icdb{padding-left:22px}
+  .pnote{margin-left:0}
 }
-@media (prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
+@media (prefers-reduced-motion:reduce){html{scroll-behavior:auto}*{transition:none!important}}
 </style></head><body>
 <div class="shell">
 <aside>
@@ -628,7 +817,7 @@ details.icd[open]>summary{color:var(--accent)}
     <a href="#work">Work <span class="k">${counts.DONE}/${total}</span></a>
     <a href="#map">Project map <span class="k">${Object.keys(comps).length}</span></a>
     <a href="#telemetry">Telemetry</a>
-    <a href="#journal">Journal</a>
+    <a href="#journal">Journal <span class="k">${decisions.length + discoveries.length}</span></a>
     <a href="#system">System</a>
   </nav>
   <div class="sidefoot"><b>Generated projection.</b><br>State wins — never edit this file.<br>${new Date().toISOString().slice(0, 16).replace('T', ' ')} UTC</div>
@@ -647,8 +836,11 @@ details.icd[open]>summary{color:var(--accent)}
 
 ${railBlock}
 
-<details class="sec" open id="work"><summary>Work <span class="mut">(click an item for its full story — criteria, scope, dispatches, evidence, design, the brief)</span></summary>
+<details class="sec" open id="work"><summary>Work <span class="mut">(click any item for its full story — criteria, scope, dispatches, evidence, design, the brief)</span></summary>
+<div class="workbar">
 <input class="filter" id="wgfilter" type="search" placeholder="Filter items… (id, title, component, status)" aria-label="Filter work items">
+<div class="seg" id="wgseg" role="group" aria-label="Quick filters"><button class="on" data-f="all">All</button><button data-f="needs">Needs me</button><button data-f="active">Active</button><button data-f="done">Done</button></div>
+</div>
 ${milestoneBlocks || '<p class="mut">No work items yet.</p>'}</details>
 
 ${mapBlock ? mapBlock.replace('<details class="sec" open>', '<details class="sec" open id="map">') : ''}
@@ -656,19 +848,19 @@ ${mapBlock ? mapBlock.replace('<details class="sec" open>', '<details class="sec
 ${telemetryBlock.replace('<details class="sec" open>', '<details class="sec" open id="telemetry">')}
 
 <details class="sec" open id="journal"><summary>Journal <span class="mut">(decisions bind the product · discoveries change the plan — latest first)</span></summary>
-<div class="grid2" style="margin-top:8px">
-<div><h3>Decisions</h3>${logBlock(decisions, 'None recorded yet.')}</div>
-<div><h3>Discoveries</h3>${logBlock(discoveries, 'None recorded yet.')}</div>
+<div class="jgrid">
+<div class="jcol"><h3>Decisions</h3>${logBlock(decisions, 'None recorded yet.')}</div>
+<div class="jcol"><h3>Discoveries</h3>${logBlock(discoveries, 'None recorded yet.')}</div>
 </div></details>
 
 <details class="sec" id="system"><summary>System <span class="mut">(preflight · baseline · spec — the plumbing, collapsed until you need it)</span></summary>
-<div class="grid2" style="margin-top:8px">
-<div><h3>Preflight ${pf ? `<span class="mut" style="font-weight:400">${esc(pf.ts.slice(0, 16).replace('T', ' '))}</span>` : ''}</h3>
-<div class="tblwrap"><table><tbody>${pfBlock}</tbody></table></div></div>
-<div><h3>Baseline ${base ? `<span class="mut" style="font-weight:400">${esc(base.ts.slice(0, 16).replace('T', ' '))}</span>` : ''}</h3>
-<div class="tblwrap"><table><tbody>${baseBlock}</tbody></table></div></div>
+<div class="jgrid">
+<div><h3 style="margin-bottom:9px">Preflight ${pf ? `<span class="mut">${esc(pf.ts.slice(0, 16).replace('T', ' '))}</span>` : ''}</h3>
+<div class="syscard">${pfBlock}</div></div>
+<div><h3 style="margin-bottom:9px">Baseline ${base ? `<span class="mut">${esc(base.ts.slice(0, 16).replace('T', ' '))}</span>` : ''}</h3>
+<div class="syscard">${baseBlock}</div></div>
 </div>
-${specRows ? `<h3 style="margin-top:14px">Specification <span class="mut" style="font-weight:400">(${esc(cfg.specDir)}/ — the source of intent)</span></h3>
+${specRows ? `<h3 style="margin:18px 0 9px">Specification <span class="mut">(${esc(cfg.specDir)}/ — the source of intent)</span></h3>
 <div class="tblwrap"><table><thead><tr><th>File</th><th>Size</th><th>Modified</th></tr></thead><tbody>${specRows}</tbody></table></div>` : ''}
 </details>
 
@@ -676,18 +868,33 @@ ${specRows ? `<h3 style="margin-top:14px">Specification <span class="mut" style=
 </div>
 <script>
 (function(){
-  var i=document.getElementById('wgfilter'); if(!i) return;
-  i.addEventListener('input',function(){
-    var q=i.value.toLowerCase();
+  var i=document.getElementById('wgfilter'), seg=document.getElementById('wgseg'); if(!i) return;
+  var mode='all';
+  function inMode(s){
+    if(mode==='all') return true;
+    if(mode==='needs') return s==='BLOCKED';
+    if(mode==='active') return s==='IN_PROGRESS'||s==='READY';
+    if(mode==='done') return s==='DONE';
+    return true;
+  }
+  function apply(){
+    var q=i.value.toLowerCase(), narrowed=!!q||mode!=='all';
     document.querySelectorAll('details.sec.sub').forEach(function(d){
       var any=false;
-      d.querySelectorAll('tbody tr').forEach(function(r){
-        var hit=!q||r.textContent.toLowerCase().indexOf(q)>=0;
+      d.querySelectorAll('details.icd').forEach(function(r){
+        var hit=inMode(r.getAttribute('data-s')||'')&&(!q||r.textContent.toLowerCase().indexOf(q)>=0);
         r.style.display=hit?'':'none'; if(hit)any=true;
       });
-      if(q){ if(d.dataset.wasOpen===undefined){ d.dataset.wasOpen=d.open?'1':'0'; } d.open=any; d.style.display=any?'':'none'; }
+      if(narrowed){ if(d.dataset.wasOpen===undefined){ d.dataset.wasOpen=d.open?'1':'0'; } d.open=any; d.style.display=any?'':'none'; }
       else { d.style.display=''; if(d.dataset.wasOpen!==undefined){ d.open=d.dataset.wasOpen==='1'; delete d.dataset.wasOpen; } }
     });
+  }
+  i.addEventListener('input',apply);
+  if(seg) seg.addEventListener('click',function(e){
+    var b=e.target&&e.target.closest?e.target.closest('button'):null; if(!b)return;
+    mode=b.getAttribute('data-f');
+    [].forEach.call(seg.children,function(x){ x.classList.toggle('on',x===b); });
+    apply();
   });
 })();
 (function(){

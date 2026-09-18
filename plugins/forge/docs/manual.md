@@ -149,8 +149,7 @@ blocked-with-reason / failed-with-diagnosis).
   its timestamp (never parsed live; absent data is absent). v0.13: every section is
   collapsible — the active milestone opens, closed milestones fold away; time metrics add
   median verification runtime (recorded per verify) and per-milestone human gate wait.
-  v0.13.1: each milestone shows component chips (what gets touched when); component boxes
-  show "next touched: Mx"; every item has an expandable card (objective, criteria, scope,
+  v0.13.1: component boxes show "next touched: Mx"; every item has an expandable card (objective, criteria, scope,
   dispatches, verification evidence, and a link to its saved brief); a live filter box
   searches the whole work graph. v0.14: full redesign — branded sidebar with section nav,
   a needs-you banner (what needs the human, computed from state), KPI row (progress ring,
@@ -165,6 +164,12 @@ blocked-with-reason / failed-with-diagnosis).
 - `/forge:usage` — observed tokens by model, orchestrator vs workers, dispatches tied to items,
   output tokens since last state change (drift detector). Read from Claude Code session logs;
   never estimated.
+  v0.15.1: the finish pass — work items are clickable rows that open a detail drawer
+  (design strip, criteria with per-check pass marks, dispatches, scope and evidence),
+  milestone groups are cards, quick filters (All / Needs me / Active / Done) sit beside
+  the filter box, telemetry is charted (per-agent prep/execution bars, a delegation
+  donut), the project map is a component-card grid, and the journal is a timeline that
+  marks whether a decision was yours or Forge's.
 
 ## Safety nets (all enforced; every one has a regression test)
 
