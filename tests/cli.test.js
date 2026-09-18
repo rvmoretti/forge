@@ -1048,3 +1048,65 @@ test('durations on the page are computed in the browser, not frozen at generatio
   assert.match(dash, /setInterval\(tick,30000\)/);          // and it keeps ticking
   assert.match(dash, /regenerated <span data-since=/);      // the file states its own age
 });
+
+// --- v0.15.3: rail card, working quick filters, in-place document reader -------
+
+test('the milestone rail sits in a card', () => {
+  addItem('C1', ['--milestone', 'M1']);
+  const dash = fs.readFileSync(path.join(dir, 'forge', 'dashboard.html'), 'utf8');
+  assert.match(dash, /<div class="railcard">/);
+  assert.match(dash, /\.railcard\{background:var\(--surface\)/);
+});
+
+test('quick filters can see gate state and the active milestone', () => {
+  forge(['task', 'add', '--id', 'F1', '--title', 'done one', '--milestone', 'M1',
+    '--criterion', 'ok::node -e "process.exit(0)"', '--allowed', 'src/']);
+  forge(['task', 'add', '--id', 'F2', '--title', 'later', '--milestone', 'M2',
+    '--criterion', 'ok::node -e "process.exit(0)"', '--allowed', 'other/']);
+  forge(['task', 'start', 'F1']);
+  touch('f.txt');
+  forge(['task', 'verify', 'F1']);
+  forge(['task', 'done', 'F1']);   // M1 now complete → gate awaiting
+  const dash = fs.readFileSync(path.join(dir, 'forge', 'dashboard.html'), 'utf8');
+  assert.match(dash, /data-gate="awaiting" data-m="M1"/);   // "Needs me" matches this group
+  assert.match(dash, /data-gate="pending" data-m="M2"/);
+  assert.match(dash, /data-s="DONE" data-act="0"/);          // M1 is no longer the active milestone
+  assert.match(dash, /data-act="1"/);                        // M2's item is
+  assert.match(dash, /id="wgnone"/);                         // honest empty state
+  assert.match(dash, /class="mcount"/);                      // per-group match count
+  assert.match(dash, /gate==='awaiting'/);                   // the predicate itself
+});
+
+test('briefs and spec files are embedded and open in the reader panel', () => {
+  fs.mkdirSync(path.join(dir, 'spec'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'spec', '01-vision.md'), '# Vision\n\n- one\n- two\n\n`code` and **bold**\n');
+  forge(['config', 'set', 'specDir', 'spec']);
+  forge(['task', 'add', '--id', 'R2', '--title', 'screen', '--objective', 'obj',
+    '--criterion', 'ok::node -e "process.exit(0)"', '--allowed', 'src/']);
+  forge(['brief', 'R2', '--save']);
+  const dash = fs.readFileSync(path.join(dir, 'forge', 'dashboard.html'), 'utf8');
+  assert.match(dash, /id="docdata"/);                         // embedded document store
+  assert.match(dash, /brief:R2/);                             // the brief is in it
+  assert.match(dash, /briefs\/R2\.md/);                       // with its real path
+  assert.match(dash, /spec:01-vision\.md/);                   // and the spec file
+  assert.match(dash, /Work brief/);                           // brief text is embedded, not linked only
+  assert.match(dash, /id="docpanel"/);
+  assert.match(dash, /id="docdownload"/);
+  assert.match(dash, /id="docfolder"/);
+  assert.match(dash, /class="cchip docopen"/);                // row chip opens the reader
+  const docs = JSON.parse(dash.match(/id="docdata">([\s\S]*?)<\/script>/)[1].replace(/\\u003c/g, '<'));
+  assert.ok(docs['brief:R2'].text.includes('Acceptance criteria'));
+  assert.strictEqual(docs['spec:01-vision.md'].rel, 'spec/01-vision.md');
+});
+
+test('an oversized document is listed but not embedded', () => {
+  fs.mkdirSync(path.join(dir, 'spec'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'spec', 'huge.md'), 'x'.repeat(60 * 1024));
+  forge(['config', 'set', 'specDir', 'spec']);
+  forge(['dashboard']);
+  const dash = fs.readFileSync(path.join(dir, 'forge', 'dashboard.html'), 'utf8');
+  const docs = JSON.parse(dash.match(/id="docdata">([\s\S]*?)<\/script>/)[1].replace(/\\u003c/g, '<'));
+  assert.strictEqual(docs['spec:huge.md'].text, null);
+  assert.ok(docs['spec:huge.md'].size > 48 * 1024);
+  assert.doesNotMatch(dash, /xxxxxxxxxxxxxxxxxxxx/);   // its content never lands in the file
+});

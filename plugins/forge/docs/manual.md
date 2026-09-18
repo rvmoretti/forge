@@ -164,6 +164,11 @@ blocked-with-reason / failed-with-diagnosis).
 - `/forge:usage` — observed tokens by model, orchestrator vs workers, dispatches tied to items,
   output tokens since last state change (drift detector). Read from Claude Code session logs;
   never estimated.
+  v0.15.3: briefs and spec files open in a reader panel (rendered markdown, with
+  open/download/open-folder for the original; documents over 48KB stay links), and
+  the quick filters are gate-aware — "Needs me" includes every item of a milestone
+  waiting for your review, "Active" includes open work in the milestone being built,
+  each button shows its count, and an empty result says why.
   v0.15.2: nothing on the page waits for you to refresh it — the token panel
   updates itself on every state change (incremental transcript scan, bounded and
   resumable; `options.usageAuto false` disables it, `forge usage` still prints the
