@@ -287,7 +287,7 @@ function readTail(file, off) {
 
 // Folds one chunk of JSONL into an aggregate. Pure accumulation, so the same
 // function serves the persistent cache and the throwaway tail view.
-function consumeUsage(agg, text, side, knownIdRe) {
+function consumeUsage(agg, text, side, knownIdRe, rec) {
   for (const line of text.split('\n')) {
     if (!line.trim()) continue;
     let d; try { d = JSON.parse(line); } catch (_) { continue; }
@@ -296,9 +296,16 @@ function consumeUsage(agg, text, side, knownIdRe) {
       if (!agg.firstTs || tsv < agg.firstTs) agg.firstTs = tsv;
       if (!agg.lastTs || tsv > agg.lastTs) agg.lastTs = tsv;
     }
+    // v0.16: tie a worker transcript to its work item. The dispatch prompt's first
+    // line is the brief header, so the item id is in the worker's own file.
+    if (rec && !rec.item) {
+      const mh = line.match(/Work brief (?:—|\\u2014) ([A-Za-z0-9][\w.-]*):/) || line.match(/briefs?\\?\/([A-Za-z0-9][\w.-]*?)\.md/i);
+      if (mh) rec.item = mh[1];
+    }
     if (d.type !== 'assistant' || !d.message) continue;
     const model = d.message.model || 'unknown';
     if (model === '<synthetic>') continue;
+    if (rec) { rec.calls = (rec.calls || 0) + 1; rec.model = model; }
     const u = d.message.usage || {};
     const thread = (side || d.isSidechain) ? 'side' : 'main';
     const m = (agg.models[model] = agg.models[model] || {});
@@ -358,7 +365,7 @@ function collectUsage(opts = {}) {
       if (budgetMs && Date.now() - t0 > budgetMs) { pending = true; break; }
       const { text, next } = readTail(f, rec.off);
       if (next === rec.off) break;              // only an incomplete line is left
-      consumeUsage(c, text, side, knownIdRe);
+      consumeUsage(c, text, side, knownIdRe, rec);
       rec.off = next;
     }
     if (pending) break;
@@ -391,7 +398,7 @@ function collectUsage(opts = {}) {
     } catch (_) { continue; }
     if (!tail.trim()) continue;
     if (!cloned) { view = JSON.parse(JSON.stringify(c)); cloned = true; }
-    consumeUsage(view, tail, side, knownIdRe);
+    consumeUsage(view, tail, side, knownIdRe, null);
     view.bytes += Buffer.byteLength(tail, 'utf8');
   }
   view.dirs = dirs;
@@ -399,13 +406,82 @@ function collectUsage(opts = {}) {
   return view;
 }
 
+const USAGE_BASELINE = path.join(STATE, 'usage-baseline.json');
+
+// v0.16: the numbers that actually track cost and speed.
+// Field finding (cisc, 21 items): 1.33 BILLION cache-read tokens against 3.94M
+// generated — a 339:1 ratio. Output tokens are noise for quota; context re-read
+// per call is the bill. So the headline metrics are per-item context and per-item
+// model calls, not token share by model.
+function usageMetrics(c, doneCount) {
+  let calls = 0, cacheRead = 0, cacheCreate = 0, inTok = 0, outTok = 0, mainCalls = 0, sideCalls = 0;
+  for (const threads of Object.values(c.models || {}))
+    for (const [th, t] of Object.entries(threads)) {
+      calls += t.calls || 0; cacheRead += t.cacheRead || 0; cacheCreate += t.cacheCreate || 0;
+      inTok += t.in || 0; outTok += t.out || 0;
+      if (th === 'main') mainCalls += t.calls || 0; else sideCalls += t.calls || 0;
+    }
+  const context = cacheRead + cacheCreate + inTok;
+  // one worker transcript ≈ one dispatch
+  const wf = Object.values(c.files || {}).filter(f => f.side && (f.calls || 0) > 0);
+  const per = wf.map(f => f.calls).sort((a, b) => a - b);
+  const q = (arr, p2) => arr.length ? arr[Math.min(arr.length - 1, Math.floor(arr.length * p2))] : null;
+  const worst = wf.slice().sort((a, b) => b.calls - a.calls).slice(0, 5)
+    .map(f => `${f.item || '(untied)'}×${f.calls}`);
+  return {
+    calls, mainCalls, sideCalls, cacheRead, cacheCreate, inTok, outTok, context,
+    dispatches: wf.length,
+    callsPerDispatch: { median: q(per, 0.5), p90: q(per, 0.9), max: per.length ? per[per.length - 1] : null },
+    worstDispatches: worst,
+    done: doneCount,
+    perItem: doneCount ? { calls: calls / doneCount, context: context / doneCount, out: outTok / doneCount } : null
+  };
+}
+
+function fmtBig(n) {
+  if (n == null) return '—';
+  if (n >= 1e9) return (n / 1e9).toFixed(2) + 'B';
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+  if (n >= 1e3) return Math.round(n / 1e3) + 'k';
+  return String(Math.round(n));
+}
+
+// Work done SINCE a recorded baseline — this is what makes a change measurable
+// on one project: totals are cumulative, so the delta is the new regime alone.
+function usageSince(m, base) {
+  if (!base) return null;
+  const done = (m.done || 0) - (base.done || 0);
+  if (done <= 0) return null;
+  const d = {
+    done,
+    calls: (m.calls - (base.calls || 0)) / done,
+    context: (m.context - (base.context || 0)) / done,
+    out: (m.outTok - (base.outTok || 0)) / done,
+    label: base.label || null, ts: base.ts
+  };
+  if (base.perItem) {
+    d.vs = {
+      calls: base.perItem.calls ? Math.round(100 * (d.calls / base.perItem.calls - 1)) : null,
+      context: base.perItem.context ? Math.round(100 * (d.context / base.perItem.context - 1)) : null,
+      out: base.perItem.out ? Math.round(100 * (d.out / base.perItem.out - 1)) : null
+    };
+  }
+  return d;
+}
+
 function usageSnapshot(c) {
   let mainOut = 0, sideOut = 0;
   for (const threads of Object.values(c.models || {}))
     for (const [th, t] of Object.entries(threads)) { if (th === 'main') mainOut += t.out; else sideOut += t.out; }
+  const doneCount = (() => {
+    try { const w2 = readJson(WORK_FILE, { items: {}, order: [] });
+      return w2.order.filter(id => w2.items[id].status === 'DONE').length; } catch (_) { return 0; }
+  })();
+  const metrics = usageMetrics(c, doneCount);
   return { ts: ts(), models: c.models, dispatches: c.dispatches, byType: c.byType,
            mainOut, sideOut, complete: !!c.complete,
-           scanPct: c.total ? Math.round(100 * c.bytes / c.total) : 100 };
+           scanPct: c.total ? Math.round(100 * c.bytes / c.total) : 100,
+           metrics, since: usageSince(metrics, readJson(USAGE_BASELINE, null)) };
 }
 
 // Called from the dashboard generator: keeps the token panel current without
@@ -741,7 +817,28 @@ function generateDashboard() {
     } else {
       tokenPanel = `<div class="panel"><h3>Tokens</h3><p class="mut">No usage snapshot yet — this fills in by itself once Claude Code session logs exist for this project (or run <code>forge usage</code> now; zero tokens, any terminal).</p></div>`;
     }
-    telemetryBlock = `<details class="sec" open><summary>Telemetry <span class="mut">(time live from state · tokens re-read from session logs on every change)</span></summary><div class="telgrid">${timePanel}${tokenPanel}</div></details>`;
+    // v0.16: the cost/speed headline — context re-read per item and model calls per
+    // item. Field finding: context:output ran 339:1, so token *share* by model says
+    // almost nothing about the bill.
+    let effPanel = '';
+    {
+      const M = (usageSnap && usageSnap.metrics) || null;
+      if (M && M.perItem) {
+        const sinceD = usageSnap.since;
+        const arrow = v => v == null ? '' : `<b style="color:${v < 0 ? 'var(--done)' : v > 0 ? 'var(--blockc)' : 'var(--ink3)'}">${v > 0 ? '+' : ''}${v}%</b>`;
+        effPanel = `<div class="pacestrip" style="margin-top:12px">
+          <div><div class="pk">CONTEXT RE-READ PER DONE ITEM</div><div class="pv">${esc(fmtBig(M.perItem.context))} <small>${M.outTok ? Math.round(M.context / M.outTok) : '—'}:1 vs generated</small></div></div>
+          <div class="pdiv"></div>
+          <div><div class="pk">MODEL CALLS PER DONE ITEM</div><div class="pv">${Math.round(M.perItem.calls)} <small>${M.mainCalls.toLocaleString()} orch · ${M.sideCalls.toLocaleString()} workers</small></div></div>
+          <div class="pdiv"></div>
+          <div><div class="pk">CALLS PER WORKER DISPATCH</div><div class="pv">${M.callsPerDispatch.median == null ? '—' : M.callsPerDispatch.median} <small>median · p90 ${M.callsPerDispatch.p90 == null ? '—' : M.callsPerDispatch.p90} · max ${M.callsPerDispatch.max == null ? '—' : M.callsPerDispatch.max}</small></div></div>
+          ${sinceD ? `<div class="pdiv"></div><div><div class="pk" style="color:var(--accent)">SINCE BASELINE${sinceD.label ? ` · ${esc(sinceD.label)}` : ''}</div>
+            <div class="pv" style="font-size:14px">${sinceD.done} item(s) — calls ${arrow(sinceD.vs && sinceD.vs.calls)} · context ${arrow(sinceD.vs && sinceD.vs.context)} · output ${arrow(sinceD.vs && sinceD.vs.out)}</div></div>` : ''}
+          <div class="pnote">Context re-read is what a subscription quota actually spends — every turn re-sends the window. A worker dispatch running far past the median is exploring, not building.${sinceD ? '' : ' Record a baseline with <code>forge usage --baseline</code> to measure a change.'}</div>
+        </div>`;
+      }
+    }
+    telemetryBlock = `<details class="sec" open><summary>Telemetry <span class="mut">(time live from state · tokens re-read from session logs on every change)</span></summary><div class="telgrid">${timePanel}${tokenPanel}</div>${effPanel}</details>`;
   }
 
   // ---- v0.14: needs-you banner (deterministic, same priority as session guidance) ----
@@ -1465,6 +1562,40 @@ function globMatch(rel, pattern) {
   return rel === pat || rel.startsWith(pat + '/');
 }
 
+// v0.16: resolve an item's allowed-scope globs into the actual files a worker
+// will touch. Measured cause of waste: an implementer dispatch averaged 218 model
+// calls, most of them re-discovering a file set the orchestrator already knew.
+// Handing over the list turns exploration into reading.
+function resolveScopeFiles(allowed, limit = 80) {
+  const out2 = [];
+  const skip = /(^|\/)(\.git|node_modules|dist|build|coverage|\.next|vendor)(\/|$)/;
+  const walk = (rel, depth) => {
+    if (out2.length >= limit || depth > 8) return;
+    let ents = [];
+    try { ents = fs.readdirSync(path.join(PROJECT, rel || '.'), { withFileTypes: true }); } catch (_) { return; }
+    for (const e of ents) {
+      if (out2.length >= limit) return;
+      const r = (rel ? rel + '/' : '') + e.name;
+      if (skip.test(r) || e.name.startsWith('.')) continue;
+      if (e.isDirectory()) walk(r, depth + 1);
+      else {
+        let sz = 0; try { sz = fs.statSync(path.join(PROJECT, r)).size; } catch (_) { }
+        out2.push({ rel: r, size: sz });
+      }
+    }
+  };
+  for (const g of (allowed || [])) {
+    if (g === '**') return { files: [], truncated: false, wholeTree: true };
+    const root = String(g).replace(/\\/g, '/').split('*')[0].replace(/\/$/, '');
+    let st = null; try { st = fs.statSync(path.join(PROJECT, root)); } catch (_) { continue; }
+    if (st.isDirectory()) walk(root, 0);
+    else { out2.push({ rel: root, size: st.size }); }
+  }
+  const seen = new Set(); const files = [];
+  for (const f of out2) if (!seen.has(f.rel)) { seen.add(f.rel); files.push(f); }
+  return { files, truncated: files.length >= limit, wholeTree: false };
+}
+
 // v0.15: brief text factored out — 'forge brief' prints/saves it and API
 // workers ('forge worker run') consume it directly.
 function briefLines(item, cfg) {
@@ -1476,6 +1607,24 @@ function briefLines(item, cfg) {
   lines.push('', `## Scope`);
   lines.push(`Allowed to modify: ${item.scope.allowed.length ? item.scope.allowed.join(', ') : '(orchestrator: derive from the dependency closure — use Graphify if available)'}`);
   lines.push(`Must NOT touch: ${item.scope.forbidden.length ? item.scope.forbidden.join(', ') : '(orchestrator: fill in)'}`);
+  // v0.16: the file list, resolved now, so the worker reads instead of searching
+  {
+    const sc = resolveScopeFiles(item.scope.allowed || []);
+    if (sc.wholeTree) {
+      lines.push('', `## Files in scope`, `This item is deliberately whole-tree — no file list can be given. Ask before reading widely.`);
+    } else if (sc.files.length) {
+      lines.push('', `## Files in scope (${sc.files.length}${sc.truncated ? '+, truncated' : ''}) — this is the set; do not go looking for more`);
+      for (const f of sc.files) lines.push(`- \`${f.rel}\`${f.size ? ` (${f.size < 1024 ? f.size + ' B' : Math.round(f.size / 1024) + ' KB'})` : ''}`);
+      if (sc.truncated) lines.push(`- …the scope resolves to more files than listed. If the item genuinely needs all of them it is probably too big — say so.`);
+    } else {
+      lines.push('', `## Files in scope`, `The allowed scope resolves to no existing files — this is new-file work. Create only inside the allowed paths.`);
+    }
+  }
+  lines.push('', `## How to work (this is what keeps the item cheap and fast)`,
+    `- Read the files listed above FIRST. They are the working set.`,
+    `- Do not search or scan the repository. If you believe you need a file that is not listed, STOP and report which one and why — that is a scope question for the orchestrator, not something to resolve by exploring.`,
+    `- Make the change, then run the verification commands below. Iterate on failures; do not re-read files you have already read.`,
+    `- If you find yourself unsure what to do next, STOP and report. A question costs one message; guessing costs an hour.`);
   lines.push('', `## Project verification commands (will be run on your result)`);
   Object.entries(cfg.verify || {}).forEach(([k, v]) => lines.push(`- ${k}: \`${v}\``));
   // provider failures carry no approach diagnosis — only real failed attempts inform the retry
@@ -1842,7 +1991,22 @@ const commands = {
         durationMs: results.reduce((a, r) => a + (r.ms || 0), 0) });
       item.updated = ts();
       saveWork(w);
-      for (const r of results) out(`${r.exit === 0 ? 'PASS' : 'FAIL'}  [${r.kind}] ${r.cmd}${r.note ? `  (${r.note})` : ''}${r.exit !== 0 ? '\n' + r.tail : ''}`);
+      // v0.16: passing checks print one line. Field measurement: tool results were
+      // 29–47% of the orchestrator's context window, and a passing test's output is
+      // never read by anyone. The FULL tail still goes to work.json below, so the
+      // evidence record is unchanged — this is a stdout change only.
+      const verbose = ((cfg.options || {}).verifyVerbose) === true;
+      const failed = results.filter(r => r.exit !== 0);
+      if (verbose) {
+        for (const r of results) out(`${r.exit === 0 ? 'PASS' : 'FAIL'}  [${r.kind}] ${r.cmd}${r.note ? `  (${r.note})` : ''}${r.exit !== 0 ? '\n' + r.tail : ''}`);
+      } else {
+        out(`VERIFY ${item.id} — ${passed ? 'PASS' : 'FAIL'} ${results.length - failed.length}/${results.length}`);
+        for (const r of results) {
+          if (r.exit === 0) { out(`  ✓ ${r.kind}${r.note ? ` (${r.note})` : ''}`); continue; }
+          out(`  ✗ ${r.kind} — exit ${r.exit}${r.note ? ` (${r.note})` : ''}\n${String(r.tail || '').split('\n').slice(-20).map(l => '    ' + l).join('\n')}`);
+        }
+        if (!failed.length) out(`  (full output of every check is recorded in work.json — options.verifyVerbose true prints it here)`);
+      }
       if (skippedBaseline) out(`NOTE: baseline check SKIPPED — reason recorded: ${skippedBaseline}`);
       out(passed ? `\n${item.id}: verification PASSED` : `\n${item.id}: verification FAILED`);
       if (!passed) process.exit(1);
@@ -2460,6 +2624,13 @@ const commands = {
       const totalFails = done.reduce((a, i) => a + failsOf(i), 0);
       out(`\n## Outcomes (${done.length} DONE)`);
       out(`  First-pass rate: ${firstPass}/${done.length} (${Math.round(100 * firstPass / done.length)}%) — done with zero failed attempts`);
+      // v0.16: first-pass forgives a re-start or a failed verify run; clean-run does not.
+      // The spread between them is rework the process was not recording.
+      const cleanRun = done.filter(i =>
+        i.attempts.filter(a => a.outcome === 'started').length === 1 &&
+        failsOf(i) === 0 &&
+        !(i.verifications || []).some(v => v.passed === false)).length;
+      out(`  Clean-run rate:  ${cleanRun}/${done.length} (${Math.round(100 * cleanRun / done.length)}%) — one start, zero failed attempts, zero failed verify runs`);
       out(`  Failed attempts absorbed: ${totalFails} · avg ${(totalFails / done.length).toFixed(2)} per completed item`);
       const retried = done.filter(i => failsOf(i) > 0).sort((a, b) => failsOf(b) - failsOf(a)).slice(0, 8);
       if (retried.length) out(`  Most retried: ` + retried.map(i => `${i.id}×${failsOf(i)}`).join(' · '));
@@ -2475,6 +2646,21 @@ const commands = {
         const med = spans[Math.floor(spans.length / 2)];
         out(`  First-start → done elapsed: median ${med < 1 ? Math.round(med * 60) + 'min' : med.toFixed(1) + 'h'} · ` +
             `p90 ${(spans[Math.floor(spans.length * 0.9)]).toFixed(1)}h  (wall-clock — includes review/gate/idle time)`);
+      }
+    }
+
+    // v0.16: cost and speed, from the usage cache (no transcript parsing here)
+    {
+      const c2 = readJson(USAGE_CACHE, null);
+      if (c2 && c2.models) {
+        const M = usageMetrics(c2, done.length);
+        out(`\n## Efficiency (from the last usage scan)`);
+        out(`  Context re-read per DONE item: ${fmtBig(M.perItem ? M.perItem.context : null)} · model calls per item: ${M.perItem ? Math.round(M.perItem.calls) : '—'} · output per item: ${fmtBig(M.perItem ? M.perItem.out : null)}`);
+        if (M.dispatches) out(`  Calls per worker dispatch: median ${M.callsPerDispatch.median} · p90 ${M.callsPerDispatch.p90} · max ${M.callsPerDispatch.max}`);
+        const sinceS = usageSince(M, readJson(USAGE_BASELINE, null));
+        if (sinceS && sinceS.vs)
+          out(`  Since baseline${sinceS.label ? ` '${sinceS.label}'` : ''} (${sinceS.done} item(s)): calls ${sinceS.vs.calls > 0 ? '+' : ''}${sinceS.vs.calls}% · context ${sinceS.vs.context > 0 ? '+' : ''}${sinceS.vs.context}% · output ${sinceS.vs.out > 0 ? '+' : ''}${sinceS.vs.out}%`);
+        out(`  Full detail: forge usage`);
       }
     }
 
@@ -2584,6 +2770,38 @@ const commands = {
       if (after > 20000) out(`  ← significant spend with no state movement: work may be happening outside the forge loop. Check what the session is doing.`);
     } catch (_) { /* no work file */ }
 
+    // v0.16: the numbers that track cost and speed
+    const doneNow = (() => { try { const w2 = readJson(WORK_FILE, { items: {}, order: [] });
+      return w2.order.filter(id => w2.items[id].status === 'DONE').length; } catch (_) { return 0; } })();
+    const M = usageMetrics(c, doneNow);
+    out(`\n## Efficiency — what actually drives quota and wall-clock`);
+    out(`  Context re-read: ${fmtBig(M.cacheRead)} cache-read + ${fmtBig(M.cacheCreate)} cache-write + ${fmtBig(M.inTok)} fresh input`);
+    out(`  Generated: ${fmtBig(M.outTok)} output tokens — ratio context:output = ${M.outTok ? Math.round(M.context / M.outTok) : '—'}:1`);
+    out(`  Model calls: ${M.calls.toLocaleString()} (${M.mainCalls.toLocaleString()} orchestrator · ${M.sideCalls.toLocaleString()} workers)`);
+    if (M.perItem)
+      out(`  PER DONE ITEM (${M.done} done): ${Math.round(M.perItem.calls)} calls · ${fmtBig(M.perItem.context)} context · ${fmtBig(M.perItem.out)} output`);
+    if (M.dispatches)
+      out(`  Calls per worker dispatch (${M.dispatches} worker transcripts): median ${M.callsPerDispatch.median} · p90 ${M.callsPerDispatch.p90} · max ${M.callsPerDispatch.max}` +
+          (M.worstDispatches.length ? `\n    heaviest: ${M.worstDispatches.join(' · ')}` : '') +
+          `\n    A worker running far past its median is exploring, not building — the brief did not tell it where to look.`);
+    const base0 = readJson(USAGE_BASELINE, null);
+    const since = usageSince(M, base0);
+    if (since) {
+      out(`\n## Since baseline${since.label ? ` '${since.label}'` : ''} (${String(since.ts).slice(0, 16).replace('T', ' ')})`);
+      out(`  ${since.done} item(s) completed since — per item: ${Math.round(since.calls)} calls · ${fmtBig(since.context)} context · ${fmtBig(since.out)} output`);
+      if (since.vs)
+        out(`  vs baseline: calls ${since.vs.calls > 0 ? '+' : ''}${since.vs.calls}% · context ${since.vs.context > 0 ? '+' : ''}${since.vs.context}% · output ${since.vs.out > 0 ? '+' : ''}${since.vs.out}%`);
+    } else if (base0) {
+      out(`\n## Since baseline${base0.label ? ` '${base0.label}'` : ''}: no items completed yet — the comparison appears after the first DONE.`);
+    }
+
+    if (flag('baseline')) {
+      const snap = Object.assign({ ts: ts(), label: opt('label') || null }, M);
+      writeJson(USAGE_BASELINE, snap);
+      out(`\nBASELINE RECORDED${opt('label') ? ` as '${opt('label')}'` : ''} — forge/state/usage-baseline.json`);
+      out(`Everything from here is measured against it: run 'forge usage' after the next milestone to see per-item calls, context and output for the new regime.`);
+    }
+
     out(`\n## Activity by day (output tokens)`);
     for (const [day, v] of Object.entries(c.byDay).sort())
       out(`  ${day}: ${'█'.repeat(Math.min(40, Math.ceil(v / 2000)))} ${v.toLocaleString()}`);
@@ -2615,10 +2833,22 @@ const commands = {
       // v0.8: record the milestone security review (fresh-context reviewer over the slice's diff)
       const m = argv[2];
       if (!m || !milestoneSeq(w).includes(m)) die(`Unknown milestone '${m || ''}'. See: forge milestone list`);
-      if (!opt('note')) die('Usage: forge milestone security <M> --note "<who reviewed, what was covered, findings summary>"');
-      w.gates[m] = Object.assign({}, w.gates[m], { security: { ts: ts(), note: opt('note') } });
+      if (!opt('note')) die('Usage: forge milestone security <M> --agent <worker|self> --note "<who reviewed, what was covered, findings summary>"');
+      // v0.16: the contract has always said the security pass is DISPATCHED to a
+      // fresh-context reviewer. Field measurement (cisc): it was absorbed in-session
+      // 22 times for 21 items — ~694k orchestrator tokens, and at item granularity
+      // rather than per milestone. A sentence in the contract did not hold, so the
+      // record now has to name who did it.
+      const secAgent = opt('agent');
+      if (!secAgent)
+        die(`Refused: record WHO ran the security pass — it is dispatched to a fresh-context reviewer, not absorbed.\n` +
+            `  forge milestone security ${m} --agent forge-reviewer --note "<coverage + findings>"\n` +
+            `If you deliberately ran it in this session instead, say so and it is recorded as absorbed:\n` +
+            `  forge milestone security ${m} --agent self --note "..."`);
+      w.gates[m] = Object.assign({}, w.gates[m], { security: { ts: ts(), agent: secAgent, note: opt('note') } });
       saveWork(w);
-      out(`Security review recorded for milestone '${m}'. Findings become work items BEFORE the gate is approved.`);
+      out(`Security review recorded for milestone '${m}' (${secAgent === 'self' ? 'ABSORBED in-session — this is the expensive path; a fresh reviewer is cheaper and less biased' : `dispatched → ${secAgent}`}).`);
+      out(`Findings become work items BEFORE the gate is approved.`);
     } else if (sub === 'approve') {
       const m = argv[2];
       if (!m || !milestoneSeq(w).includes(m)) die(`Unknown milestone '${m || ''}'. See: forge milestone list`);
@@ -2645,6 +2875,13 @@ const commands = {
         `\n### ${ts()} — Milestone '${m}' approved\n- Authority: human\n- Decision: milestone gate approved after human review${secSkip ? ` (SECURITY REVIEW SKIPPED: ${secSkip})` : ''}\n- Why: ${opt('note') || '(no note recorded)'}\n`);
       out(`Milestone '${m}' approved — later milestones may now start.`);
       out(`📊 forge/dashboard.html now shows this milestone closed — worth a look for the user.`);
+      // v0.16: the gate is the designed session boundary. Measured: the orchestrator
+      // re-read 601M cached tokens across one long session because context only ever
+      // grows. Forge's state lives on disk precisely so a cold session can resume.
+      out(`\n🔄 START A NEW SESSION NOW. This milestone is closed and its conversation is spent —\n` +
+          `   everything needed to continue is in forge/ (the session-start hook reloads it).\n` +
+          `   Carrying this context into the next milestone makes every later turn more expensive\n` +
+          `   and slower, for no benefit. Tell the user: "close this session and open a new one".`);
     } else if (sub === 'reopen') {
       const m = argv[2];
       if (!opt('reason')) die('Reopening a gate must be explicit: --reason "..."');
@@ -2912,7 +3149,7 @@ const commands = {
                                          --agent is required on a launch; a --kind message inherits
                                          the agent of the launch it follows
   task block <id> --reason | cancel <id> --reason [--dependents drop|cancel]
-  milestone list | approve <m> [--note] | reopen <m> --reason
+  milestone list | security <m> --agent <worker|self> --note | approve <m> [--note] | reopen <m> --reason
                                          human gates between milestones (config: options.gates per-milestone|end-only)
   brief <id>                             print the brief skeleton for a work item
   worker run <id> [--model m] [--max-turns N]
@@ -2928,7 +3165,9 @@ const commands = {
   baseline capture | check               brownfield: record and guard pre-existing state
   status                                 project overview
   dashboard                              (re)generate forge/dashboard.html — also auto-regens on every state change
-  usage [--rescan]                       OBSERVED token/dispatch report from local session logs:
+  usage [--rescan] [--baseline --label]  OBSERVED token/dispatch report from local session logs:
+                                         --baseline records today's totals so later runs report
+                                         per-item calls/context/output for work done SINCE it
                                          by model, orchestrator vs subagents, dispatches by agent type,
                                          per-item dispatch counts, spend since last state change.
                                          The dashboard's token panel refreshes ITSELF on every state
@@ -2948,6 +3187,8 @@ const commands = {
                options.scopeExempt "a/,b/"  dirs exempt from the scope whitelist (default forge/,spec/,docs/; *.md always exempt)
                options.usageAuto false   stop refreshing the token snapshot automatically (then it is
                                          only as fresh as your last 'forge usage' run)
+               options.verifyVerbose true  print every check's full output again (default: passing
+                                         checks print one line; the full tail always lands in work.json)
                providers.model "<id>" · providers.url (default https://openrouter.ai/api/v1) ·
                providers.keyEnv (default OPENROUTER_API_KEY) · providers.maxTurns (default 24)
   state writes are serialised by forge/state/work.lock (concurrent forge processes wait, then refuse;

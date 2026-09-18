@@ -60,6 +60,11 @@ from confirmed goals, milestone cut across everything. Then the same loop.
    pack (see `forge-domain-packs` skill). The saved brief is the audit
    artifact: the dashboard links it on the item's card, and the user can
    read exactly what each worker was told.
+   **The brief must name the files.** `brief --save` resolves the item's allowed
+   scope into the actual file list and states the working rules; keep it. A
+   worker that has to find its own files burns turns exploring — measured at 218
+   model calls for a single implementer dispatch, against a median far below
+   that. Turns are the bill: context is re-sent on every one of them.
    **Screen work**: the brief additionally carries the `design-ux` pack and
    the approved mock (`spec/mocks/<screen>.*`) when one exists; the item
    carries a criterion binding the rendered screen to that mock. A screen
@@ -122,7 +127,11 @@ from confirmed goals, milestone cut across everything. Then the same loop.
    security domain pack over the milestone's cumulative diff; its findings
    become work items in this milestone (fix before the gate) or explicit
    accepted-risk decisions; record the pass:
-   `forge milestone security <M> --note "<coverage + findings summary>"` —
+   `forge milestone security <M> --agent forge-reviewer --note "<coverage +
+   findings summary>"` — the CLI refuses without `--agent`, because the pass was
+   absorbed in-session 22 times on one project (~694k orchestrator tokens) while
+   this rule said to dispatch it. Running it yourself is allowed but recorded as
+   such: `--agent self`. It runs once per MILESTONE, not per item —
    `approve` refuses without it (deliberate skip: `--skip-security
    --reason`; per-project opt-out: `options.security off`). Deterministic
    scanning is separate and continuous: `verify.security` runs inside every
@@ -135,6 +144,12 @@ from confirmed goals, milestone cut across everything. Then the same loop.
    milestone starts. The CLI refuses to start later-milestone items until
    the gate is approved — this is the user's early-drift catch; never ask
    them to skip it, though they may switch to `end-only` themselves.
+   **Then end the session.** After `approve` succeeds, tell the user to close
+   this session and open a new one before the next milestone. Forge's state is on
+   disk exactly so a cold session can resume; a session carried across milestones
+   re-sends an ever-larger window on every turn, which is where a subscription
+   quota actually goes (measured: 601M cached tokens re-read by one orchestrator
+   across one project). The gate is the designed boundary — use it.
 
 ## Hard rules (enforced by tooling — do not fight them, work with them)
 
@@ -200,6 +215,18 @@ implementer. Doing bounded work yourself is the proportionality exception
 for trivial items, not the default. The measure is cost per completed item,
 not delegation percentage — but zero explorer/tester dispatches over a whole
 project means you are absorbing their work.
+
+**What the bill is actually made of.** Field measurement (cisc, 21 items): 1.33
+billion tokens of context re-read against 3.94 million generated — a ratio of
+339:1. Output tokens, and therefore which model produced them, are close to
+irrelevant for cost; the bill is *number of model calls × window size at each
+call*. Two consequences, and they are not what the token-share view suggests:
+delegating does not reduce total consumption by itself (those workers made 79%
+of all calls and 53% of all context reads), and a worker that thrashes is more
+expensive than the same work absorbed. So delegate to compress *your* window and
+to parallelise — then make each dispatch land in as few turns as possible: exact
+scope, the file list in the brief, one bounded task, no exploration. Fewer,
+better-briefed dispatches beat more dispatches.
 
 ## API workers (opt-in — providers phase A, v0.15)
 

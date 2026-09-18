@@ -231,7 +231,7 @@ test('milestone gate blocks next milestone until approved; approve unblocks', ()
   assert.match(blocked.out, /awaits HUMAN approval/);
   const early = forge(['milestone', 'approve', 'M2']);
   assert.notStrictEqual(early.code, 0); // cannot approve an unfinished milestone
-  forge(['milestone', 'security', 'M1', '--note', 'pass clean']); // v0.8: gate requires the security review
+  forge(['milestone', 'security', 'M1', '--agent', 'forge-reviewer', '--note', 'pass clean']); // v0.8: gate requires the security review
   assert.strictEqual(forge(['milestone', 'approve', 'M1', '--note', 'demo ok']).code, 0);
   assert.strictEqual(forge(['task', 'start', 'M2a']).code, 0);
 });
@@ -471,7 +471,7 @@ test('milestone approve refuses without a security review; passes with one; skip
   const badSkip = forge(['milestone', 'approve', 'M1', '--skip-security']);
   assert.notStrictEqual(badSkip.code, 0);
   assert.match(badSkip.out, /--reason/);
-  forge(['milestone', 'security', 'M1', '--note', 'reviewer pass clean, no findings']);
+  forge(['milestone', 'security', 'M1', '--agent', 'forge-reviewer', '--note', 'reviewer pass clean, no findings']);
   const ok = forge(['milestone', 'approve', 'M1', '--note', 'demo ok']);
   assert.strictEqual(ok.code, 0);
 });
@@ -1109,4 +1109,139 @@ test('an oversized document is listed but not embedded', () => {
   assert.strictEqual(docs['spec:huge.md'].text, null);
   assert.ok(docs['spec:huge.md'].size > 48 * 1024);
   assert.doesNotMatch(dash, /xxxxxxxxxxxxxxxxxxxx/);   // its content never lands in the file
+});
+
+// --- v0.16: cost and speed -----------------------------------------------------
+
+test('the brief hands the worker its file list and forbids exploring', () => {
+  fs.mkdirSync(path.join(dir, 'src', 'pay'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'src', 'pay', 'intent.ts'), 'x'.repeat(2048));
+  fs.writeFileSync(path.join(dir, 'src', 'pay', 'client.ts'), 'y');
+  fs.mkdirSync(path.join(dir, 'src', 'pay', 'node_modules'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'src', 'pay', 'node_modules', 'junk.js'), 'z');
+  forge(['task', 'add', '--id', 'B9', '--title', 'pay', '--objective', 'o',
+    '--criterion', 'ok::node -e "process.exit(0)"', '--allowed', 'src/pay/']);
+  const r = forge(['brief', 'B9']);
+  assert.strictEqual(r.code, 0);
+  assert.match(r.out, /## Files in scope \(2\)/);
+  assert.match(r.out, /src\/pay\/intent\.ts` \(2 KB\)/);
+  assert.match(r.out, /src\/pay\/client\.ts/);
+  assert.doesNotMatch(r.out, /node_modules/);          // never handed to a worker
+  assert.match(r.out, /Do not search or scan the repository/);
+  assert.match(r.out, /STOP and report/);
+  // whole-tree items cannot get a list, and say so rather than pretending
+  forge(['task', 'add', '--id', 'B10', '--title', 'wide', '--criterion', 'ok::node -e "process.exit(0)"']);
+  forge(['task', 'start', 'B10', '--whole-tree', '--reason', 'migration']);
+  assert.match(forge(['brief', 'B10']).out, /deliberately whole-tree/);
+});
+
+test('verify prints one line per passing check; the full tail still lands in state', () => {
+  addItem('V1');
+  forge(['task', 'start', 'V1']);
+  touch('v.txt');
+  const r = forge(['task', 'verify', 'V1']);
+  assert.strictEqual(r.code, 0);
+  assert.match(r.out, /VERIFY V1 — PASS 2\/2/);
+  assert.match(r.out, /✓ project:test/);
+  assert.match(r.out, /recorded in work\.json/);
+  const w = JSON.parse(fs.readFileSync(path.join(dir, 'forge', 'state', 'work.json'), 'utf8'));
+  assert.ok(w.items.V1.verifications[0].results.every(x => 'tail' in x));   // evidence unchanged
+  // a failing check keeps its output
+  forge(['task', 'update', 'V1', '--criterion-add', 'bad::node -e "console.log(\'BOOM\');process.exit(1)"']);
+  const f = forge(['task', 'verify', 'V1']);
+  assert.notStrictEqual(f.code, 0);
+  assert.match(f.out, /✗ criterion: bad — exit 1/);
+  assert.match(f.out, /BOOM/);
+  // verbose restores the old shape
+  forge(['config', 'set', 'options.verifyVerbose', 'true']);
+  const v = forge(['task', 'verify', 'V1']);
+  assert.match(v.out, /PASS {2}\[project:test\]/);
+});
+
+test('the security pass must name who ran it; self is recorded as absorbed', () => {
+  forge(['task', 'add', '--id', 'S1', '--title', 'one', '--milestone', 'M1',
+    '--criterion', 'ok::node -e "process.exit(0)"', '--allowed', 'src/']);
+  forge(['task', 'start', 'S1']); touch('s.txt');
+  forge(['task', 'verify', 'S1']); forge(['task', 'done', 'S1']);
+  const bare = forge(['milestone', 'security', 'M1', '--note', 'looked fine']);
+  assert.notStrictEqual(bare.code, 0);
+  assert.match(bare.out, /record WHO ran the security pass/);
+  assert.match(bare.out, /--agent self/);
+  const ok = forge(['milestone', 'security', 'M1', '--agent', 'forge-reviewer', '--note', 'clean']);
+  assert.strictEqual(ok.code, 0);
+  assert.match(ok.out, /dispatched → forge-reviewer/);
+  const w = JSON.parse(fs.readFileSync(path.join(dir, 'forge', 'state', 'work.json'), 'utf8'));
+  assert.strictEqual(w.gates.M1.security.agent, 'forge-reviewer');
+  const self = forge(['milestone', 'security', 'M1', '--agent', 'self', '--note', 'did it here']);
+  assert.match(self.out, /ABSORBED in-session/);
+});
+
+test('approving a gate tells the session to end', () => {
+  forge(['task', 'add', '--id', 'G1', '--title', 'one', '--milestone', 'M1',
+    '--criterion', 'ok::node -e "process.exit(0)"', '--allowed', 'src/']);
+  forge(['task', 'start', 'G1']); touch('g.txt');
+  forge(['task', 'verify', 'G1']); forge(['task', 'done', 'G1']);
+  forge(['milestone', 'security', 'M1', '--agent', 'forge-reviewer', '--note', 'clean']);
+  const r = forge(['milestone', 'approve', 'M1', '--note', 'tested']);
+  assert.strictEqual(r.code, 0);
+  assert.match(r.out, /START A NEW SESSION NOW/);
+  assert.match(r.out, /session-start hook reloads it/);
+});
+
+test('usage reports per-item efficiency, calls per dispatch, and a baseline delta', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-logs-'));
+  const projDir = path.join(root, dir.replace(/[^a-zA-Z0-9]/g, '-'));
+  const subs = path.join(projDir, 'sess-1', 'subagents');
+  fs.mkdirSync(subs, { recursive: true });
+  const asstL = (out, extra) => JSON.stringify(Object.assign({
+    type: 'assistant', timestamp: '2026-09-18T10:00:00.000Z',
+    message: { model: 'm', usage: { output_tokens: out, input_tokens: 10, cache_read_input_tokens: 100000 } }
+  }, extra || {}));
+  fs.writeFileSync(path.join(projDir, 'session.jsonl'), [asstL(100), asstL(100)].join('\n') + '\n');
+  // two worker transcripts of very different length, each naming its item
+  const userL = (txt) => JSON.stringify({ type: 'user', timestamp: '2026-09-18T10:00:00.000Z', message: { content: txt } });
+  fs.writeFileSync(path.join(subs, 'agent-a.jsonl'),
+    [userL('# Work brief — E1: cheap one'), asstL(10), asstL(10)].join('\n') + '\n');
+  fs.writeFileSync(path.join(subs, 'agent-b.jsonl'),
+    [userL('# Work brief — E2: thrashing one')].concat(Array.from({ length: 12 }, () => asstL(10))).join('\n') + '\n');
+
+  addItem('E1'); addItem('E2');
+  for (const id of ['E1', 'E2']) {
+    forge(['task', 'start', id]); touch(id + '.txt');
+    forge(['task', 'verify', id]); forge(['task', 'done', id]);
+  }
+  const r = forge(['usage'], { env: { FORGE_CLAUDE_PROJECTS: root } });
+  assert.strictEqual(r.code, 0);
+  assert.match(r.out, /Efficiency — what actually drives quota/);
+  assert.match(r.out, /context:output = \d+:1/);
+  assert.match(r.out, /PER DONE ITEM \(2 done\)/);
+  assert.match(r.out, /Calls per worker dispatch \(2 worker transcripts\): median \d+ · p90 \d+ · max 12/);
+  assert.match(r.out, /heaviest: E2×12/);            // tied to its item, so it is actionable
+
+  // baseline, then more work, then the delta
+  const b = forge(['usage', '--baseline', '--label', 'pre'], { env: { FORGE_CLAUDE_PROJECTS: root } });
+  assert.match(b.out, /BASELINE RECORDED as 'pre'/);
+  assert.ok(fs.existsSync(path.join(dir, 'forge', 'state', 'usage-baseline.json')));
+  fs.appendFileSync(path.join(projDir, 'session.jsonl'), asstL(50) + '\n');
+  addItem('E3'); forge(['task', 'start', 'E3']); touch('e3.txt');
+  forge(['task', 'verify', 'E3']); forge(['task', 'done', 'E3']);
+  const r2 = forge(['usage'], { env: { FORGE_CLAUDE_PROJECTS: root } });
+  assert.match(r2.out, /Since baseline 'pre'/);
+  assert.match(r2.out, /1 item\(s\) completed since/);
+  assert.match(r2.out, /vs baseline: calls [+-]\d+%/);
+});
+
+test('stats reports clean-run rate alongside first-pass', () => {
+  addItem('C1');
+  forge(['task', 'start', 'C1']);
+  forge(['task', 'fail', 'C1', '--note', 'wrong approach']);
+  forge(['task', 'start', 'C1']); touch('c.txt');
+  forge(['task', 'verify', 'C1']); forge(['task', 'done', 'C1']);
+  addItem('C2');
+  forge(['task', 'start', 'C2']); touch('c2.txt');
+  forge(['task', 'verify', 'C2']); forge(['task', 'done', 'C2']);
+  const r = forge(['stats']);
+  assert.match(r.out, /First-pass rate: 1\/2/);
+  assert.match(r.out, /Clean-run rate:  1\/2/);
+  assert.match(r.out, /one start, zero failed attempts, zero failed verify runs/);
 });
