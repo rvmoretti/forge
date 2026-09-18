@@ -461,13 +461,38 @@ function generateDashboard() {
   const compChip = (cid) => `<span class="cchip"><i style="background:${kindColor[(comps[cid] || {}).kind] || '#57606f'}"></i>${esc(cid)}</span>`;
   const fmtD = ms2 => ms2 == null ? '\u2014' : (ms2 < 90000 ? Math.round(ms2 / 1000) + 's' : (ms2 < 5400000 ? Math.round(ms2 / 60000) + 'm' : (ms2 / 3600000).toFixed(1) + 'h'));
 
+  // v0.15.3: readable documents — briefs and spec files are embedded so the
+  // dashboard can show them rendered, in place, without a fetch (a file:// page
+  // cannot read its siblings). Bounded so a big project can't bloat the file:
+  // oversized or overflowing documents fall back to a plain link.
+  const DOC_MAX = 48 * 1024, DOC_BUDGET = 2 * 1024 * 1024;
+  const docs = {};
+  let docBytes = 0;
+  const addDoc = (key, abs, rel, title, kind) => {
+    let st; try { st = fs.statSync(abs); } catch (_) { return false; }
+    if (!st.isFile()) return false;
+    if (st.size > DOC_MAX || docBytes + st.size > DOC_BUDGET) { docs[key] = { title, rel, kind, size: st.size, text: null }; return true; }
+    try {
+      docs[key] = { title, rel, kind, size: st.size, text: fs.readFileSync(abs, 'utf8'),
+                    mtime: new Date(st.mtimeMs).toISOString() };
+      docBytes += st.size;
+      return true;
+    } catch (_) { return false; }
+  };
+
   // spec files
   let specRows = '';
   if (cfg.specDir && fs.existsSync(path.join(PROJECT, cfg.specDir))) {
     try {
       specRows = fs.readdirSync(path.join(PROJECT, cfg.specDir)).filter(f => !f.startsWith('.')).map(f => {
-        const st = fs.statSync(path.join(PROJECT, cfg.specDir, f));
-        return `<tr><td><code>${esc(f)}</code></td><td class="mut">${st.isDirectory() ? 'dir' : (st.size + ' B')}</td><td class="mut">${new Date(st.mtimeMs).toISOString().slice(0, 16).replace('T', ' ')}</td></tr>`;
+        const abs = path.join(PROJECT, cfg.specDir, f);
+        const st = fs.statSync(abs);
+        const key = 'spec:' + f;
+        const readable = !st.isDirectory() && /\.(md|markdown|txt)$/i.test(f) && addDoc(key, abs, `${cfg.specDir}/${f}`, f, 'spec');
+        const name = readable
+          ? `<a href="#" class="docopen" data-doc="${esc(key)}"><code>${esc(f)}</code></a>`
+          : `<code>${esc(f)}</code>`;
+        return `<tr><td>${name}</td><td class="mut">${st.isDirectory() ? 'dir' : (st.size + ' B')}</td><td class="mut">${new Date(st.mtimeMs).toISOString().slice(0, 16).replace('T', ' ')}</td></tr>`;
       }).join('');
     } catch (_) { /* ignore */ }
   }
@@ -486,7 +511,9 @@ function generateDashboard() {
       const fails = t.attempts.filter(a => a.outcome === 'failed').length;
       const lastV = t.verifications.length ? t.verifications[t.verifications.length - 1] : null;
       const disp = t.dispatches || [];
-      const hasBrief = t.id && fs.existsSync(path.join(FORGE, 'briefs', `${t.id}.md`));
+      const briefKey = `brief:${t.id}`;
+      const hasBrief = !!(t.id && fs.existsSync(path.join(FORGE, 'briefs', `${t.id}.md`))
+        && addDoc(briefKey, path.join(FORGE, 'briefs', `${t.id}.md`), `forge/briefs/${t.id}.md`, `${t.id} — work brief`, 'brief'));
       const stat = isReady ? 'READY' : t.status;
       const sCls = { DONE: 's-done', IN_PROGRESS: 's-prog', READY: 's-ready', BLOCKED: 's-block', TODO: 's-todo', CANCELLED: 's-cancel' }[stat] || 's-todo';
       const sVar = { DONE: 'var(--done)', IN_PROGRESS: 'var(--progc)', READY: 'var(--readyc)', BLOCKED: 'var(--blockc)', TODO: 'var(--line)', CANCELLED: 'var(--line2)' }[stat] || 'var(--line)';
@@ -553,23 +580,24 @@ function generateDashboard() {
       const subline = t.status === 'BLOCKED' ? `<span class="sub">⛔ ${esc(t.blockReason || '')}</span>`
         : t.status === 'CANCELLED' ? `<span class="sub">✕ ${esc(t.cancelReason || '')}</span>`
         : noScope ? `<span class="warnv">⚠ no file scope — start will refuse (task update --allowed)</span>` : '';
-      return `<details class="icd" data-s="${stat}"><summary class="irow">
+      return `<details class="icd" data-s="${stat}" data-act="${m === actM || m === '(no milestone)' ? '1' : '0'}"><summary class="irow">
         <span class="stripe" style="background:${sVar}"></span>
         <span class="iid">${esc(t.id || '')}</span>
-        <span class="itt">${stat === 'IN_PROGRESS' ? '<span class="dot-open"></span>' : ''}${esc(t.title)}${t.component ? compChip(t.component) : ''}${designStrip ? '<span class="cchip">🎨 mock</span>' : ''}${hasBrief ? '<span class="cchip">📄 brief</span>' : ''}${subline}</span>
+        <span class="itt">${stat === 'IN_PROGRESS' ? '<span class="dot-open"></span>' : ''}${esc(t.title)}${t.component ? compChip(t.component) : ''}${designStrip ? '<span class="cchip">🎨 mock</span>' : ''}${hasBrief ? `<button type="button" class="cchip docopen" data-doc="${esc(briefKey)}" title="Read the brief">📄 brief</button>` : ''}${subline}</span>
         <span class="imeta"><span class="st ${sCls}">${stat === 'IN_PROGRESS' ? 'IN PROGRESS' : stat}</span>${meta ? `<span>${meta}</span>` : ''}</span>
       </summary><div class="icdb">
         ${designStrip}
         <div class="dgrid">
           <div><h4>Acceptance criteria</h4>${critList}${dspList}</div>
-          <div><h4>Scope &amp; evidence</h4>${kv}${hasBrief ? `<a class="briefbtn" href="briefs/${esc(t.id)}.md">📄 Read the full brief — exactly what the worker was told</a>` : ''}</div>
+          <div><h4>Scope &amp; evidence</h4>${kv}${hasBrief ? `<button type="button" class="briefbtn docopen" data-doc="${esc(briefKey)}">📄 Read the full brief — exactly what the worker was told</button>` : ''}</div>
         </div>
         ${t.objective ? `<p style="margin-top:14px"><b>Objective</b> — ${esc(t.objective)}</p>` : ''}
       </div></details>`;
     }).join('');
     // v0.15: component chips removed from milestone headers (user feedback: pure noise at
     // real-project density — components remain on item cards, the map, and the rail dots)
-    return `<details class="sec sub"${openAttr}><summary>${esc(m)} <span class="mut">${done}/${items.length} done</span> ${gateChip}</summary>
+    const gateState = m === '(no milestone)' ? 'none' : (gate && gate.approved ? 'approved' : allClosed ? 'awaiting' : 'pending');
+    return `<details class="sec sub"${openAttr} data-gate="${gateState}" data-m="${esc(m)}"><summary>${esc(m)} <span class="mut">${done}/${items.length} done</span> ${gateChip}<span class="mcount"></span></summary>
       <div class="mgb">${rows}</div></details>`;
   }).join('');
 
@@ -795,7 +823,7 @@ function generateDashboard() {
         return `<a class="mnode ${cls}" href="#work"><span class="mdot">${sym}</span><span class="mn">${esc(m)}</span><span class="mi">${label}</span>${mc.length ? `<span class="cdots">${mc.map(c => `<i style="background:${kindColor[(comps[c] || {}).kind] || '#57606f'}"></i>`).join('')}</span>` : ''}</a>`;
       }).join('');
       railBlock = `<details class="sec" open id="milestones"><summary>Milestones <span class="mut">(the whole journey — every planned milestone, not a side document)</span></summary>
-        <div class="railwrap"><div class="rail">${nodes}</div></div></details>`;
+        <div class="railcard"><div class="railwrap"><div class="rail">${nodes}</div></div></div></details>`;
     }
   }
 
@@ -931,8 +959,45 @@ details.icd[open]>summary.irow{background:#faf9f5}
 .dsp{list-style:none;display:flex;flex-direction:column;gap:6px;font-size:12px}
 .dsp li{display:flex;gap:9px;align-items:baseline}
 .dsp .t{color:var(--ink3);font-size:11px;flex:none;width:82px;font-family:var(--mono)}
-.briefbtn{display:inline-flex;align-items:center;gap:7px;margin-top:14px;font-weight:600;font-size:12.5px;color:var(--accent);border:1px solid #d4551a3d;background:var(--accsoft);border-radius:9px;padding:7px 13px}
+.briefbtn{display:inline-flex;align-items:center;gap:7px;margin-top:14px;font:inherit;font-weight:600;font-size:12.5px;color:var(--accent);border:1px solid #d4551a3d;background:var(--accsoft);border-radius:9px;padding:7px 13px;cursor:pointer;text-align:left}
 .briefbtn:hover{text-decoration:none;background:#d4551a22}
+button.cchip{font:inherit;font-size:10.5px;font-weight:600;border:0;cursor:pointer}
+button.cchip:hover{background:var(--accsoft);color:var(--accent)}
+.docopen{cursor:pointer}
+.mcount{font-size:10.5px;color:var(--accent);font-weight:600}
+.segwrap{display:flex;flex-direction:column;gap:2px}
+.seg button .n{font-size:10px;opacity:.75;margin-left:5px;font-variant-numeric:tabular-nums}
+.noresult{color:var(--ink3);font-size:13px;padding:14px 2px}
+/* ---- document reader ---- */
+.docscrim{position:fixed;inset:0;background:#1b1d2455;opacity:0;pointer-events:none;transition:opacity .15s;z-index:40}
+.docscrim.on{opacity:1;pointer-events:auto}
+.docpanel{position:fixed;top:0;right:0;bottom:0;width:min(760px,94vw);background:var(--surface);border-left:1px solid var(--line);
+  box-shadow:-24px 0 60px -30px rgba(27,29,36,.5);transform:translateX(102%);transition:transform .18s ease;z-index:41;display:flex;flex-direction:column}
+.docpanel.on{transform:none}
+.dochead{flex:none;padding:16px 22px;border-bottom:1px solid var(--line);display:flex;align-items:flex-start;gap:12px;flex-wrap:wrap}
+.dochead h3{font-size:15px;letter-spacing:-.015em;color:var(--ink)}
+.dochead .p{font-family:var(--mono);font-size:11px;color:var(--ink3);margin-top:3px;word-break:break-all}
+.docacts{margin-left:auto;display:flex;gap:7px;align-items:center}
+.docbtn{font:inherit;font-size:11.5px;font-weight:600;color:var(--ink2);background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:6px 11px;cursor:pointer;text-decoration:none;white-space:nowrap}
+.docbtn:hover{border-color:var(--ink3);color:var(--ink);text-decoration:none}
+.docbtn.x{padding:6px 10px;font-size:14px;line-height:1}
+.docbody{flex:1;overflow-y:auto;padding:22px 26px 60px;font-size:13.5px;line-height:1.62;color:#33373f}
+.docbody h1{font-size:20px;margin:0 0 12px}
+.docbody h2{font-size:16px;margin:24px 0 8px;padding-bottom:5px;border-bottom:1px solid var(--line2)}
+.docbody h3{font-size:14px;margin:18px 0 6px}
+.docbody h4{font-size:12.5px;margin:14px 0 5px;color:var(--ink2)}
+.docbody p{margin:9px 0}
+.docbody ul,.docbody ol{margin:9px 0 9px 22px}
+.docbody li{margin:4px 0}
+.docbody code{font-size:12px}
+.docbody pre{background:#f4f3ef;border:1px solid var(--line);border-radius:9px;padding:12px 14px;overflow-x:auto;margin:11px 0}
+.docbody pre code{background:none;padding:0;font-size:12px;line-height:1.5}
+.docbody blockquote{border-left:3px solid var(--line);margin:11px 0;padding:2px 0 2px 14px;color:var(--ink2)}
+.docbody hr{border:0;border-top:1px solid var(--line);margin:18px 0}
+.docbody table{margin:11px 0;font-size:12.5px}
+.docbody a{word-break:break-word}
+.docmiss{color:var(--ink3);font-size:13px}
+@media (max-width:940px){.docpanel{width:100vw}}
 .cchip{display:inline-flex;align-items:center;gap:5px;font-size:10.5px;font-weight:600;border-radius:7px;padding:2px 8px;background:var(--line2);color:var(--ink2);white-space:nowrap}
 .cchip i{width:7px;height:7px;border-radius:2px;display:block;flex:none}
 .pill{display:inline-block;font-size:9.5px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;border-radius:99px;padding:3px 9px;white-space:nowrap}
@@ -946,7 +1011,8 @@ details.icd[open]>summary.irow{background:#faf9f5}
 .seg button:hover{color:var(--ink)}
 .seg button.on{background:var(--ink);color:#fff}
 /* ---- milestone rail ---- */
-.railwrap{overflow-x:auto;padding:10px 2px 8px}
+.railcard{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);box-shadow:var(--shadow);padding:16px 8px 8px}
+.railwrap{overflow-x:auto;padding:4px 2px 8px}
 .rail{display:flex;min-width:max-content}
 .mnode{position:relative;width:112px;flex:none;display:flex;flex-direction:column;align-items:center;gap:6px;padding-top:4px;color:inherit}
 .mnode:hover{text-decoration:none} .mnode:hover .mn{color:var(--accent)}
@@ -1071,8 +1137,9 @@ ${railBlock}
 <details class="sec" open id="work"><summary>Work <span class="mut">(click any item for its full story — criteria, scope, dispatches, evidence, design, the brief)</span></summary>
 <div class="workbar">
 <input class="filter" id="wgfilter" type="search" placeholder="Filter items… (id, title, component, status)" aria-label="Filter work items">
-<div class="seg" id="wgseg" role="group" aria-label="Quick filters"><button class="on" data-f="all">All</button><button data-f="needs">Needs me</button><button data-f="active">Active</button><button data-f="done">Done</button></div>
+<div class="seg" id="wgseg" role="group" aria-label="Quick filters"><button class="on" data-f="all">All<span class="n"></span></button><button data-f="needs">Needs me<span class="n"></span></button><button data-f="active">Active<span class="n"></span></button><button data-f="done">Done<span class="n"></span></button></div>
 </div>
+<p class="noresult" id="wgnone" hidden></p>
 ${milestoneBlocks || '<p class="mut">No work items yet.</p>'}</details>
 
 ${mapBlock ? mapBlock.replace('<details class="sec" open>', '<details class="sec" open id="map">') : ''}
@@ -1098,6 +1165,20 @@ ${specRows ? `<h3 style="margin:18px 0 9px">Specification <span class="mut">(${e
 
 </div></main>
 </div>
+<div class="docscrim" id="docscrim"></div>
+<aside class="docpanel" id="docpanel" role="dialog" aria-modal="true" aria-labelledby="doctitle" aria-hidden="true">
+  <div class="dochead">
+    <div><h3 id="doctitle">Document</h3><div class="p" id="docpath"></div></div>
+    <div class="docacts">
+      <a class="docbtn" id="docopenfile" href="#" target="_blank" rel="noopener">Open file</a>
+      <a class="docbtn" id="docdownload" href="#" download>Download</a>
+      <a class="docbtn" id="docfolder" href="#" target="_blank" rel="noopener">Open folder</a>
+      <button class="docbtn x" id="docclose" aria-label="Close">✕</button>
+    </div>
+  </div>
+  <div class="docbody" id="docbody" tabindex="-1"></div>
+</aside>
+<script type="application/json" id="docdata">${JSON.stringify(docs).replace(/</g, '\\u003c')}</script>
 <script>
 /* v0.15.2: durations are computed in the browser from embedded ISO timestamps,
    so an open dashboard keeps telling the truth between CLI calls. */
@@ -1120,26 +1201,65 @@ ${specRows ? `<h3 style="margin:18px 0 9px">Specification <span class="mut">(${e
   tick(); setInterval(tick,30000);
 })();
 (function(){
-  var i=document.getElementById('wgfilter'), seg=document.getElementById('wgseg'); if(!i) return;
+  var i=document.getElementById('wgfilter'), seg=document.getElementById('wgseg'),
+      none=document.getElementById('wgnone');
+  if(!i) return;
   var mode='all';
-  function inMode(s){
+  var groups=[].slice.call(document.querySelectorAll('details.sec.sub'));
+  /* "Needs me" is the human's queue: an item blocked on your answer, and every
+     item of a milestone whose gate is waiting for your review — the gate IS the
+     thing that needs you. "Active" is work in flight plus what is still open in
+     the milestone currently being built. */
+  function matches(r, gate){
+    var s=r.getAttribute('data-s')||'';
     if(mode==='all') return true;
-    if(mode==='needs') return s==='BLOCKED';
-    if(mode==='active') return s==='IN_PROGRESS'||s==='READY';
+    if(mode==='needs') return s==='BLOCKED'||gate==='awaiting';
+    if(mode==='active') return s==='IN_PROGRESS'||s==='READY'||
+      (r.getAttribute('data-act')==='1'&&s!=='DONE'&&s!=='CANCELLED');
     if(mode==='done') return s==='DONE';
     return true;
   }
+  var EMPTY={
+    needs:'Nothing needs you right now — no item is blocked and no milestone is waiting for your review.',
+    active:'No work is in flight — nothing is in progress and nothing is open in the current milestone.',
+    done:'Nothing is finished yet.',
+    all:'No work items yet.'
+  };
   function apply(){
-    var q=i.value.toLowerCase(), narrowed=!!q||mode!=='all';
-    document.querySelectorAll('details.sec.sub').forEach(function(d){
-      var any=false;
+    var q=i.value.toLowerCase(), narrowed=!!q||mode!=='all', total=0;
+    groups.forEach(function(d){
+      var gate=d.getAttribute('data-gate')||'', n=0;
       d.querySelectorAll('details.icd').forEach(function(r){
-        var hit=inMode(r.getAttribute('data-s')||'')&&(!q||r.textContent.toLowerCase().indexOf(q)>=0);
-        r.style.display=hit?'':'none'; if(hit)any=true;
+        var hit=matches(r,gate)&&(!q||r.textContent.toLowerCase().indexOf(q)>=0);
+        r.style.display=hit?'':'none'; if(hit)n++;
       });
-      if(narrowed){ if(d.dataset.wasOpen===undefined){ d.dataset.wasOpen=d.open?'1':'0'; } d.open=any; d.style.display=any?'':'none'; }
+      total+=n;
+      var c=d.querySelector('.mcount');
+      if(c) c.textContent=narrowed&&n?('· '+n+' shown'):'';
+      if(narrowed){ if(d.dataset.wasOpen===undefined){ d.dataset.wasOpen=d.open?'1':'0'; } d.open=n>0; d.style.display=n?'':'none'; }
       else { d.style.display=''; if(d.dataset.wasOpen!==undefined){ d.open=d.dataset.wasOpen==='1'; delete d.dataset.wasOpen; } }
     });
+    if(none){
+      var show=narrowed&&!total;
+      none.hidden=!show;
+      none.textContent=show?(q?('Nothing matches “'+i.value+'”.'):EMPTY[mode]):'';
+    }
+  }
+  /* counts use the same predicate the filter uses, so a button can never promise
+     items the filter would not show */
+  function counts(){
+    if(!seg) return;
+    var saved=mode;
+    [].forEach.call(seg.children,function(b){
+      mode=b.getAttribute('data-f');
+      var n=0;
+      groups.forEach(function(d){
+        var gate=d.getAttribute('data-gate')||'';
+        d.querySelectorAll('details.icd').forEach(function(r){ if(matches(r,gate)) n++; });
+      });
+      var sp=b.querySelector('.n'); if(sp) sp.textContent=n;
+    });
+    mode=saved;
   }
   i.addEventListener('input',apply);
   if(seg) seg.addEventListener('click',function(e){
@@ -1148,6 +1268,86 @@ ${specRows ? `<h3 style="margin:18px 0 9px">Specification <span class="mut">(${e
     [].forEach.call(seg.children,function(x){ x.classList.toggle('on',x===b); });
     apply();
   });
+  counts();
+})();
+
+/* v0.15.3: read a brief or a spec file in place. The text is embedded (a file://
+   page cannot fetch its siblings), rendered with a small Markdown pass, and the
+   original file stays one click away. */
+(function(){
+  var el=document.getElementById('docdata'); if(!el) return;
+  var DOCS={}; try{ DOCS=JSON.parse(el.textContent||'{}'); }catch(e){}
+  var panel=document.getElementById('docpanel'), scrim=document.getElementById('docscrim'),
+      body=document.getElementById('docbody'), title=document.getElementById('doctitle'),
+      pathEl=document.getElementById('docpath'), openF=document.getElementById('docopenfile'),
+      dl=document.getElementById('docdownload'), folder=document.getElementById('docfolder'),
+      closeB=document.getElementById('docclose'), lastFocus=null;
+  function esc(t){ return t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+  function inline(t){
+    return t
+      .replace(/\`([^\`]+)\`/g,function(m,c){ return '<code>'+c+'</code>'; })
+      .replace(/\\*\\*([^*]+)\\*\\*/g,'<b>$1</b>')
+      .replace(/(^|[\\s(])\\*([^*\\n]+)\\*/g,'$1<i>$2</i>')
+      .replace(/(^|[\\s(])_([^_\\n]+)_/g,'$1<i>$2</i>')
+      .replace(/\\[([^\\]]+)\\]\\(([^)\\s]+)\\)/g,'<a href="$2">$1</a>');
+  }
+  function md(src){
+    var lines=esc(src).split('\\n'), out=[], k=0, fence=null, list=null;
+    function endList(){ if(list){ out.push('</'+list+'>'); list=null; } }
+    for(;k<lines.length;k++){
+      var l=lines[k];
+      if(/^\\s*\`\`\`/.test(l)){
+        if(fence===null){ endList(); fence=''; out.push('<pre><code>'); } else { out.push('</code></pre>'); fence=null; }
+        continue;
+      }
+      if(fence!==null){ out.push(l+'\\n'); continue; }
+      if(/^\\s*$/.test(l)){ endList(); continue; }
+      if(/^\\s*(---+|\\*\\*\\*+|___+)\\s*$/.test(l)){ endList(); out.push('<hr>'); continue; }
+      var h=l.match(/^(#{1,6})\\s+(.*)$/);
+      if(h){ endList(); var n=Math.min(h[1].length,4); out.push('<h'+n+'>'+inline(h[2])+'</h'+n+'>'); continue; }
+      var q=l.match(/^\\s*&gt;\\s?(.*)$/);
+      if(q){ endList(); out.push('<blockquote>'+inline(q[1])+'</blockquote>'); continue; }
+      var ul=l.match(/^\\s*[-*+]\\s+(.*)$/);
+      if(ul){ if(list!=='ul'){ endList(); out.push('<ul>'); list='ul'; } out.push('<li>'+inline(ul[1])+'</li>'); continue; }
+      var ol=l.match(/^\\s*\\d+[.)]\\s+(.*)$/);
+      if(ol){ if(list!=='ol'){ endList(); out.push('<ol>'); list='ol'; } out.push('<li>'+inline(ol[1])+'</li>'); continue; }
+      endList(); out.push('<p>'+inline(l)+'</p>');
+    }
+    if(fence!==null) out.push('</code></pre>');
+    endList();
+    return out.join('');
+  }
+  function openDoc(key, fileHref){
+    var d=DOCS[key]; if(!d) return;
+    lastFocus=document.activeElement;
+    title.textContent=d.title||key;
+    pathEl.textContent=d.rel||'';
+    var href=fileHref||('../'+d.rel);
+    openF.href=href; dl.href=href;
+    dl.setAttribute('download',(d.rel||'document').split('/').pop());
+    folder.href=href.replace(/[^/]+$/,'');
+    body.innerHTML=d.text==null
+      ? '<p class="docmiss">This file is '+Math.round((d.size||0)/1024)+' KB — too large to embed in the dashboard. Open it directly with the buttons above.</p>'
+      : md(d.text);
+    body.scrollTop=0;
+    panel.classList.add('on'); scrim.classList.add('on');
+    panel.setAttribute('aria-hidden','false');
+    body.focus();
+  }
+  function closeDoc(){
+    panel.classList.remove('on'); scrim.classList.remove('on');
+    panel.setAttribute('aria-hidden','true');
+    if(lastFocus&&lastFocus.focus) lastFocus.focus();
+  }
+  document.addEventListener('click',function(e){
+    var t=e.target&&e.target.closest?e.target.closest('.docopen'):null;
+    if(!t) return;
+    e.preventDefault(); e.stopPropagation();
+    openDoc(t.getAttribute('data-doc'), t.getAttribute('data-file')||null);
+  });
+  closeB.addEventListener('click',closeDoc);
+  scrim.addEventListener('click',closeDoc);
+  document.addEventListener('keydown',function(e){ if(e.key==='Escape'&&panel.classList.contains('on')) closeDoc(); });
 })();
 (function(){
   var links=[].slice.call(document.querySelectorAll('#snav a'));

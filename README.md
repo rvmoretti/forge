@@ -39,7 +39,7 @@ session resumes exactly where things stood.
 
 Every claim below is a refusal in code, not an instruction in a prompt —
 and every one is covered by a test in `tests/cli.test.js` (`npm test`,
-66 tests):
+70 tests):
 
 - **DONE requires a passing verification record for the current tree** — no record, a failed record, or evidence older than the latest edit all refuse.
 - **Checks must prove something** — `start` records each criterion check's pre-work result; if everything was green before work and nothing changed, `done` refuses (vacuous or already-satisfied criteria get flagged, not laundered).
@@ -165,6 +165,24 @@ session recovers the full picture from disk — the conversation is never the
 memory.
 
 ## Changelog
+
+### v0.15.3 — read the documents where you are
+- **Briefs and spec files open in a reader panel** instead of sending you to a
+  raw `.md` file. The text is embedded in the dashboard (a `file://` page cannot
+  fetch its siblings), rendered as Markdown, with **Open file**, **Download**
+  and **Open folder** one click away. Documents over 48KB, or past a 2MB total
+  budget, are listed with their size and left as links so a large project's
+  dashboard stays a reasonable size.
+- **The quick filters actually filter.** "Needs me" now means what it says:
+  items blocked on your answer *and* every item of a milestone whose gate is
+  waiting for your review — previously a milestone sitting on "AWAITING HUMAN
+  APPROVAL" matched nothing. "Active" is work in flight plus what is still open
+  in the milestone being built, so it is no longer empty on a project whose
+  later items are thin. Each button carries a live count computed with the same
+  predicate the filter uses, a filtered group shows how many of its items
+  matched, and a filter that matches nothing says so instead of rendering a
+  blank section.
+- **The milestone rail sits in a card**, as in the approved mockup.
 
 ### v0.15.2 — the dashboard stops depending on you
 Every number on the page is now either live or honestly labelled as a
