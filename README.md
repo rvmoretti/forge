@@ -39,7 +39,7 @@ session resumes exactly where things stood.
 
 Every claim below is a refusal in code, not an instruction in a prompt —
 and every one is covered by a test in `tests/cli.test.js` (`npm test`,
-70 tests):
+76 tests):
 
 - **DONE requires a passing verification record for the current tree** — no record, a failed record, or evidence older than the latest edit all refuse.
 - **Checks must prove something** — `start` records each criterion check's pre-work result; if everything was green before work and nothing changed, `done` refuses (vacuous or already-satisfied criteria get flagged, not laundered).
@@ -165,6 +165,43 @@ session recovers the full picture from disk — the conversation is never the
 memory.
 
 ## Changelog
+
+### v0.16.0 — cost and speed, measured properly
+Field measurement on a 21-item project produced a number nobody was looking at:
+**1.33 billion tokens of context re-read against 3.94 million generated — 339:1.**
+Output tokens, and therefore which model produced them, barely move a
+subscription quota. The bill is *model calls × window size at each call*. Two
+findings followed, both against the received wisdom: workers made 79% of all
+calls and 53% of all context reads, and a single implementer dispatch averaged
+**218 model calls** — mostly re-discovering a file set the orchestrator already
+knew. This release attacks calls and window size, not token share.
+
+- **Briefs hand the worker its working set.** `brief --save` now resolves the
+  item's allowed scope into the actual file list (with sizes, build dirs
+  excluded) and states the working rules: read these first, do not search the
+  repo, stop and report if you need something not listed. A worker that has to
+  find its own files burns turns, and every turn re-sends the window.
+- **The security pass must name who ran it.** `milestone security` now requires
+  `--agent`. The contract has always said dispatch it to a fresh reviewer; it was
+  absorbed in-session 22 times for 21 items (~694k orchestrator tokens). Running
+  it yourself is still allowed — `--agent self` — and recorded as absorbed.
+- **The milestone gate is a session boundary.** `milestone approve` now tells you
+  to close the session and open a new one. Forge's state is on disk precisely so
+  a cold session resumes; carrying one session across milestones re-sends an
+  ever-larger window on every turn.
+- **Verify prints one line per passing check** (default). The full output still
+  lands in `work.json` — evidence is unchanged, this is stdout only. Tool results
+  were 29–47% of the orchestrator's window. `options.verifyVerbose true` restores
+  the old shape.
+- **The measurements themselves.** `forge usage` reports context re-read, the
+  context:output ratio, model calls, per-DONE-item calls/context/output, and
+  **calls per worker dispatch** (median, p90, max, and the heaviest items by id —
+  a dispatch far past the median is exploring, not building). `forge usage
+  --baseline --label "..."` records today's totals; every later run reports what
+  work done *since then* cost per item, and the percentage change. `forge stats`
+  carries the same headline plus a new **clean-run rate** (one start, zero failed
+  attempts, zero failed verify runs) beside first-pass. The dashboard gets an
+  efficiency strip with the same numbers.
 
 ### v0.15.3 — read the documents where you are
 - **Briefs and spec files open in a reader panel** instead of sending you to a

@@ -164,6 +164,11 @@ blocked-with-reason / failed-with-diagnosis).
 - `/forge:usage` — observed tokens by model, orchestrator vs workers, dispatches tied to items,
   output tokens since last state change (drift detector). Read from Claude Code session logs;
   never estimated.
+  v0.16: an efficiency strip — context re-read per DONE item, model calls per item,
+  and calls per worker dispatch (median/p90/max). These, not token share by model,
+  are what a subscription quota actually spends: context is re-sent on every call,
+  measured at 339 tokens re-read per token generated. `forge usage --baseline`
+  records a line in the sand; later runs report what work since then cost per item.
   v0.15.3: briefs and spec files open in a reader panel (rendered markdown, with
   open/download/open-folder for the original; documents over 48KB stay links), and
   the quick filters are gate-aware — "Needs me" includes every item of a milestone
@@ -250,7 +255,8 @@ verify: `--artifact`, `--skip-baseline --reason`; add/update: `--criterion "desc
 `--deps`, `--milestone`, `--component`, `--allowed`, `--forbidden`, `--mock`; update requires
 `--reason` when criteria change after failures; cancel: `--reason`, `--dependents drop|cancel`) ·
 `brief <id> [--save]` (--save → forge/briefs/<id>.md, completed in place, linked from the
-dashboard) · `worker run <id> [--model --max-turns]` (v0.15: execute an IN_PROGRESS item with an
+dashboard; v0.16: the brief resolves the item's allowed scope into the actual file list and
+tells the worker not to search the repo) · `worker run <id> [--model --max-turns]` (v0.15: execute an IN_PROGRESS item with an
 API worker on an OpenRouter/OpenAI-compatible model — reads the saved brief; writes only inside
 the item's allowed scope; runs only configured verify commands; records an `api` dispatch with
 turns + token counts; key from env `OPENROUTER_API_KEY` or `providers.keyEnv`, never stored;
@@ -258,7 +264,7 @@ turns + token counts; key from env `OPENROUTER_API_KEY` or `providers.keyEnv`, n
 escalation) · `milestone list|security|approve|reopen` · `decision add "title" [--authority
 human|forge --decision --why]` · `discovery add "title" [--evidence --impact --affects]` ·
 `baseline capture|check` · `component add|update <id> [--name --kind --route --mock --doc] |
-list` · `status` · `dashboard` · `stats` · `usage [--write]` · `session status|takeover
+list` · `status` · `dashboard` · `stats` (first-pass + clean-run + efficiency) · `usage [--write]` · `session status|takeover
 [--force]` · `trace [--refusals|--hooks|--last N]` · `doctor` · `hook session-start|pretooluse|
 stop` (plugin internal).
 
@@ -266,7 +272,9 @@ Config: `verify.test|lint|typecheck|security|…` (all run in every verify) · `
 per-milestone|end-only` · `options.security off` · `options.protect "p1/,p2/"` ·
 `options.concurrency N` (max items in flight; default 1 = serial; raise only with disjoint
 scopes and the parallel-dispatch rules) · `options.scopeExempt "a/,b/"` (whitelist-exempt dirs;
-default forge/,spec/,docs/; *.md always exempt) · `options.usageAuto` (false stops the automatic token-snapshot refresh) · `options.graphify` · `options.web` ·
+default forge/,spec/,docs/; *.md always exempt) · `options.usageAuto` (false stops the automatic token-snapshot refresh) ·
+`options.verifyVerbose` (true restores full per-check output on stdout; the evidence in
+work.json is always complete) · `options.graphify` · `options.web` ·
 `specDir` · `phase spec|build` · `providers.model "<id>"` + `providers.url` (default
 https://openrouter.ai/api/v1) + `providers.keyEnv` (default OPENROUTER_API_KEY) +
 `providers.maxTurns` (default 24) — API workers, v0.15.
