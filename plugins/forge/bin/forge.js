@@ -90,7 +90,7 @@ function out(msg) { process.stdout.write(msg + '\n'); }
 
 function loadConfig() { return readJson(CONFIG_FILE, null); }
 function loadWork() { if (MUTATING) acquireWorkLock(); return readJson(WORK_FILE, { schema: 1, items: {}, order: [] }); }
-function saveWork(w) { writeJson(WORK_FILE, w); regenDashboard(); }
+function saveWork(w) { ensureMilestones(w); writeJson(WORK_FILE, w); regenDashboard(); }
 
 // -- state-write lock (v0.12): serialise load→mutate→save across processes ---
 // Two concurrent forge invocations doing read-modify-write on work.json would
@@ -104,7 +104,7 @@ const MUTATING = (() => {
   const c = process.argv[2] || '', s = process.argv[3] || '';
   if (c === 'init') return true;
   if (c === 'task') return !['list', 'show', ''].includes(s);
-  if (c === 'milestone') return ['security', 'approve', 'reopen'].includes(s);
+  if (c === 'milestone') return ['security', 'approve', 'reopen', 'add', 'update', 'move'].includes(s);
   if (c === 'component') return ['add', 'update'].includes(s);
   return false;
 })();
@@ -608,7 +608,11 @@ function generateDashboard() {
   }
 
   const actM = activeMilestone(w);
-  const milestoneBlocks = Object.entries(byMilestone).map(([m, items]) => {
+  // v0.16.2: blocks follow the explicit milestone order, not item insertion order
+  const mOrder = ensureMilestones(w);
+  const byMilestoneOrdered = [...mOrder.filter(m => byMilestone[m]).map(m => [m, byMilestone[m]]),
+    ...Object.entries(byMilestone).filter(([m]) => !mOrder.includes(m))];
+  const milestoneBlocks = byMilestoneOrdered.map(([m, items]) => {
     const gate = (w.gates || {})[m];
     const allClosed = items.every(x => ['DONE', 'CANCELLED'].includes(x.t.status));
     const gateChip = m === '(no milestone)' ? '' :
@@ -665,6 +669,7 @@ function generateDashboard() {
         <div class="row"><span class="k">Verification</span><span class="vl">${lastV
           ? `${lastV.passed ? 'passed' : 'failed'} · ${esc(lastV.ts.slice(0, 16).replace('T', ' '))}${lastV.durationMs ? ` · ran ${fmtD(lastV.durationMs)}` : ''}${lastV.tree ? ' · tree-bound ✓' : ''}`
           : '<span class="mut">never run</span>'}</span></div>
+        ${t.commits ? `<div class="row"><span class="k">Commits</span><span class="vl"><code title="git log ${esc(t.commits.base)}..${esc(t.commits.head)}">${esc(t.commits.base.slice(0, 7))}..${esc(t.commits.head.slice(0, 7))}</code> · ${t.commits.count === null ? '?' : t.commits.count} landed while in flight${t.commits.uncommitted ? ' · <span class="mut">work was uncommitted at DONE</span>' : ''}</span></div>` : ''}
         ${fails ? `<div class="row"><span class="k">Attempts</span><span class="vl">${fails} failed — a third identical retry is refused</span></div>` : ''}
         ${evid}
       </div>`;
@@ -707,7 +712,9 @@ function generateDashboard() {
     // v0.15: component chips removed from milestone headers (user feedback: pure noise at
     // real-project density — components remain on item cards, the map, and the rail dots)
     const gateState = m === '(no milestone)' ? 'none' : (gate && gate.approved ? 'approved' : allClosed ? 'awaiting' : 'pending');
-    return `<details class="sec sub"${openAttr} data-gate="${gateState}" data-m="${esc(m)}"><summary>${esc(m)} <span class="mut">${done}/${items.length} done</span> ${gateChip}<span class="mcount"></span></summary>
+    const mName = milestoneName(w, m);
+    const mc = (gate || {}).commits;
+    return `<details class="sec sub"${openAttr} data-gate="${gateState}" data-m="${esc(m)}"><summary>${esc(m)}${mName ? ` <b>${esc(mName)}</b>` : (m === '(no milestone)' ? '' : ' <span class="mut">(unnamed)</span>')} <span class="mut">${done}/${items.length} done</span> ${gateChip}${mc ? ` <span class="mut" title="git log ${esc(mc.base)}..${esc(mc.head)}">· ${esc(mc.base.slice(0, 7))}..${esc(mc.head.slice(0, 7))} (${mc.count})</span>` : ''}<span class="mcount"></span></summary>
       <div class="mgb">${rows}</div></details>`;
   }).join('');
 
@@ -951,7 +958,7 @@ function generateDashboard() {
         const sym = g2 && g2.approved ? '✓' : complete ? '!' : String(i + 1);
         const label = cls === 'awaitg' ? 'your review' : cls === 'done' ? `${doneN}/${ids.length} · gate ✓` : `${doneN}/${ids.length} items`;
         const mc = [...new Set(ids.map(id => w.items[id].component).filter(Boolean))].slice(0, 4);
-        return `<a class="mnode ${cls}" href="#work"><span class="mdot">${sym}</span><span class="mn">${esc(m)}</span><span class="mi">${label}</span>${mc.length ? `<span class="cdots">${mc.map(c => `<i style="background:${kindColor[(comps[c] || {}).kind] || '#57606f'}"></i>`).join('')}</span>` : ''}</a>`;
+        return `<a class="mnode ${cls}" href="#work"><span class="mdot">${sym}</span><span class="mn">${esc(m)}</span>${milestoneName(w, m) ? `<span class="mi">${esc(milestoneName(w, m))}</span>` : ''}<span class="mi">${label}</span>${mc.length ? `<span class="cdots">${mc.map(c => `<i style="background:${kindColor[(comps[c] || {}).kind] || '#57606f'}"></i>`).join('')}</span>` : ''}</a>`;
       }).join('');
       railBlock = `<details class="sec" open id="milestones"><summary>Milestones <span class="mut">(the whole journey — every planned milestone, not a side document)</span></summary>
         <div class="railcard"><div class="railwrap"><div class="rail">${nodes}</div></div></div></details>`;
@@ -1698,14 +1705,78 @@ function depsSatisfied(w, item) {
   });
 }
 
-// F9: milestone sequence = order of first appearance; gates live in w.gates
-function milestoneSeq(w) {
-  const seq = [];
-  for (const id of w.order) {
-    const m = w.items[id].milestone;
-    if (m && !seq.includes(m)) seq.push(m);
+// v0.16.2: milestones are records, not just labels. w.milestones holds one record
+// per milestone (id, name = the feature it enables, demo) and w.milestoneOrder is
+// the explicit sequence — so milestones can be reordered for business reasons
+// without re-adding items. Projects from before v0.16.2 carry only labels: they
+// are migrated lazily, in their old first-appearance order, as UNNAMED records.
+// Readers migrate in memory; the first mutating command persists it.
+function ensureMilestones(w) {
+  if (!w.milestones) w.milestones = {};
+  if (!Array.isArray(w.milestoneOrder)) w.milestoneOrder = [];
+  for (const id of w.order || []) {
+    const m = (w.items[id] || {}).milestone;
+    if (m && !w.milestones[m]) w.milestones[m] = { id: m, name: null, demo: null, unnamed: true, created: ts(), history: [] };
+    if (m && !w.milestoneOrder.includes(m)) w.milestoneOrder.push(m);
   }
-  return seq;
+  for (const m of Object.keys(w.milestones)) if (!w.milestoneOrder.includes(m)) w.milestoneOrder.push(m);
+  return w.milestoneOrder;
+}
+function milestoneName(w, m) {
+  const r = ((w || {}).milestones || {})[m];
+  return r && r.name ? r.name : null;
+}
+function milestoneLabel(w, m) {
+  const n = milestoneName(w, m);
+  return n ? `${m} — ${n}` : m;
+}
+// A milestone is named after what it lets a user DO. Layer-shaped names are the
+// smell this release exists to remove; advisory only — names are a human call.
+const LAYER_NAME_RE = /^(foundation|foundations|setup|set-up|scaffold(ing)?|infra(structure)?|backend|frontend|database|db|schema|core|plumbing|misc(ellaneous)?|polish|cleanup|clean-up|refactor(ing)?|tech(nical)? debt|base|groundwork|bootstrap)\b/i;
+function milestoneNameWarning(name) {
+  if (!name) return null;
+  if (LAYER_NAME_RE.test(String(name).trim()))
+    return `'${name}' names a layer, not a feature. Name the milestone after what a user can do when it ships ` +
+      `(e.g. "Customers can reorder a past box"); put shared groundwork inside the first feature that needs it.`;
+  return null;
+}
+
+// F9: milestone sequence — the explicit order (v0.16.2), limited to milestones that
+// carry items, so an empty planned milestone never gates anything.
+function milestoneSeq(w) {
+  return ensureMilestones(w).filter(m => (w.order || []).some(id => w.items[id].milestone === m));
+}
+
+// v0.16.2: dependency edges that a given milestone order would break — an item
+// placed in an earlier milestone than something it depends on.
+function milestoneOrderViolations(w, order) {
+  const pos = new Map(order.map((m, i) => [m, i]));
+  const bad = [];
+  for (const id of w.order) {
+    const t = w.items[id];
+    if (!t.milestone || ['CANCELLED'].includes(t.status)) continue;
+    for (const d of t.deps || []) {
+      const dep = w.items[d];
+      if (!dep || !dep.milestone || dep.status === 'CANCELLED' || dep.status === 'DONE') continue;
+      if (pos.get(dep.milestone) > pos.get(t.milestone)) bad.push({ item: id, itemM: t.milestone, dep: d, depM: dep.milestone });
+    }
+  }
+  return bad;
+}
+function milestoneStarted(w, m) {
+  return w.order.some(id => w.items[id].milestone === m && ['IN_PROGRESS', 'DONE'].includes(w.items[id].status));
+}
+
+// v0.16.2: the commit range a milestone or item spans. Forge does not commit; it
+// records what HEAD was, so plan and history can be joined afterwards.
+function gitHead() {
+  const r = run('git rev-parse HEAD', { timeout: 10000 });
+  return r.exit === 0 ? r.tail.trim() : null;
+}
+function commitRange(base, head) {
+  if (!base || !head) return null;
+  const c = run(`git rev-list --count ${base}..${head}`, { timeout: 20000 });
+  return { base, head, count: c.exit === 0 ? parseInt(c.tail, 10) || 0 : null };
 }
 
 function milestoneComplete(w, m) {
@@ -1820,6 +1891,15 @@ const commands = {
             check('component map', untaggedPf === 0,
               untaggedPf ? `${untaggedPf} work item(s) not tagged to a component — the project map is incomplete (forge task update <id> --component <c>)` : 'all items tagged', 'warning');
         }
+        // v0.16.2: a milestone is named after the feature it enables
+        {
+          const wPf2 = readJson(WORK_FILE, { items: {}, order: [] });
+          const seqPf = milestoneSeq(wPf2);
+          const unnamedPf = seqPf.filter(m => !milestoneName(wPf2, m));
+          if (seqPf.length)
+            check('milestone names', unnamedPf.length === 0,
+              unnamedPf.length ? `${unnamedPf.length} milestone(s) unnamed (${unnamedPf.slice(0, 6).join(', ')}${unnamedPf.length > 6 ? ', …' : ''}) — name each after the feature it enables: forge milestone update <id> --name "..."` : 'all milestones named', 'warning');
+        }
         // v0.8: deterministic security scanning belongs in the verify path
         if ((cfg.options || {}).security !== 'off')
           check('security check', !!(cfg.verify || {}).security,
@@ -1900,6 +1980,14 @@ const commands = {
         }
       }
       out(`Created ${item.id}: ${item.title}`);
+      {
+        const mr = (w.milestones || {})[w.items[item.id].milestone];
+        if (mr && mr.unnamed && !w.order.some(id2 => id2 !== item.id && w.items[id2].milestone === mr.id))
+          out(`NOTE: milestone '${mr.id}' was not registered — created UNNAMED. Name it after the feature it enables:\n` +
+              `  forge milestone update ${mr.id} --name "<what a user can do when it ships>" --demo "<how to try it>"`);
+        for (const v of milestoneOrderViolations(w, ensureMilestones(w)).filter(v => v.item === item.id))
+          out(`MILESTONE-ORDER WARNING: '${item.id}' (${v.itemM}) depends on '${v.dep}', which sits in a LATER milestone (${v.depM}) — it cannot start until that gate. Move one of them.`);
+      }
       if (!w.items[item.id].component)
         out(`WARNING: '${item.id}' has no --component tag — the dashboard project map cannot place it. Tag it: forge task update ${item.id} --component <id>`);
       for (const wmsg of itemShapeWarnings(w.items[item.id])) out(`ITEM-SHAPE WARNING: ${wmsg}`);
@@ -1983,6 +2071,8 @@ const commands = {
       // 1.2/F5: red-first — record each criterion check's pre-work result
       item.preState = item.criteria.map(c => c.check ? { desc: c.desc, exit: run(c.check).exit } : null);
       item.startTree = treeState();
+      // v0.16.2: HEAD at the first start — the lower bound of this item's commit range
+      if (!item.commitBase) item.commitBase = gitHead();
       const alreadyGreen = item.preState.filter(p => p && p.exit === 0);
       item.status = 'IN_PROGRESS';
       item.blockReason = null;
@@ -2065,6 +2155,14 @@ const commands = {
             `or the checks are vacuous (forge task update ${item.id} --criterion-remove/--criterion-add --reason "...").`);
       item.status = 'DONE';
       item.attempts.push({ ts: ts(), outcome: 'passed', note: opt('note') || null });
+      // v0.16.2: the commits that landed while this item was in flight. Forge does not
+      // commit; if the work is still uncommitted at DONE the range is empty and the
+      // item's changes will surface in the milestone range instead.
+      {
+        const r = commitRange(item.commitBase, gitHead());
+        // Forge's own state churns on every command, so it is excluded from "uncommitted".
+        if (r) { r.uncommitted = !!run(`git status --porcelain -- . ':(exclude)forge'`, { timeout: 20000 }).tail.trim(); item.commits = r; }
+      }
       item.updated = ts();
       saveWork(w);
       out(`${item.id} → DONE (verified ${v.ts})`);
@@ -2075,7 +2173,7 @@ const commands = {
       // F9: surface the gate the moment a milestone completes
       if (item.milestone && milestoneComplete(w, item.milestone) && !((w.gates || {})[item.milestone] || {}).approved
           && ((loadConfig() || {}).options || {}).gates !== 'end-only')
-        out(`\nMILESTONE '${item.milestone}' IS COMPLETE and now awaits human review.\n` +
+        out(`\nMILESTONE '${milestoneLabel(w, item.milestone)}' IS COMPLETE and now awaits human review.\n` +
             `Demo it to the user, collect their verdict, AND ask: "anything you want to change or add before the next milestone?"\n` +
             `— their answer becomes decisions + work-graph updates. Then: forge milestone approve ${item.milestone} --note "..."\n` +
             `Items in later milestones will refuse to start until then.\n` +
@@ -2186,6 +2284,9 @@ const commands = {
       item.updated = ts();
       saveWork(w);
       out(`${item.id} updated:\n` + changes.map(c => `  - ${c}`).join('\n'));
+      if (opt('milestone') !== null || opt('deps') !== null)
+        for (const v of milestoneOrderViolations(w, ensureMilestones(w)).filter(v => v.item === item.id || v.dep === item.id))
+          out(`MILESTONE-ORDER WARNING: '${v.item}' (${v.itemM}) depends on '${v.dep}', which sits in a LATER milestone (${v.depM}).`);
       for (const wmsg of itemShapeWarnings(item)) out(`ITEM-SHAPE WARNING: ${wmsg}`);
 
     } else if (sub === 'dispatch') {
@@ -2869,17 +2970,103 @@ const commands = {
     const sub = argv[1];
     const w = loadWork();
     w.gates = w.gates || {};
+    const order = ensureMilestones(w);
     if (sub === 'list') {
       const cfg = loadConfig() || {};
       out(`Gating mode: ${(cfg.options || {}).gates || 'per-milestone'}`);
-      for (const m of milestoneSeq(w)) {
+      order.forEach((m, i) => {
+        const r = w.milestones[m];
         const items = w.order.filter(id => w.items[id].milestone === m);
         const done = items.filter(id => ['DONE', 'CANCELLED'].includes(w.items[id].status)).length;
         const g = w.gates[m];
-        const state = g && g.approved ? `APPROVED ${g.ts}${g.note ? ` — ${g.note}` : ''}`
+        const state = !items.length ? 'no items yet'
+          : g && g.approved ? `APPROVED ${g.ts}${g.note ? ` — ${g.note}` : ''}`
           : (milestoneComplete(w, m) ? 'COMPLETE — AWAITING HUMAN APPROVAL' : 'in progress');
-        out(`  ${m}: ${done}/${items.length} items · ${state}`);
+        out(`  ${String(i + 1).padStart(2)}. ${m}: ${r.name ? r.name : '(UNNAMED — forge milestone update ' + m + ' --name "...")'}`);
+        out(`      ${done}/${items.length} items · ${state}${g && g.commits ? ` · commits ${g.commits.base.slice(0, 7)}..${g.commits.head.slice(0, 7)} (${g.commits.count})` : ''}`);
+        if (r.demo) out(`      demo: ${r.demo}`);
+      });
+      const unnamed = order.filter(m => !w.milestones[m].name);
+      if (unnamed.length) out(`\n${unnamed.length} milestone(s) unnamed. A milestone is named after the feature it enables.`);
+    } else if (sub === 'add') {
+      const m = argv[2];
+      if (!m || m.startsWith('--')) die('Usage: forge milestone add <id> --name "<feature it enables>" [--demo "<how to try it>"] [--before <M> | --after <M>]');
+      if (w.milestones[m]) die(`Milestone '${m}' already exists (add is not an update): forge milestone update ${m} ...`);
+      if (!opt('name')) die(`Refused: a milestone needs --name — the feature it enables, in the user's terms ("Customers can reorder a past box").`);
+      const anchor = opt('before') || opt('after');
+      if (anchor && !w.milestones[anchor]) die(`Unknown milestone '${anchor}'. See: forge milestone list`);
+      w.milestones[m] = { id: m, name: opt('name'), demo: opt('demo') || null, created: ts(), history: [] };
+      const at = opt('before') ? order.indexOf(opt('before')) : opt('after') ? order.indexOf(opt('after')) + 1 : order.length;
+      if (anchor && at <= order.findLastIndex(x => milestoneStarted(w, x) || ((w.gates[x] || {}).approved)))
+        die(`Refused: '${m}' would sit before a milestone that has already started or been approved. New milestones go after the work in flight.`);
+      order.splice(at, 0, m);
+      saveWork(w);
+      out(`Milestone ${m} added at position ${at + 1}: ${opt('name')}`);
+      const nw = milestoneNameWarning(opt('name')); if (nw) out(`NAME WARNING: ${nw}`);
+      if (!opt('demo')) out(`Add its demo criterion — the command to run it and what to try: forge milestone update ${m} --demo "..."`);
+    } else if (sub === 'update') {
+      const m = argv[2];
+      const r = w.milestones[m];
+      if (!r) die(`Unknown milestone '${m || ''}'. See: forge milestone list`);
+      const changes = [];
+      if (opt('name') !== null) { changes.push(`name: '${r.name || ''}' → '${opt('name')}'`); r.name = opt('name'); delete r.unnamed; }
+      if (opt('demo') !== null) { changes.push(`demo updated`); r.demo = opt('demo'); }
+      if (!changes.length) die('Nothing to update: forge milestone update <id> --name "..." [--demo "..."] [--reason "..."]');
+      (r.history = r.history || []).push({ ts: ts(), change: changes.join('; '), reason: opt('reason') || null });
+      saveWork(w);
+      out(`Milestone ${m} updated:\n` + changes.map(c => `  - ${c}`).join('\n'));
+      const nw = milestoneNameWarning(r.name); if (nw && opt('name') !== null) out(`NAME WARNING: ${nw}`);
+    } else if (sub === 'move') {
+      // v0.16.2: reorder for business reasons — refused when it would break the work graph
+      const m = argv[2];
+      if (!w.milestones[m]) die(`Unknown milestone '${m || ''}'. See: forge milestone list`);
+      const target = opt('before') || opt('after');
+      if (!target || (opt('before') && opt('after'))) die(`Usage: forge milestone move <id> --before <M> | --after <M> [--pull-deps] --reason "..."`);
+      if (!w.milestones[target] || target === m) die(`Unknown or identical target milestone '${target}'.`);
+      if (!opt('reason')) die('A reorder is a product decision — record why: --reason "..."');
+      if ((w.gates[m] || {}).approved) die(`Refused: '${m}' is approved — shipped milestones are history, not plan.`);
+      if (milestoneStarted(w, m)) die(`Refused: '${m}' already has work in progress or done. Finish or split it before reordering.`);
+      const next = order.filter(x => x !== m);
+      const at = opt('before') ? next.indexOf(target) : next.indexOf(target) + 1;
+      next.splice(at, 0, m);
+      const lastLocked = next.reduce((acc, x, i) => (x !== m && (milestoneStarted(w, x) || (w.gates[x] || {}).approved)) ? i : acc, -1);
+      if (next.indexOf(m) <= lastLocked)
+        die(`Refused: '${m}' would move ahead of '${next[lastLocked]}', which has already started or been approved.\n` +
+            `Gates run in order — this would block work already in flight. Move it after '${next[lastLocked]}' instead.`);
+      let bad = milestoneOrderViolations(w, next);
+      const pulled = [];
+      if (bad.length && flag('pull-deps')) {
+        // pull every blocking dependency (transitively) into the moved milestone
+        const newPos = new Map(next.map((x, i) => [x, i]));
+        const queue = bad.filter(v => v.itemM === m).map(v => v.dep);
+        while (queue.length) {
+          const d = queue.shift();
+          const dep = w.items[d];
+          if (!dep || dep.milestone === m || ['DONE', 'CANCELLED'].includes(dep.status)) continue;
+          if (newPos.get(dep.milestone) <= newPos.get(m)) continue;
+          if (dep.status === 'IN_PROGRESS') die(`Refused: dependency '${d}' is IN_PROGRESS in '${dep.milestone}' — it cannot be pulled mid-flight.`);
+          pulled.push({ id: d, from: dep.milestone });
+          dep.milestone = m;
+          (dep.history = dep.history || []).push({ ts: ts(), change: `milestone: '${pulled[pulled.length - 1].from}' → '${m}' (pulled forward with ${m})`, reason: opt('reason') });
+          dep.updated = ts();
+          queue.push(...(dep.deps || []));
+        }
+        bad = milestoneOrderViolations(w, next);
+        if (bad.length) for (const p of pulled) { w.items[p.id].milestone = p.from; w.items[p.id].history.pop(); } // roll back (nothing is saved on refusal anyway)
       }
+      if (bad.length)
+        die(`Refused: moving '${m}' ${opt('before') ? 'before' : 'after'} '${target}' breaks ${bad.length} dependenc${bad.length === 1 ? 'y' : 'ies'}:\n` +
+            bad.slice(0, 20).map(v => `  - ${v.item} (${v.itemM}) depends on ${v.dep} (${v.depM})`).join('\n') +
+            (bad.length > 20 ? `\n  … and ${bad.length - 20} more` : '') +
+            (bad.some(v => v.itemM === m) && !flag('pull-deps')
+              ? `\nRe-run with --pull-deps to move the blocking items into '${m}' with it (recorded in each item's history),\nor re-point the dependencies first: forge task update <id> --deps ... --reason "..."`
+              : `\nThese items depend on '${m}' — move them along, or re-point their dependencies first.`));
+      w.milestoneOrder = next;
+      (w.milestones[m].history = w.milestones[m].history || []).push({ ts: ts(), change: `moved ${opt('before') ? 'before' : 'after'} ${target} (position ${next.indexOf(m) + 1})`, reason: opt('reason') });
+      saveWork(w);
+      appendMd(DECISIONS_FILE, '# Decisions log (append-only, via forge CLI)',
+        `\n### ${ts()} — Milestone '${milestoneLabel(w, m)}' reordered\n- Authority: human\n- Decision: moved ${opt('before') ? 'before' : 'after'} '${target}'${pulled.length ? `; pulled forward: ${pulled.map(p => `${p.id} (from ${p.from})`).join(', ')}` : ''}\n- Why: ${opt('reason')}\n`);
+      out(`Milestone ${m} moved to position ${next.indexOf(m) + 1}.` + (pulled.length ? `\nPulled into ${m}: ${pulled.map(p => `${p.id} (from ${p.from})`).join(', ')}` : ''));
     } else if (sub === 'security') {
       // v0.8: record the milestone security review (fresh-context reviewer over the slice's diff)
       const m = argv[2];
@@ -2920,11 +3107,23 @@ const commands = {
               `Or skip deliberately: forge milestone approve ${m} --skip-security --reason "..." — or disable for this project: forge config set options.security off`);
         }
       }
-      w.gates[m] = Object.assign({}, w.gates[m], { approved: true, ts: ts(), note: opt('note') || null, securitySkipped: secSkip });
+      // v0.16.2: the milestone's commit range — from the previous approved gate's head
+      // (contiguous ranges), else from the earliest recorded item start, to HEAD now.
+      let mBase = null;
+      { const seqA = milestoneSeq(w); for (const p of seqA.slice(0, seqA.indexOf(m)).reverse()) { const pc = (w.gates[p] || {}).commits; if (pc && pc.head) { mBase = pc.head; break; } } }
+      if (!mBase) {
+        const starts = w.order.map(id => w.items[id]).filter(t => t.milestone === m && t.commitBase)
+          .map(t => ({ b: t.commitBase, at: Date.parse((t.attempts.find(a => a.outcome === 'started') || {}).ts || 0) }))
+          .sort((a, b) => a.at - b.at);
+        if (starts.length) mBase = starts[0].b;
+      }
+      const mCommits = commitRange(mBase, gitHead());
+      w.gates[m] = Object.assign({}, w.gates[m], { approved: true, ts: ts(), note: opt('note') || null, securitySkipped: secSkip, commits: mCommits || undefined });
       saveWork(w);
       appendMd(DECISIONS_FILE, '# Decisions log (append-only, via forge CLI)',
         `\n### ${ts()} — Milestone '${m}' approved\n- Authority: human\n- Decision: milestone gate approved after human review${secSkip ? ` (SECURITY REVIEW SKIPPED: ${secSkip})` : ''}\n- Why: ${opt('note') || '(no note recorded)'}\n`);
-      out(`Milestone '${m}' approved — later milestones may now start.`);
+      out(`Milestone '${milestoneLabel(w, m)}' approved — later milestones may now start.`);
+      if (mCommits) out(`Commit range recorded: ${mCommits.base.slice(0, 7)}..${mCommits.head.slice(0, 7)} (${mCommits.count} commit(s)) — git log ${mCommits.base}..${mCommits.head}`);
       out(`📊 forge/dashboard.html now shows this milestone closed — worth a look for the user.`);
       // v0.16: the gate is the designed session boundary. Measured: the orchestrator
       // re-read 601M cached tokens across one long session because context only ever
@@ -2940,7 +3139,7 @@ const commands = {
       w.gates[m] = { approved: false, ts: ts(), note: `REOPENED: ${opt('reason')}` };
       saveWork(w);
       out(`Milestone '${m}' gate reopened: ${opt('reason')} — items in later milestones are blocked again.`);
-    } else die('Usage: forge milestone list | security <name> --note "..." | approve <name> [--note "..."] [--skip-security --reason "..."] | reopen <name> --reason "..."');
+    } else die('Usage: forge milestone list | add <id> --name "..." [--demo] [--before|--after <M>] | update <id> [--name] [--demo] | move <id> --before|--after <M> [--pull-deps] --reason "..." | security <id> --agent <a> --note "..." | approve <id> [--note "..."] [--skip-security --reason "..."] | reopen <id> --reason "..."');
   },
 
   // -- dashboard ----------------------------------------------------------------
@@ -3200,8 +3399,15 @@ const commands = {
                                          --agent is required on a launch; a --kind message inherits
                                          the agent of the launch it follows
   task block <id> --reason | cancel <id> --reason [--dependents drop|cancel]
+  milestone add <m> --name "<feature it enables>" [--demo "<how to try it>"] [--before|--after <M>]
+  milestone update <m> [--name ..] [--demo ..] [--reason ..]
+  milestone move <m> --before|--after <M> --reason ".." [--pull-deps]
+                                         v0.16.2: milestones are named feature slices in an explicit
+                                         order; a move that would break a dependency or jump ahead of
+                                         started work is refused (--pull-deps brings blockers along)
   milestone list | security <m> --agent <worker|self> --note | approve <m> [--note] | reopen <m> --reason
                                          human gates between milestones (config: options.gates per-milestone|end-only)
+                                         approve records the milestone's commit range; task done records the item's
   brief <id>                             print the brief skeleton for a work item
   worker run <id> [--model m] [--max-turns N]
                                          v0.15: execute an IN_PROGRESS item with an API worker

@@ -48,11 +48,22 @@ At **Step 7** (generate handoff artifacts), in addition to `CLAUDE.md` and
 2. **Propose the milestone cut and confirm it with the user.** Milestones
    are phases that end in something the user can personally test — a
    runnable vertical slice ("auth + create a family + see it persisted"),
-   never a horizontal layer ("database schema"). Put the walking skeleton
-   (thinnest end-to-end path) in M1 so integration risk surfaces first.
-   For each milestone, define a demo criterion: the command that runs it and
-   a short "what to try" script for the user. Present the cut as a proposal;
-   the user confirms or adjusts it — this is a product-owner decision.
+   never a horizontal layer ("database schema"). **One feature per
+   milestone, named after what it lets a user do** ("Parents can create a
+   family and see it saved") — not "Foundation", "Backend", "Polish". Prefer
+   several small feature milestones over one broad one: each ends with a
+   whole feature the user can try, and the order can then follow business
+   need. A feature too big for one milestone splits into named increments
+   ("Reorder: one click", "Reorder: scheduled"). Shared groundwork has no
+   milestone of its own — it goes inside the first feature that needs it;
+   the walking skeleton (thinnest end-to-end path) is feature #1, so
+   integration risk surfaces first. For each milestone, define a demo
+   criterion: the command that runs it and a short "what to try" script for
+   the user. Present the cut as a proposal; the user confirms or adjusts it —
+   this is a product-owner decision. Register each confirmed milestone
+   BEFORE its items: `forge milestone add M1 --name "<feature it enables>"
+   --demo "<command + what to try>"` (in order; the CLI keeps that order and
+   gates by it).
    Then ask one more either/or: stop for their testing after each milestone
    (`per-milestone`, recommended default) or run straight through
    (`end-only`)? Record it: `forge config set options.gates <choice>`.
@@ -72,7 +83,7 @@ At **Step 7** (generate handoff artifacts), in addition to `CLAUDE.md` and
    get the `design-ux` pack at build time.
 3. Convert `PLAN.md` into the work graph — **the WHOLE plan, every
    milestone**: one `forge task add` per task, in dependency order, with
-   `--deps` and `--milestone` (from the confirmed cut). Near-term items get
+   `--deps` and `--milestone` (from the confirmed cut — the registered ids). Near-term items get
    their `--allowed` file scope and full criteria now; later-milestone items
    may enter THIN (id, title, objective, milestone, deps only — criteria and
    scope are added via `task update` when their milestone approaches).

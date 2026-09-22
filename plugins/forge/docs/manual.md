@@ -61,8 +61,12 @@ stale/multiple cached versions.
 1. `mkdir app && cd app && git init && claude`; describe the product. The forge-method skill runs.
 2. Layered interview: Vision → Domain → Experience → API → Logic → Foundation. Either/or
    questions; user approves each layer gate; decisions land in `forge/decisions.md`.
-3. Milestone cut proposed and confirmed (each milestone = user-testable vertical slice; walking
-   skeleton first; demo criterion each). Gating mode: `per-milestone` (default) or `end-only`.
+3. Milestone cut proposed and confirmed (each milestone = one user-testable feature, named after
+   what it enables — `forge milestone add <id> --name ".." --demo ".."`; no "foundation"
+   milestone, groundwork rides inside the first feature; walking skeleton first; demo criterion
+   each). Reorder later by business need: `forge milestone move <id> --before|--after <M>
+   --reason ".."` — refused if it breaks a dependency (`--pull-deps` brings blockers along) or
+   jumps ahead of started work. Gating mode: `per-milestone` (default) or `end-only`.
    Products with UI: the drawn-frontend offer — one mock per key screen (Claude Design/Figma/
    photographed sketch) approved into `spec/mocks/<screen>`, referenced from 02-experience,
    approval recorded as a human decision. A mock binds intent (hierarchy, grouping, primary

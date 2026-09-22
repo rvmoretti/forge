@@ -171,14 +171,18 @@ arrives from the code; the plan is the gap between them.
    (`forge decision add "Mocks skipped: <scope>" --authority human`).
 
 6. **Milestone cut + work graph — apply the forge-method Step 7 machinery**
-   (milestone proposal confirmed by the user, demo criterion each,
+   (milestone proposal confirmed by the user — one feature per milestone,
+   named after what it enables, registered with `forge milestone add`
+   before its items; demo criterion each,
    red-first machine-checkable criteria, `--deps`/`--milestone`/
    `--component`, gates choice, preflight). **The WHOLE destination enters
    the graph at cut time** — later-milestone items as thin items (id,
    title, objective, milestone, deps; criteria and scope via `task update`
    when their milestone approaches). A backlog parked in a document is a
    spec-drift bug. Seed the component registry first (`forge component add`
-   per subsystem the goals touch) so every item can be tagged. Two defaults to propose:
+   per subsystem the goals touch) so every item can be tagged. No
+   "foundation" milestone: groundwork goes inside the first feature that
+   needs it. Two defaults to propose:
    the walking skeleton among the MISSING features first (integration risk
    surfaces early), and half-done features in early milestones (the messiest
    code exercises the baseline machinery first). In the same pass, set

@@ -28,7 +28,9 @@ in this phase. The phase ends when the spec gates and you generate:
 graph (`forge task add` per PLAN item, each with acceptance criteria drawn
 from the spec — every criterion with a machine check wherever possible).
 **The work graph carries the WHOLE project**: every planned item of every
-milestone goes in at cut time — later milestones as thin items (id, title,
+milestone goes in at cut time — each milestone registered first with the
+feature it enables (`forge milestone add <id> --name "..." --demo "..."`),
+then its items; later milestones as thin items (id, title,
 objective, `--milestone`, `--deps`; criteria and scope are added via
 `task update` when their milestone approaches). A backlog parked in a
 document instead of the graph is a spec-drift bug: invisible to every gate,
@@ -343,8 +345,20 @@ what you found, the options, your recommendation, the consequences. Never ask
   fold it in at the next milestone gate (see step 6 — you ASK for changes
   there); a new destination or roadmap shift → re-run the brownfield §7
   intake for the delta (gap analysis on the new goals, spec updated, new
-  milestones cut). Never make the user feel a change is off-process — the
-  process exists to absorb change safely.
+  milestones cut); a change of PRIORITY between features → reorder with
+  `forge milestone move <id> --before|--after <M> --reason "..."` (the CLI
+  refuses a move that breaks a dependency or jumps ahead of started work;
+  `--pull-deps` brings blocking items along). Never make the user feel a
+  change is off-process — the process exists to absorb change safely.
+- **Name milestones after the feature they enable.** When a project has
+  unnamed milestones (migrated from before v0.16.2, or created implicitly by
+  `task add --milestone`), propose names at the next gate and record them:
+  `forge milestone update <id> --name "..." --demo "..."`.
+- **Commits.** Forge records commit ranges — `task done` stores the commits
+  that landed while the item was in flight, `milestone approve` the
+  milestone's range — so plan and history can be joined. Ranges are only as
+  precise as the committing: when you commit, put the milestone and item ids
+  in the message (`feat(M3/T42): ...`).
 
 ## Session discipline
 

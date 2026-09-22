@@ -1309,3 +1309,101 @@ test('usage withholds the per-model split when the baseline predates it', () => 
   assert.match(r.out, /per-model split unavailable/);
   assert.doesNotMatch(r.out, /By model in this segment/);
 });
+
+// --- v0.16.2: milestones as named feature slices ------------------------------
+
+function work() { return JSON.parse(fs.readFileSync(path.join(dir, 'forge', 'state', 'work.json'), 'utf8')); }
+function commitAll(msg) {
+  spawnSync('git', ['add', '-A', '--', '.', ':(exclude)forge'], { cwd: dir });
+  spawnSync('git', ['commit', '-qm', msg], { cwd: dir });
+}
+
+test('label-only milestones migrate as unnamed records in first-appearance order', () => {
+  addItem('A', ['--milestone', 'M2']);
+  addItem('B', ['--milestone', 'M1']);
+  const w = work();
+  assert.deepStrictEqual(w.milestoneOrder, ['M2', 'M1']);
+  assert.strictEqual(w.milestones.M1.unnamed, true);
+  const pf = forge(['preflight']);
+  assert.match(pf.out, /milestone\(s\) unnamed/);
+  const r = forge(['milestone', 'update', 'M1', '--name', 'Customers can reorder']);
+  assert.strictEqual(r.code, 0);
+  assert.strictEqual(work().milestones.M1.name, 'Customers can reorder');
+  assert.strictEqual(work().milestones.M1.unnamed, undefined);
+});
+
+test('milestone add requires a name, warns on layer names, and places by anchor', () => {
+  assert.notStrictEqual(forge(['milestone', 'add', 'M1']).code, 0);
+  assert.strictEqual(forge(['milestone', 'add', 'M1', '--name', 'Sign up and see your box']).code, 0);
+  const layer = forge(['milestone', 'add', 'M0', '--name', 'Foundation', '--before', 'M1']);
+  assert.strictEqual(layer.code, 0);
+  assert.match(layer.out, /names a layer, not a feature/);
+  assert.deepStrictEqual(work().milestoneOrder, ['M0', 'M1']);
+});
+
+test('an empty named milestone never gates later work', () => {
+  forge(['milestone', 'add', 'M1', '--name', 'Planned later']);
+  addItem('X', ['--milestone', 'M2']);
+  const r = forge(['task', 'start', 'X']);
+  assert.strictEqual(r.code, 0, r.out);
+});
+
+test('milestone move changes gate order; refuses a move that breaks a dependency', () => {
+  addItem('A', ['--milestone', 'M1']);
+  addItem('B', ['--milestone', 'M2']);
+  addItem('C', ['--milestone', 'M3', '--deps', 'B']);
+  // needs a reason
+  assert.notStrictEqual(forge(['milestone', 'move', 'M3', '--before', 'M1']).code, 0);
+  // M3 ahead of M2 breaks C -> B
+  const bad = forge(['milestone', 'move', 'M3', '--before', 'M2', '--reason', 'sales asked']);
+  assert.notStrictEqual(bad.code, 0);
+  assert.match(bad.out, /C \(M3\) depends on B \(M2\)/);
+  assert.match(bad.out, /--pull-deps/);
+  assert.deepStrictEqual(work().milestoneOrder, ['M1', 'M2', 'M3']);
+  // independent move is fine and takes effect in gating
+  addItem('D', ['--milestone', 'M4']);
+  assert.strictEqual(forge(['milestone', 'move', 'M4', '--before', 'M1', '--reason', 'launch partner needs it']).code, 0);
+  assert.deepStrictEqual(work().milestoneOrder, ['M4', 'M1', 'M2', 'M3']);
+  const blocked = forge(['task', 'start', 'A']);
+  assert.notStrictEqual(blocked.code, 0);
+  assert.match(blocked.out, /milestone 'M4' still has unfinished items/);
+  assert.match(fs.readFileSync(path.join(dir, 'forge', 'decisions.md'), 'utf8'), /reordered/);
+});
+
+test('milestone move --pull-deps brings blocking items along, recorded in history', () => {
+  addItem('A', ['--milestone', 'M1']);
+  addItem('B', ['--milestone', 'M2']);
+  addItem('C', ['--milestone', 'M3', '--deps', 'B']);
+  const r = forge(['milestone', 'move', 'M3', '--before', 'M2', '--pull-deps', '--reason', 'feature first']);
+  assert.strictEqual(r.code, 0, r.out);
+  const w = work();
+  assert.strictEqual(w.items.B.milestone, 'M3');
+  assert.match(w.items.B.history.pop().change, /pulled forward with M3/);
+  assert.deepStrictEqual(w.milestoneOrder, ['M1', 'M3', 'M2']);
+});
+
+test('milestone move refuses to jump ahead of started work', () => {
+  addItem('A', ['--milestone', 'M1']);
+  addItem('B', ['--milestone', 'M2']);
+  forge(['task', 'start', 'A']);
+  const r = forge(['milestone', 'move', 'M2', '--before', 'M1', '--reason', 'x']);
+  assert.notStrictEqual(r.code, 0);
+  assert.match(r.out, /already started or been approved/);
+});
+
+test('task done and milestone approve record commit ranges', () => {
+  commitAll('base'); touch('seed.txt'); commitAll('seed');
+  addItem('A', ['--milestone', 'M1']);
+  forge(['task', 'start', 'A']);
+  touch('a.txt'); commitAll('M1/A: work');
+  assert.strictEqual(forge(['task', 'verify', 'A']).code, 0);
+  assert.strictEqual(forge(['task', 'done', 'A']).code, 0);
+  const it = work().items.A;
+  assert.ok(it.commits && it.commits.base && it.commits.head);
+  assert.strictEqual(it.commits.count, 1);
+  assert.strictEqual(it.commits.uncommitted, false);
+  forge(['milestone', 'security', 'M1', '--agent', 'forge-reviewer', '--note', 'clean']);
+  const ap = forge(['milestone', 'approve', 'M1', '--note', 'ok']);
+  assert.match(ap.out, /Commit range recorded: .*\(1 commit/);
+  assert.strictEqual(work().gates.M1.commits.count, 1);
+});

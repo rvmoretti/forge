@@ -166,6 +166,33 @@ memory.
 
 ## Changelog
 
+### v0.16.2 — milestones are named features, in an order you can change
+A milestone used to be a label on its items, ordered by whichever item was
+added first. It could not carry a name, a demo, or a position of its own, so
+the plan read as the work graph's shape rather than the product's, and
+reordering for business reasons meant re-adding items.
+
+- **Milestones are records.** `forge milestone add <id> --name "<feature it
+  enables>" --demo "<how to try it>" [--before|--after <M>]` and `milestone
+  update`. The name is what a user can do when it ships; a layer-shaped name
+  ("Foundation", "Backend", "Polish") gets a warning, and the method now asks
+  for one feature per milestone with groundwork inside the first feature that
+  needs it.
+- **Explicit order, safe reordering.** `forge milestone move <id>
+  --before|--after <M> --reason ".."` changes the gate order. It is refused
+  when an item would sit in an earlier milestone than something it depends
+  on (the blocking edges are listed; `--pull-deps` moves the blockers along,
+  recorded in each item's history) or when it would jump ahead of started or
+  approved work. Every move is a decision-log entry.
+- **Plan ↔ history.** `task done` records the commit range that landed while
+  the item was in flight (and whether work was still uncommitted);
+  `milestone approve` records the milestone's range, contiguous with the
+  previous gate. Both show on the dashboard and in `milestone list`. Forge
+  still does not commit.
+- **Existing projects migrate on their own.** Label-only milestones become
+  records in their old order, marked unnamed; `preflight` warns until each is
+  named. Nothing about gating changes until you move something.
+
 ### v0.16.1 — a segment that spans a model change can still be read
 Measuring one change at a time only works if you can tell when you didn't.
 A project whose orchestrator model changes part-way through a measured segment

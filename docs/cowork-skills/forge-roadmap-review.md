@@ -62,6 +62,12 @@ automatically from disk.
    - changed → `$FORGE task update <id> --objective/--milestone/--deps/--title ...`
      (with `--reason` when criteria change);
    - removed → `$FORGE task cancel <id> --reason ... [--dependents drop|cancel]`;
+   - a new feature → its own milestone: `$FORGE milestone add <id> --name "<what a
+     user can do>" --demo "..." [--before|--after <M>]`, then its items;
+   - priority change → `$FORGE milestone move <id> --before|--after <M> --reason ".."`
+     (refused if it breaks a dependency or jumps ahead of started work — show the
+     user the blocking items; `--pull-deps` moves them along if they agree);
+   - unnamed milestones → propose names: `$FORGE milestone update <id> --name ".."`;
    - then update the affected `spec/` layer text as `[CONFIRMED]` intent, citing the
      decision.
 4. **Mockups.** Create or edit them here (Claude Design / canvas / image tools). Save

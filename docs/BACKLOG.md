@@ -240,6 +240,15 @@ it as significant spend with no state movement. Two defects, both observed:
 
 ---
 
+# Shipped outside the programme: v0.16.2
+
+Feature-named milestone records, explicit order with dependency-checked
+`milestone move`, and commit ranges on items and gates. Not a cost change by
+design — but more, smaller milestones mean more gates, and each gate is a
+security pass, a demo, an approval and (item P1.1) a session boundary. Read
+gate count per project alongside the v0.17 numbers; the gate packet (P2.2) is
+what makes small milestones cheap.
+
 # Performance programme (v0.17 candidates)
 
 Source: an external measured analysis of one 28-item project (session transcripts,
