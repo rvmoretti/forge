@@ -91,7 +91,7 @@ an explicitly recorded external source, and each is covered by tests:
 | design-ux pack + mocks-as-spec + `--artifact` | v0.9.0 | original METHOD's drawn frontend, restored | pack + method Step 7 + `verify --artifact` |
 | Component registry + dashboard project map | v0.10.0 | user's visual-map requirement | CLI `component` + generated dashboard |
 | Brownfield entry fork (bounded change / destination) | v0.11.0 | user's two-starting-points requirement | forge-brownfield §0 + §7 |
-| State-write lock (work.lock, PID-liveness stale-break) | v0.12.0 | external parallelism review of project-b: `saveWork` read-modify-write race | CLI `acquireWorkLock` around every mutating command |
+| State-write lock (work.lock, PID-liveness stale-break) | v0.12.0 | external parallelism review of a field project: `saveWork` read-modify-write race | CLI `acquireWorkLock` around every mutating command |
 | Required + whitelist-enforced `scope.allowed` | v0.12.0 | same review: 0/87 items carried a scope; whitelist was inert | `task start` refusal + PreToolUse whitelist (union, exempt dirs) |
 | Concurrency gate (`options.concurrency`, disjoint scopes) | v0.12.0 | same review: 4-way unguarded worker bursts observed | `task start` cap + overlap refusal; contract parallel-dispatch section |
 | Dispatch records (`task dispatch`, incl. mid-flight messages) | v0.12.0 | same review: dispatch↔item tie by inference is fragile; 30 unaudited SendMessages | CLI `task dispatch` + contract step 3; `usage` reads state first |
@@ -105,7 +105,7 @@ an explicitly recorded external source, and each is covered by tests:
 | Dashboard redesign (branded shell, needs-you banner, KPI + pace/forecast projection, milestone rail, design strip) + `--mock` item field | v0.14.0 | user: dashboard unusable/unattractive; mocks invisible; no elapsed/remaining view | generated dashboard (projection; forecast labeled and computed only from observed pace) + `task --mock` |
 | API workers, providers phase A (`worker run`: scope-sandboxed read/write/verify loop over OpenAI-compatible providers; `api` dispatch records with token counts) | v0.15.0 | user: workers locked to one vendor/subscription; measured improvement zero because levers never fired | CLI `worker run` + contract "API workers" section; sandbox enforced in code |
 | Provider-failure taxonomy (`fail --kind provider` exempt from escalation + brief history) | v0.15.0 | vNext review seed; field: platform errors would burn the retry ladder | CLI `task fail --kind` + `failedAttempts()` filter |
-| Item-shape guard (warn: >8 globs, >6 criteria, decision-shaped criteria) + stall rule (diagnose-and-narrow before decompose) | v0.15.0 | field (project-b T55): mega-item stalled 55min; narrowed retry finished in 24min; a smuggled decision criterion had to be removed mid-flight | CLI warnings at add/update/start + contract build-loop stall rule |
+| Item-shape guard (warn: >8 globs, >6 criteria, decision-shaped criteria) + stall rule (diagnose-and-narrow before decompose) | v0.15.0 | field: a 17-glob mega-item stalled 55min; narrowed retry finished in 24min; a smuggled decision criterion had to be removed mid-flight | CLI warnings at add/update/start + contract build-loop stall rule |
 | Brief carries the resolved file list + no-exploration working rules | v0.16.0 | field: one implementer dispatch averaged 218 model calls; context is re-sent per call, so turns are the bill | `resolveScopeFiles()` in `briefLines()` + contract step 2 |
 | `milestone security --agent` required (self allowed, recorded as absorbed) | v0.16.0 | field: security pass absorbed in-session 22× for 21 items (~694k tokens) despite the contract saying dispatch | CLI refusal + gate record carries the agent |
 | Milestone gate declared a session boundary | v0.16.0 | field: 601M cached tokens re-read by one orchestrator across one long session | `milestone approve` instruction + contract step 6 |
@@ -119,6 +119,7 @@ an explicitly recorded external source, and each is covered by tests:
 | `task dispatch --agent` required on launch; messages inherit the launch agent | v0.15.2 | user: phantom `(agent not named)` row with 0 dispatches and no timings | CLI refusal + render-time attribution for legacy records |
 | Dashboard finish pass (item rows + drawers, milestone group cards, custom carets, quick filters, charted telemetry, map grid, journal timeline, system status rows) | v0.15.1 | user: generated dashboard visibly less polished than the approved mockup — "small details that make a lot of difference" | generated dashboard (structure locked by a regression test) |
 | Milestone headers lose component chip rows | v0.15.0 | user: pills at real-project density are noise; components already on cards/map/rail | generated dashboard |
+| Per-model split of a measured segment + entangled-model warning | v0.16.1 | user wants a cheaper orchestrator model mid-programme without losing attribution; v0.16's own delta was already unreadable because four models had run on the main thread | `usage --baseline` snapshot, `usage` output, tests 77–78 |
 
 Still deferred, with triggers: the maintain loop (monitoring bands →
 auto-intent) until a Forge project has production traffic; continuous evals
@@ -127,5 +128,5 @@ worktree orchestration + integration items (build only after the §8
 validation protocol on Changes 1–4 shows the concurrency gain is real —
 worktrees are the expensive change); the 9-second-review investigation
 (review-before-verify vs review-absent — determination to be recorded as a
-decision against project-b's transcripts, then a contract amendment or an
+decision against a field project's transcripts, then a contract amendment or an
 observable review record).

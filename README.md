@@ -166,6 +166,27 @@ memory.
 
 ## Changelog
 
+### v0.16.1 — a segment that spans a model change can still be read
+Measuring one change at a time only works if you can tell when you didn't.
+A project whose orchestrator model changes part-way through a measured segment
+reports a per-item delta that belongs to neither the code nor the model, and
+nothing in v0.16.0 said so. This release makes the mix visible and the
+entanglement loud.
+
+- **`usage --baseline` records per-model counters.** Calls, context re-read and
+  output are carried per model and per thread, so any two baselines can be
+  diffed by model, not just in total.
+- **`usage` breaks the segment down by model.** Each model's share of calls,
+  context and output since the baseline, plus context-per-call — the number that
+  actually tracks quota, and the one that exposes an orchestrator carrying a
+  near-full window into every call.
+- **An entangled segment is flagged.** Two orchestrator models inside one
+  segment prints a warning that the delta cannot be credited to either the code
+  or the model change.
+- **A pre-v0.16.1 baseline withholds the split** rather than diffing against
+  absent counters and reporting the whole project as the segment. Re-baseline to
+  enable it.
+
 ### v0.16.0 — cost and speed, measured properly
 Field measurement on a 21-item project produced a number nobody was looking at:
 **1.33 billion tokens of context re-read against 3.94 million generated — 339:1.**
@@ -298,8 +319,8 @@ items go to fast, cheap API models:
   the exact shapes that stalled a real worker for an hour in the field.
 - **Stall rule in the contract** — a stalled worker means diagnose-and-narrow
   first; decompose only when no narrowing is possible (calibrated by the
-  project-b T55 case, where a diagnosis-narrowed retry finished in 24 minutes
-  what a broad brief couldn't in 55).
+  a field case where a diagnosis-narrowed retry finished in 24 minutes what a
+  broad brief couldn't in 55).
 - **Dashboard**: milestone headers no longer carry component chip rows
   (field feedback: pure noise at real-project density) — components remain
   on item cards, the project map, and the milestone rail dots.
@@ -400,8 +421,8 @@ and per-agent token attribution the logs don't expose is shown as absent,
 never estimated. 2 new tests (46 total).
 
 ### v0.12.0 — guarded parallelism: the safety layer
-Origin: an external empirical review of a real Forge project (project-b, 87
-items) showed multi-worker bursts already happening unguarded, every item
+Origin: an external empirical review of a real Forge project (87 items)
+showed multi-worker bursts already happening unguarded, every item
 scope living only in brief prose, and a read-modify-write race on the work
 graph. v0.12 makes the implicit explicit and the unsafe refused — before any
 speed is chased:

@@ -1245,3 +1245,67 @@ test('stats reports clean-run rate alongside first-pass', () => {
   assert.match(r.out, /Clean-run rate:  1\/2/);
   assert.match(r.out, /one start, zero failed attempts, zero failed verify runs/);
 });
+
+test('usage splits a segment by model and flags an entangled model change', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-mdl-'));
+  const projDir = path.join(root, dir.replace(/[^a-zA-Z0-9]/g, '-'));
+  const subs = path.join(projDir, 'sess-1', 'subagents');
+  fs.mkdirSync(subs, { recursive: true });
+  const line = (model, out, ctx) => JSON.stringify({
+    type: 'assistant', timestamp: '2026-09-18T10:00:00.000Z',
+    message: { model, usage: { output_tokens: out, input_tokens: 10, cache_read_input_tokens: ctx } }
+  });
+  const userL = (txt) => JSON.stringify({ type: 'user', timestamp: '2026-09-18T10:00:00.000Z', message: { content: txt } });
+  const main = path.join(projDir, 'session.jsonl');
+
+  // baseline regime: one orchestrator model, one worker model
+  fs.writeFileSync(main, [line('alpha', 100, 200000), line('alpha', 100, 200000)].join('\n') + '\n');
+  fs.writeFileSync(path.join(subs, 'agent-a.jsonl'),
+    [userL('# Work brief — M1: first'), line('cheap', 10, 1000)].join('\n') + '\n');
+  addItem('M1');
+  forge(['task', 'start', 'M1']); touch('m1.txt');
+  forge(['task', 'verify', 'M1']); forge(['task', 'done', 'M1']);
+  const b = forge(['usage', '--baseline', '--label', 'pre'], { env: { FORGE_CLAUDE_PROJECTS: root } });
+  assert.match(b.out, /BASELINE RECORDED as 'pre'/);
+  const snap = JSON.parse(fs.readFileSync(path.join(dir, 'forge', 'state', 'usage-baseline.json'), 'utf8'));
+  assert.ok(snap.byModel && snap.byModel.alpha, 'baseline carries per-model counters');
+
+  // new segment: the orchestrator model changes part-way through
+  fs.appendFileSync(main, [line('alpha', 50, 100000), line('beta', 50, 20000)].join('\n') + '\n');
+  addItem('M2');
+  forge(['task', 'start', 'M2']); touch('m2.txt');
+  forge(['task', 'verify', 'M2']); forge(['task', 'done', 'M2']);
+
+  const r = forge(['usage'], { env: { FORGE_CLAUDE_PROJECTS: root } });
+  assert.strictEqual(r.code, 0);
+  assert.match(r.out, /By model in this segment/);
+  assert.match(r.out, /alpha/);
+  assert.match(r.out, /beta/);
+  assert.match(r.out, /orchestrator/);
+  // both orchestrator models moved inside the segment -> entangled
+  assert.match(r.out, /More than one orchestrator model ran in this segment/);
+  // the baseline's own calls must not be counted into the segment
+  assert.doesNotMatch(r.out, /alpha\s+400,000/);
+});
+
+test('usage withholds the per-model split when the baseline predates it', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-old-'));
+  const projDir = path.join(root, dir.replace(/[^a-zA-Z0-9]/g, '-'));
+  fs.mkdirSync(projDir, { recursive: true });
+  const line = (model, out) => JSON.stringify({
+    type: 'assistant', timestamp: '2026-09-18T10:00:00.000Z',
+    message: { model, usage: { output_tokens: out, input_tokens: 10, cache_read_input_tokens: 5000 } }
+  });
+  fs.writeFileSync(path.join(projDir, 'session.jsonl'), line('alpha', 100) + '\n');
+  addItem('O1');
+  // a v0.16.0-shaped baseline: totals, no byModel
+  fs.writeFileSync(path.join(dir, 'forge', 'state', 'usage-baseline.json'), JSON.stringify({
+    ts: '2026-09-01T00:00:00.000Z', label: 'old', done: 0,
+    calls: 0, context: 0, outTok: 0, perItem: null
+  }));
+  forge(['task', 'start', 'O1']); touch('o1.txt');
+  forge(['task', 'verify', 'O1']); forge(['task', 'done', 'O1']);
+  const r = forge(['usage'], { env: { FORGE_CLAUDE_PROJECTS: root } });
+  assert.match(r.out, /per-model split unavailable/);
+  assert.doesNotMatch(r.out, /By model in this segment/);
+});

@@ -409,7 +409,7 @@ function collectUsage(opts = {}) {
 const USAGE_BASELINE = path.join(STATE, 'usage-baseline.json');
 
 // v0.16: the numbers that actually track cost and speed.
-// Field finding (project-a, 21 items): 1.33 BILLION cache-read tokens against 3.94M
+// Field finding (a 21-item project): 1.33 BILLION cache-read tokens against 3.94M
 // generated — a 339:1 ratio. Output tokens are noise for quota; context re-read
 // per call is the bill. So the headline metrics are per-item context and per-item
 // model calls, not token share by model.
@@ -422,6 +422,18 @@ function usageMetrics(c, doneCount) {
       if (th === 'main') mainCalls += t.calls || 0; else sideCalls += t.calls || 0;
     }
   const context = cacheRead + cacheCreate + inTok;
+  // v0.16.1: per-model totals, so a segment that spans a model change can still
+  // be attributed. Cost lives in context re-read, so that is carried per model.
+  const byModel = {};
+  for (const [name, threads] of Object.entries(c.models || {})) {
+    const b = byModel[name] = { calls: 0, context: 0, out: 0, mainCalls: 0, sideCalls: 0 };
+    for (const [th, t] of Object.entries(threads)) {
+      b.calls += t.calls || 0;
+      b.context += (t.cacheRead || 0) + (t.cacheCreate || 0) + (t.in || 0);
+      b.out += t.out || 0;
+      if (th === 'main') b.mainCalls += t.calls || 0; else b.sideCalls += t.calls || 0;
+    }
+  }
   // one worker transcript ≈ one dispatch
   const wf = Object.values(c.files || {}).filter(f => f.side && (f.calls || 0) > 0);
   const per = wf.map(f => f.calls).sort((a, b) => a - b);
@@ -434,6 +446,7 @@ function usageMetrics(c, doneCount) {
     callsPerDispatch: { median: q(per, 0.5), p90: q(per, 0.9), max: per.length ? per[per.length - 1] : null },
     worstDispatches: worst,
     done: doneCount,
+    byModel,
     perItem: doneCount ? { calls: calls / doneCount, context: context / doneCount, out: outTok / doneCount } : null
   };
 }
@@ -459,6 +472,27 @@ function usageSince(m, base) {
     out: (m.outTok - (base.outTok || 0)) / done,
     label: base.label || null, ts: base.ts
   };
+  // A baseline recorded before v0.16.1 carries no per-model counters. Diffing
+  // against absent data would report the whole project as this segment, so the
+  // breakdown is withheld rather than guessed.
+  if (!base.byModel) d.byModelUnavailable = true;
+  else {
+    const bm = {};
+    for (const n of new Set([...Object.keys(m.byModel || {}), ...Object.keys(base.byModel || {})])) {
+      const z = { calls: 0, context: 0, out: 0, mainCalls: 0, sideCalls: 0 };
+      const cur = (m.byModel || {})[n] || z, was = (base.byModel || {})[n] || z;
+      const e = { calls: cur.calls - was.calls, context: cur.context - was.context,
+                  out: cur.out - was.out, mainCalls: cur.mainCalls - was.mainCalls,
+                  sideCalls: cur.sideCalls - was.sideCalls };
+      if (e.calls > 0 || e.context > 0 || e.out > 0) bm[n] = e;
+    }
+    if (Object.keys(bm).length) {
+      d.byModel = bm;
+      // Two orchestrator models in one segment means a code change and a model
+      // change are entangled: the delta above cannot be credited to either.
+      d.mixedMain = Object.values(bm).filter(e => e.mainCalls > 0).length > 1;
+    }
+  }
   if (base.perItem) {
     d.vs = {
       calls: base.perItem.calls ? Math.round(100 * (d.calls / base.perItem.calls - 1)) : null,
@@ -1534,7 +1568,7 @@ function failedAttempts(item) {
   return item.attempts.filter(a => a.outcome === 'failed' && a.kind !== 'provider').length;
 }
 
-// v0.15: item-shape guard — field evidence (project-b T55): a mega-item stalls
+// v0.15: item-shape guard — field evidence: a 17-glob mega-item stalls
 // workers, and a decision smuggled into criteria stalls the whole loop.
 // Warnings, not refusals: brownfield graphs legitimately vary in shape.
 function itemShapeWarnings(item) {
@@ -1909,7 +1943,7 @@ const commands = {
       const gateMsg = milestoneGateBlock(w, loadConfig(), item.milestone);
       if (gateMsg) die(`Refused: ${gateMsg}`);
       // v0.12: scope is part of the item's definition — no declared file scope, no start.
-      // Field evidence (project-b, 87 items): scope derived only into brief prose is unenforceable.
+      // Field evidence (an 87-item project): scope derived only into brief prose is unenforceable.
       if (!(item.scope.allowed || []).length) {
         if (flag('whole-tree')) {
           if (!opt('reason')) die(`--whole-tree requires --reason "..." — a deliberately unbounded item is recorded, and it is serial by nature (its scope overlaps everything).`);
@@ -2791,6 +2825,23 @@ const commands = {
       out(`  ${since.done} item(s) completed since — per item: ${Math.round(since.calls)} calls · ${fmtBig(since.context)} context · ${fmtBig(since.out)} output`);
       if (since.vs)
         out(`  vs baseline: calls ${since.vs.calls > 0 ? '+' : ''}${since.vs.calls}% · context ${since.vs.context > 0 ? '+' : ''}${since.vs.context}% · output ${since.vs.out > 0 ? '+' : ''}${since.vs.out}%`);
+      if (since.byModelUnavailable)
+        out(`  (per-model split unavailable: this baseline predates v0.16.1 — re-run 'forge usage --baseline' to enable it)`);
+      if (since.byModel) {
+        const rows = Object.entries(since.byModel).sort((a, b) => b[1].context - a[1].context);
+        const tC = rows.reduce((n, [, e]) => n + e.calls, 0) || 1;
+        const tX = rows.reduce((n, [, e]) => n + e.context, 0) || 1;
+        out(`  By model in this segment — context re-read is what the quota actually buys:`);
+        for (const [name, e] of rows) {
+          const role = e.mainCalls && e.sideCalls ? 'both' : (e.mainCalls ? 'orchestrator' : 'workers');
+          out(`    ${name.padEnd(22)}${String(e.calls.toLocaleString()).padStart(7)} calls ${String(Math.round(100 * e.calls / tC)).padStart(3)}%` +
+              ` · ${fmtBig(e.context).padStart(7)} ctx ${String(Math.round(100 * e.context / tX)).padStart(3)}%` +
+              ` · ${fmtBig(e.out).padStart(6)} out · ${fmtBig(e.calls ? e.context / e.calls : 0).padStart(6)}/call · ${role}`);
+        }
+        if (since.mixedMain)
+          out(`  ⚠ More than one orchestrator model ran in this segment. A code change and a model change are entangled here:\n` +
+              `    the per-item delta above cannot be credited to either one. Re-baseline at the next gate and change one thing at a time.`);
+      }
     } else if (base0) {
       out(`\n## Since baseline${base0.label ? ` '${base0.label}'` : ''}: no items completed yet — the comparison appears after the first DONE.`);
     }
@@ -2835,7 +2886,7 @@ const commands = {
       if (!m || !milestoneSeq(w).includes(m)) die(`Unknown milestone '${m || ''}'. See: forge milestone list`);
       if (!opt('note')) die('Usage: forge milestone security <M> --agent <worker|self> --note "<who reviewed, what was covered, findings summary>"');
       // v0.16: the contract has always said the security pass is DISPATCHED to a
-      // fresh-context reviewer. Field measurement (project-a): it was absorbed in-session
+      // fresh-context reviewer. Field measurement: it was absorbed in-session
       // 22 times for 21 items — ~694k orchestrator tokens, and at item granularity
       // rather than per milestone. A sentence in the contract did not hold, so the
       // record now has to name who did it.

@@ -216,7 +216,7 @@ for trivial items, not the default. The measure is cost per completed item,
 not delegation percentage — but zero explorer/tester dispatches over a whole
 project means you are absorbing their work.
 
-**What the bill is actually made of.** Field measurement (project-a, 21 items): 1.33
+**What the bill is actually made of.** Field measurement (a 21-item project): 1.33
 billion tokens of context re-read against 3.94 million generated — a ratio of
 339:1. Output tokens, and therefore which model produced them, are close to
 irrelevant for cost; the bill is *number of model calls × window size at each
@@ -227,6 +227,13 @@ expensive than the same work absorbed. So delegate to compress *your* window and
 to parallelise — then make each dispatch land in as few turns as possible: exact
 scope, the file list in the brief, one bounded task, no exploration. Fewer,
 better-briefed dispatches beat more dispatches.
+
+**One change per measured segment.** A baseline plus a delta only attributes a
+change if exactly one thing changed. Shipping a Forge release and switching the
+orchestrator model in the same segment produces a number that belongs to
+neither. Change one, measure, re-baseline, change the next. `forge usage` splits
+the segment by model and warns when two orchestrator models ran inside it — that
+warning means the delta is uninterpretable, not merely noisy.
 
 ## API workers (opt-in — providers phase A, v0.15)
 
