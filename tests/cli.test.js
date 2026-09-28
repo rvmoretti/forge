@@ -1407,3 +1407,14 @@ test('task done and milestone approve record commit ranges', () => {
   assert.match(ap.out, /Commit range recorded: .*\(1 commit/);
   assert.strictEqual(work().gates.M1.commits.count, 1);
 });
+
+test('milestone remove drops only an empty, never-gated milestone', () => {
+  addItem('A', ['--milestone', 'M1']);
+  addItem('B', ['--milestone', 'M2']);
+  assert.notStrictEqual(forge(['milestone', 'remove', 'M2', '--reason', 'x']).code, 0); // holds an item
+  forge(['milestone', 'add', 'F1', '--name', 'Members can reorder']);
+  forge(['task', 'update', 'B', '--milestone', 'F1']);
+  assert.notStrictEqual(forge(['milestone', 'remove', 'M2']).code, 0); // needs a reason
+  assert.strictEqual(forge(['milestone', 'remove', 'M2', '--reason', 'feature re-cut']).code, 0);
+  assert.deepStrictEqual(work().milestoneOrder, ['M1', 'F1']);
+});

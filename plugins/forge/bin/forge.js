@@ -104,7 +104,7 @@ const MUTATING = (() => {
   const c = process.argv[2] || '', s = process.argv[3] || '';
   if (c === 'init') return true;
   if (c === 'task') return !['list', 'show', ''].includes(s);
-  if (c === 'milestone') return ['security', 'approve', 'reopen', 'add', 'update', 'move'].includes(s);
+  if (c === 'milestone') return ['security', 'approve', 'reopen', 'add', 'update', 'move', 'remove'].includes(s);
   if (c === 'component') return ['add', 'update'].includes(s);
   return false;
 })();
@@ -2981,7 +2981,7 @@ const commands = {
         const g = w.gates[m];
         const state = !items.length ? 'no items yet'
           : g && g.approved ? `APPROVED ${g.ts}${g.note ? ` — ${g.note}` : ''}`
-          : (milestoneComplete(w, m) ? 'COMPLETE — AWAITING HUMAN APPROVAL' : 'in progress');
+          : (milestoneComplete(w, m) ? 'COMPLETE — AWAITING HUMAN APPROVAL' : milestoneStarted(w, m) ? 'in progress' : 'not started');
         out(`  ${String(i + 1).padStart(2)}. ${m}: ${r.name ? r.name : '(UNNAMED — forge milestone update ' + m + ' --name "...")'}`);
         out(`      ${done}/${items.length} items · ${state}${g && g.commits ? ` · commits ${g.commits.base.slice(0, 7)}..${g.commits.head.slice(0, 7)} (${g.commits.count})` : ''}`);
         if (r.demo) out(`      demo: ${r.demo}`);
@@ -3016,6 +3016,20 @@ const commands = {
       saveWork(w);
       out(`Milestone ${m} updated:\n` + changes.map(c => `  - ${c}`).join('\n'));
       const nw = milestoneNameWarning(r.name); if (nw && opt('name') !== null) out(`NAME WARNING: ${nw}`);
+    } else if (sub === 'remove') {
+      // v0.16.2: a re-cut empties old milestones; only an empty, never-gated one can go
+      const m = argv[2];
+      if (!w.milestones[m]) die(`Unknown milestone '${m || ''}'. See: forge milestone list`);
+      if (!opt('reason')) die('Removing a milestone must be explicit: --reason "..."');
+      const held = w.order.filter(id => w.items[id].milestone === m);
+      if (held.length) die(`Refused: '${m}' still holds ${held.length} item(s) (${held.slice(0, 8).join(', ')}${held.length > 8 ? ', …' : ''}), including closed ones — closed work keeps its milestone as history.`);
+      if (w.gates[m]) die(`Refused: '${m}' has a gate record (security review or approval) — it is history, not plan.`);
+      delete w.milestones[m];
+      w.milestoneOrder = w.milestoneOrder.filter(x => x !== m);
+      saveWork(w);
+      appendMd(DECISIONS_FILE, '# Decisions log (append-only, via forge CLI)',
+        `\n### ${ts()} — Milestone '${m}' removed\n- Authority: human\n- Decision: empty milestone removed from the plan\n- Why: ${opt('reason')}\n`);
+      out(`Milestone ${m} removed.`);
     } else if (sub === 'move') {
       // v0.16.2: reorder for business reasons — refused when it would break the work graph
       const m = argv[2];
@@ -3139,7 +3153,7 @@ const commands = {
       w.gates[m] = { approved: false, ts: ts(), note: `REOPENED: ${opt('reason')}` };
       saveWork(w);
       out(`Milestone '${m}' gate reopened: ${opt('reason')} — items in later milestones are blocked again.`);
-    } else die('Usage: forge milestone list | add <id> --name "..." [--demo] [--before|--after <M>] | update <id> [--name] [--demo] | move <id> --before|--after <M> [--pull-deps] --reason "..." | security <id> --agent <a> --note "..." | approve <id> [--note "..."] [--skip-security --reason "..."] | reopen <id> --reason "..."');
+    } else die('Usage: forge milestone list | add <id> --name "..." [--demo] [--before|--after <M>] | update <id> [--name] [--demo] | move <id> --before|--after <M> [--pull-deps] --reason "..." | remove <id> --reason "..." | security <id> --agent <a> --note "..." | approve <id> [--note "..."] [--skip-security --reason "..."] | reopen <id> --reason "..."');
   },
 
   // -- dashboard ----------------------------------------------------------------
@@ -3402,6 +3416,7 @@ const commands = {
   milestone add <m> --name "<feature it enables>" [--demo "<how to try it>"] [--before|--after <M>]
   milestone update <m> [--name ..] [--demo ..] [--reason ..]
   milestone move <m> --before|--after <M> --reason ".." [--pull-deps]
+  milestone remove <m> --reason ".."     only an empty milestone with no gate record
                                          v0.16.2: milestones are named feature slices in an explicit
                                          order; a move that would break a dependency or jump ahead of
                                          started work is refused (--pull-deps brings blockers along)

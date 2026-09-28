@@ -183,7 +183,9 @@ reordering for business reasons meant re-adding items.
   when an item would sit in an earlier milestone than something it depends
   on (the blocking edges are listed; `--pull-deps` moves the blockers along,
   recorded in each item's history) or when it would jump ahead of started or
-  approved work. Every move is a decision-log entry.
+  approved work. Every move is a decision-log entry. `milestone remove`
+  drops a milestone a re-cut left empty (never one holding items or a gate
+  record).
 - **Plan ↔ history.** `task done` records the commit range that landed while
   the item was in flight (and whether work was still uncommitted);
   `milestone approve` records the milestone's range, contiguous with the
