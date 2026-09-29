@@ -166,6 +166,17 @@ memory.
 
 ## Changelog
 
+### v0.17.1 — external sessions are not Forge's cost
+- **`usage` separates sessions another program starts through the Agent SDK**
+  (`entrypoint: sdk-*`) into an `[external]` lane. Field evidence: 48 SDK-driven
+  security-review sessions run by a separate tool on an older Opus (1.28M output
+  tokens) were counted as orchestrator work, inflating the orchestrator share and
+  every cost-per-item figure, and pointing the model-version investigation at
+  Forge. External sessions are now listed with their models, excluded from
+  per-item cost, delegation share and the older-version warning, and shown per
+  segment. The usage cache rebuilds once (v4). A baseline recorded before this
+  release is flagged as using the old definition — re-record it.
+
 ### v0.17.0 — the git flow is Forge's, and more work goes to the workers
 Measured on a field project: every item waited ~11 minutes for CI to re-run the
 suite `task verify` had just run locally (about half of each item's cycle, ~3,000

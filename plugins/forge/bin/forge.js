@@ -265,7 +265,7 @@ function usageFiles(dirs) {
 }
 
 function emptyUsageCache() {
-  return { v: 3, files: {}, models: {}, byType: {}, perItem: {}, byDay: {},
+  return { v: 4, files: {}, models: {}, byType: {}, perItem: {}, byDay: {},
            dispatches: 0, tied: 0, firstTs: null, lastTs: null, bytes: 0, total: 0, complete: false };
 }
 
@@ -306,6 +306,13 @@ function consumeUsage(agg, text, side, knownIdRe, rec) {
     // v0.17: a TOP-LEVEL transcript whose first user message is a Forge brief is a
     // worker, not the orchestrator. Field evidence: 48 reviewer runs stored as top-level
     // files were counted as orchestrator calls, hiding that they ran on an old model.
+    // v0.17.1: sessions started by a program through the Agent SDK (entrypoint sdk-*)
+    // are neither the orchestrator nor Forge's workers. Field evidence: 48 SDK-driven
+    // security-review sessions from a separate tool were counted as orchestrator calls.
+    if (rec && !side && rec.entrypoint === undefined && d.entrypoint) {
+      rec.entrypoint = String(d.entrypoint);
+      if (/^sdk/i.test(rec.entrypoint)) rec.external = true;
+    }
     if (rec && !side && rec.firstUser === undefined && d.type === 'user' && d.message) {
       const c0 = d.message.content;
       const txt = typeof c0 === 'string' ? c0 : (Array.isArray(c0) ? c0.filter(x => x && x.type === 'text').map(x => x.text).join('\n') : '');
@@ -317,7 +324,8 @@ function consumeUsage(agg, text, side, knownIdRe, rec) {
     if (model === '<synthetic>') continue;
     if (rec) { rec.calls = (rec.calls || 0) + 1; rec.model = model; }
     const u = d.message.usage || {};
-    const thread = (side || d.isSidechain || (rec && rec.workerTop)) ? 'side' : 'main';
+    const external = rec ? !!rec.external : (/^sdk/i.test(String(d.entrypoint || '')) && !side);
+    const thread = external ? 'external' : (side || d.isSidechain || (rec && rec.workerTop)) ? 'side' : 'main';
     const m = (agg.models[model] = agg.models[model] || {});
     const t = (m[thread] = m[thread] || { calls: 0, in: 0, out: 0, cacheCreate: 0, cacheRead: 0 });
     t.calls++; t.in += u.input_tokens || 0; t.out += u.output_tokens || 0;
@@ -342,7 +350,7 @@ function collectUsage(opts = {}) {
   const budgetMs = opts.budgetMs || 0;
   const t0 = Date.now();
   let c = opts.rescan ? null : readJson(USAGE_CACHE, null);
-  if (!c || c.v !== 3) c = emptyUsageCache(); // v0.17: v3 re-classifies top-level worker transcripts
+  if (!c || c.v !== 4) c = emptyUsageCache(); // v0.17.1: v4 separates external (SDK-driven) sessions
   const dirs = usageDirs(opts.rescan ? null : c.dirs);
   if (!dirs) return null;
   c.dirs = dirs;
@@ -445,8 +453,15 @@ function olderVersions(names) {
 
 function usageMetrics(c, doneCount) {
   let calls = 0, cacheRead = 0, cacheCreate = 0, inTok = 0, outTok = 0, mainCalls = 0, sideCalls = 0;
-  for (const threads of Object.values(c.models || {}))
+  const external = { calls: 0, context: 0, out: 0, byModel: {} };
+  for (const [name0, threads] of Object.entries(c.models || {}))
     for (const [th, t] of Object.entries(threads)) {
+      if (th === 'external') { // v0.17.1: not Forge's loop — reported, never counted in its cost
+        const cx = (t.cacheRead || 0) + (t.cacheCreate || 0) + (t.in || 0);
+        external.calls += t.calls || 0; external.context += cx; external.out += t.out || 0;
+        external.byModel[name0] = (external.byModel[name0] || 0) + (t.calls || 0);
+        continue;
+      }
       calls += t.calls || 0; cacheRead += t.cacheRead || 0; cacheCreate += t.cacheCreate || 0;
       inTok += t.in || 0; outTok += t.out || 0;
       if (th === 'main') mainCalls += t.calls || 0; else sideCalls += t.calls || 0;
@@ -456,13 +471,15 @@ function usageMetrics(c, doneCount) {
   // be attributed. Cost lives in context re-read, so that is carried per model.
   const byModel = {};
   for (const [name, threads] of Object.entries(c.models || {})) {
-    const b = byModel[name] = { calls: 0, context: 0, out: 0, mainCalls: 0, sideCalls: 0 };
+    const b = { calls: 0, context: 0, out: 0, mainCalls: 0, sideCalls: 0 };
     for (const [th, t] of Object.entries(threads)) {
+      if (th === 'external') continue;
       b.calls += t.calls || 0;
       b.context += (t.cacheRead || 0) + (t.cacheCreate || 0) + (t.in || 0);
       b.out += t.out || 0;
       if (th === 'main') b.mainCalls += t.calls || 0; else b.sideCalls += t.calls || 0;
     }
+    if (b.calls) byModel[name] = b;
   }
   // one worker transcript ≈ one dispatch
   const wf = Object.values(c.files || {}).filter(f => f.side && (f.calls || 0) > 0);
@@ -477,6 +494,8 @@ function usageMetrics(c, doneCount) {
     worstDispatches: worst,
     done: doneCount,
     byModel,
+    external,
+    defs: 2, // v0.17.1: external sessions excluded from the totals above
     perItem: doneCount ? { calls: calls / doneCount, context: context / doneCount, out: outTok / doneCount } : null
   };
 }
@@ -505,6 +524,11 @@ function usageSince(m, base) {
   // A baseline recorded before v0.16.1 carries no per-model counters. Diffing
   // against absent data would report the whole project as this segment, so the
   // breakdown is withheld rather than guessed.
+  if (m.external) {
+    const be = base.external || { calls: 0, context: 0, out: 0 };
+    d.external = { calls: m.external.calls - (be.calls || 0), context: m.external.context - (be.context || 0), out: m.external.out - (be.out || 0) };
+  }
+  if ((base.defs || 1) !== (m.defs || 1)) d.defsChanged = true;
   if (!base.byModel) d.byModelUnavailable = true;
   else {
     const bm = {};
@@ -533,10 +557,11 @@ function usageSince(m, base) {
   return d;
 }
 
+function M0ext(c) { return Object.values(c.models || {}).some(th => th.external); }
 function usageSnapshot(c) {
   let mainOut = 0, sideOut = 0;
   for (const threads of Object.values(c.models || {}))
-    for (const [th, t] of Object.entries(threads)) { if (th === 'main') mainOut += t.out; else sideOut += t.out; }
+    for (const [th, t] of Object.entries(threads)) { if (th === 'main') mainOut += t.out; else if (th === 'side') sideOut += t.out; }
   const doneCount = (() => {
     try { const w2 = readJson(WORK_FILE, { items: {}, order: [] });
       return w2.order.filter(id => w2.items[id].status === 'DONE').length; } catch (_) { return 0; }
@@ -3114,11 +3139,12 @@ const commands = {
     let mainOut = 0, sideOut = 0;
     for (const [model, threads] of Object.entries(c.models)) {
       for (const [thread, t] of Object.entries(threads)) {
-        if (thread === 'main') mainOut += t.out; else sideOut += t.out;
+        if (thread === 'main') mainOut += t.out; else if (thread === 'side') sideOut += t.out;
         out(`  ${model} [${thread}]: ${t.calls} calls · in ${t.in.toLocaleString()} · out ${t.out.toLocaleString()} · cache write ${t.cacheCreate.toLocaleString()} / read ${t.cacheRead.toLocaleString()}`);
       }
     }
-    for (const ov of olderVersions(Object.keys(c.models)))
+    if (M0ext(c)) out(`  [external] = sessions started by another program through the Agent SDK (entrypoint sdk-*) in this project folder — not Forge's orchestrator or workers, and not in any cost-per-item figure.`);
+    for (const ov of olderVersions(Object.keys(c.models).filter(n => Object.keys(c.models[n]).some(th => th !== 'external'))))
       out(`  Versions seen (${ov.family}): newest ${ov.newest} · older ${ov.older.join(', ')} — see the segment block below for whether an older one is still running`);
     const totOut = mainOut + sideOut;
     out(`\n## Delegation`);
@@ -3219,6 +3245,10 @@ const commands = {
       out(`  ${since.done} item(s) completed since — per item: ${Math.round(since.calls)} calls · ${fmtBig(since.context)} context · ${fmtBig(since.out)} output`);
       if (since.vs)
         out(`  vs baseline: calls ${since.vs.calls > 0 ? '+' : ''}${since.vs.calls}% · context ${since.vs.context > 0 ? '+' : ''}${since.vs.context}% · output ${since.vs.out > 0 ? '+' : ''}${since.vs.out}%`);
+      if (since.defsChanged)
+        out(`  ⚠ This baseline counted external (SDK-driven) sessions as Forge's own cost; this report does not. The delta above mixes two definitions — re-record: forge usage --baseline --label <name>`);
+      if (since.external && since.external.calls > 0)
+        out(`  External sessions in this segment (not Forge — started through the Agent SDK by another tool): ${since.external.calls.toLocaleString()} calls · ${fmtBig(since.external.context)} context — excluded from the per-item cost above`);
       if (since.byModelUnavailable)
         out(`  (per-model split unavailable: this baseline predates v0.16.1 — re-run 'forge usage --baseline' to enable it)`);
       if (since.byModel) {

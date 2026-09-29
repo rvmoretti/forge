@@ -1664,3 +1664,30 @@ test('opus-tier agents inherit the session model; no agent pins a version', () =
     assert.ok(['inherit', 'sonnet', 'haiku'].includes(m[1]), `${f}: model '${m[1]}' — Opus-tier agents inherit; nothing pins a version`);
   }
 });
+
+test('usage: SDK-driven sessions from other tools are reported as external, never as Forge cost', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-ext-'));
+  const projDir = path.join(root, dir.replace(/[^a-zA-Z0-9]/g, '-'));
+  fs.mkdirSync(projDir, { recursive: true });
+  const line = (model, out, ctx, ep) => JSON.stringify({
+    type: 'assistant', timestamp: '2026-09-29T10:00:00.000Z', entrypoint: ep,
+    message: { model, usage: { output_tokens: out, input_tokens: 10, cache_read_input_tokens: ctx } }
+  });
+  const userL = (txt, ep) => JSON.stringify({ type: 'user', timestamp: '2026-09-29T10:00:00.000Z', entrypoint: ep, message: { content: txt } });
+  addItem('E0');
+  forge(['task', 'start', 'E0']); touch('e0.txt'); forge(['task', 'verify', 'E0']); forge(['task', 'done', 'E0']);
+  fs.writeFileSync(path.join(projDir, 'orch.jsonl'), [userL('continue', 'cli'), line('claude-opus-5-5', 100, 200000, 'cli')].join('\n') + '\n');
+  forge(['usage', '--baseline', '--label', 'pre'], { env: { FORGE_CLAUDE_PROJECTS: root } });
+  fs.appendFileSync(path.join(projDir, 'orch.jsonl'), line('claude-opus-5-5', 50, 100000, 'cli') + '\n');
+  fs.writeFileSync(path.join(projDir, 'sec.jsonl'), [userL('Review this change for security vulnerabilities.', 'sdk-py'),
+    line('claude-opus-4-7', 20, 900000, 'sdk-py'), line('claude-opus-4-7', 20, 900000, 'sdk-py')].join('\n') + '\n');
+  addItem('E1');
+  forge(['task', 'start', 'E1']); touch('e1.txt'); forge(['task', 'verify', 'E1']); forge(['task', 'done', 'E1']);
+  const r = forge(['usage'], { env: { FORGE_CLAUDE_PROJECTS: root } });
+  assert.strictEqual(r.code, 0, r.out);
+  assert.match(r.out, /claude-opus-4-7 \[external\]/);
+  assert.doesNotMatch(r.out, /claude-opus-4-7 \[main\]/);
+  assert.match(r.out, /External sessions in this segment \(not Forge[^)]*\): 2 calls/);
+  assert.doesNotMatch(r.out, /OLDER OPUS VERSION/);           // not Forge's model choice
+  assert.match(r.out, /per item: 1 calls/);                   // only the orchestrator call counts
+});
