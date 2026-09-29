@@ -1418,3 +1418,44 @@ test('milestone remove drops only an empty, never-gated milestone', () => {
   assert.strictEqual(forge(['milestone', 'remove', 'M2', '--reason', 'feature re-cut']).code, 0);
   assert.deepStrictEqual(work().milestoneOrder, ['M1', 'F1']);
 });
+
+// --- v0.16.3: lock hygiene and closed-item tagging -----------------------------
+
+test('session-end releases the lock its session holds (the /clear case), and only that one', () => {
+  hook('session-start', { session_id: 'sess-OLD', source: 'startup' });
+  // a different session ending does nothing
+  hook('session-end', { session_id: 'sess-OTHER', reason: 'other' });
+  const blocked = hook('pretooluse', { session_id: 'sess-NEW', tool_name: 'Write', tool_input: { file_path: 'src/a.js' } });
+  assert.strictEqual(blocked.code, 2);
+  // /clear ends the old id -> lock released -> the new id writes
+  hook('session-end', { session_id: 'sess-OLD', reason: 'clear' });
+  const l = JSON.parse(fs.readFileSync(path.join(dir, 'forge', 'state', 'session.json'), 'utf8'));
+  assert.strictEqual(l.released, true);
+  assert.strictEqual(l.endedBy, 'clear');
+  const ok = hook('pretooluse', { session_id: 'sess-NEW', tool_name: 'Write', tool_input: { file_path: 'src/a.js' } });
+  assert.strictEqual(ok.code, 0);
+});
+
+test('edit-war guard ignores writes outside the project', () => {
+  hook('pretooluse', { session_id: 'sess-A', tool_name: 'Write', tool_input: { file_path: 'src/app.js' } });
+  const outside = path.join(os.tmpdir(), 'forge-claude-memory', 'note.md');
+  const r = hook('pretooluse', { session_id: 'sess-B', tool_name: 'Write', tool_input: { file_path: outside } });
+  assert.strictEqual(r.code, 0, r.out);
+  const inside = hook('pretooluse', { session_id: 'sess-B', tool_name: 'Write', tool_input: { file_path: 'src/app.js' } });
+  assert.strictEqual(inside.code, 2);
+});
+
+test('a closed item accepts a component tag and nothing else', () => {
+  addItem('C1');
+  forge(['task', 'start', 'C1']); touch('c1.txt');
+  forge(['task', 'verify', 'C1']); forge(['task', 'done', 'C1']);
+  const tag = forge(['task', 'update', 'C1', '--component', 'Checkout', '--reason', 'map']);
+  assert.strictEqual(tag.code, 0, tag.out);
+  const w = JSON.parse(fs.readFileSync(path.join(dir, 'forge', 'state', 'work.json'), 'utf8'));
+  assert.strictEqual(w.items.C1.component, 'Checkout');
+  assert.match(w.items.C1.history.pop().change, /component = Checkout/);
+  const other = forge(['task', 'update', 'C1', '--title', 'x']);
+  assert.notStrictEqual(other.code, 0);
+  const mixed = forge(['task', 'update', 'C1', '--component', 'X', '--title', 'x']);
+  assert.notStrictEqual(mixed.code, 0);
+});

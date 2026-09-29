@@ -166,6 +166,19 @@ memory.
 
 ## Changelog
 
+### v0.16.3 — lock hygiene found in the field
+- **`/clear` no longer locks you out.** `/clear` starts a new session id; the old
+  id's orchestrator lock stayed fresh for the full 15-minute TTL and the edit-war
+  guard blocked the session that replaced it. A new `SessionEnd` hook releases the
+  lock held by the session that ends (clear, exit, logout).
+- **The edit-war guard only guards the project.** Writes outside the project tree
+  (Claude's own memory files, for instance) are no longer blocked by another
+  session's lock.
+- **Closed items can be tagged.** `task update <id> --component <c>` works on DONE
+  and CANCELLED items, audited in the item's history — a component is a map label,
+  not part of the work. Every other field on a closed item stays frozen, so the
+  preflight component-map warning can finally be cleared.
+
 ### v0.16.2 — milestones are named features, in an order you can change
 A milestone used to be a label on its items, ordered by whichever item was
 added first. It could not carry a name, a demo, or a position of its own, so

@@ -2250,8 +2250,21 @@ const commands = {
     } else if (sub === 'update') {
       // 2.1/F6: makes '--escalate revisit-criteria' executable; every mutation is recorded
       const item = getItem(w, argv[2]);
-      if (['DONE', 'CANCELLED'].includes(item.status))
-        die(`'${item.id}' is ${item.status} — closed items are not edited; create a new item that supersedes it.`);
+      if (['DONE', 'CANCELLED'].includes(item.status)) {
+        // v0.16.3: a component tag is a label for the map, not part of the work — it may be
+        // set on a closed item (audited). Everything else on a closed item stays frozen.
+        const flagsUsed = argv.slice(3).filter(a => a.startsWith('--')).map(a => a.slice(2));
+        if (flagsUsed.length && flagsUsed.every(f => ['component', 'reason'].includes(f)) && opt('component') !== null) {
+          const was = item.component || null;
+          item.component = opt('component') || null;
+          (item.history = item.history || []).push({ ts: ts(), change: `component = ${item.component} (was ${was}; item ${item.status})`, reason: opt('reason') || null });
+          saveWork(w);
+          out(`${item.id} (${item.status}) component → ${item.component}`);
+          return;
+        }
+        die(`'${item.id}' is ${item.status} — closed items are not edited; create a new item that supersedes it.\n` +
+            `(Only a component tag may be set on a closed item: forge task update ${item.id} --component <c> [--reason ".."])`);
+      }
       const changes = [];
       const touchingCriteria = optAll('criterion-add').length > 0 || optAll('criterion-remove').length > 0;
       if (touchingCriteria && item.attempts.some(a => a.outcome === 'failed') && !opt('reason'))
@@ -3266,7 +3279,10 @@ const commands = {
       // v0.5 edit-war guard: refuse writes while a DIFFERENT orchestrator session is actively writing
       {
         const sid = input.session_id || null;
-        if (sid) {
+        // v0.16.3: only writes INSIDE the project are orchestration. Claude's own files
+        // (e.g. ~/.claude/projects/<p>/memory/) were being blocked by a stale lock.
+        const insideProject = abs === PROJECT || abs.startsWith(PROJECT + path.sep);
+        if (sid && insideProject) {
           const l = loadLock();
           if (l && l.sessionId !== sid && lockFresh(l)) {
             traceEvent({ outcome: 'block', hook: 'pretooluse', reason: 'edit-war', path: fp, holder: String(l.sessionId).slice(0, 8), input: DEBUG ? JSON.stringify(input).slice(0, 2000) : undefined });
@@ -3348,6 +3364,18 @@ const commands = {
           }
         }
       } catch (_) { /* hooks never crash */ }
+      process.exit(0);
+
+    } else if (which === 'session-end') {
+      // v0.16.3: a session that ends (/clear, exit, logout) releases the lock it holds.
+      // Field evidence: /clear starts a NEW session id; the old id's lock stayed fresh for
+      // the full TTL and the edit-war guard blocked the very session that replaced it.
+      const sid = input.session_id || null;
+      const l = loadLock();
+      if (sid && l && l.sessionId === sid && !l.released) {
+        saveLock(Object.assign({}, l, { released: true, lastBeat: ts(), endedBy: input.reason || 'session-end' }));
+        traceEvent({ outcome: 'ok', hook: 'session-end', released: String(sid).slice(0, 8), reason: input.reason || null });
+      }
       process.exit(0);
 
     } else if (which === 'stop') {
