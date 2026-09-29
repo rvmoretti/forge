@@ -104,7 +104,8 @@ const MUTATING = (() => {
   const c = process.argv[2] || '', s = process.argv[3] || '';
   if (c === 'init') return true;
   if (c === 'task') return !['list', 'show', ''].includes(s);
-  if (c === 'milestone') return ['security', 'approve', 'reopen', 'add', 'update', 'move', 'remove'].includes(s);
+  if (c === 'milestone') return ['security', 'approve', 'reopen', 'add', 'update', 'move', 'remove', 'ship'].includes(s);
+  if (c === 'dispatch') return true;
   if (c === 'component') return ['add', 'update'].includes(s);
   return false;
 })();
@@ -264,7 +265,7 @@ function usageFiles(dirs) {
 }
 
 function emptyUsageCache() {
-  return { v: 2, files: {}, models: {}, byType: {}, perItem: {}, byDay: {},
+  return { v: 3, files: {}, models: {}, byType: {}, perItem: {}, byDay: {},
            dispatches: 0, tied: 0, firstTs: null, lastTs: null, bytes: 0, total: 0, complete: false };
 }
 
@@ -302,12 +303,21 @@ function consumeUsage(agg, text, side, knownIdRe, rec) {
       const mh = line.match(/Work brief (?:—|\\u2014) ([A-Za-z0-9][\w.-]*):/) || line.match(/briefs?\\?\/([A-Za-z0-9][\w.-]*?)\.md/i);
       if (mh) rec.item = mh[1];
     }
+    // v0.17: a TOP-LEVEL transcript whose first user message is a Forge brief is a
+    // worker, not the orchestrator. Field evidence: 48 reviewer runs stored as top-level
+    // files were counted as orchestrator calls, hiding that they ran on an old model.
+    if (rec && !side && rec.firstUser === undefined && d.type === 'user' && d.message) {
+      const c0 = d.message.content;
+      const txt = typeof c0 === 'string' ? c0 : (Array.isArray(c0) ? c0.filter(x => x && x.type === 'text').map(x => x.text).join('\n') : '');
+      rec.firstUser = true;
+      if (/^\s*#\s*(Work|Review|Security|Explore|Test) brief (—|-)/.test(txt)) rec.workerTop = true;
+    }
     if (d.type !== 'assistant' || !d.message) continue;
     const model = d.message.model || 'unknown';
     if (model === '<synthetic>') continue;
     if (rec) { rec.calls = (rec.calls || 0) + 1; rec.model = model; }
     const u = d.message.usage || {};
-    const thread = (side || d.isSidechain) ? 'side' : 'main';
+    const thread = (side || d.isSidechain || (rec && rec.workerTop)) ? 'side' : 'main';
     const m = (agg.models[model] = agg.models[model] || {});
     const t = (m[thread] = m[thread] || { calls: 0, in: 0, out: 0, cacheCreate: 0, cacheRead: 0 });
     t.calls++; t.in += u.input_tokens || 0; t.out += u.output_tokens || 0;
@@ -332,7 +342,7 @@ function collectUsage(opts = {}) {
   const budgetMs = opts.budgetMs || 0;
   const t0 = Date.now();
   let c = opts.rescan ? null : readJson(USAGE_CACHE, null);
-  if (!c || c.v !== 2) c = emptyUsageCache();
+  if (!c || c.v !== 3) c = emptyUsageCache(); // v0.17: v3 re-classifies top-level worker transcripts
   const dirs = usageDirs(opts.rescan ? null : c.dirs);
   if (!dirs) return null;
   c.dirs = dirs;
@@ -366,6 +376,7 @@ function collectUsage(opts = {}) {
       const { text, next } = readTail(f, rec.off);
       if (next === rec.off) break;              // only an incomplete line is left
       consumeUsage(c, text, side, knownIdRe, rec);
+      if (rec.workerTop) rec.side = true;
       rec.off = next;
     }
     if (pending) break;
@@ -398,7 +409,7 @@ function collectUsage(opts = {}) {
     } catch (_) { continue; }
     if (!tail.trim()) continue;
     if (!cloned) { view = JSON.parse(JSON.stringify(c)); cloned = true; }
-    consumeUsage(view, tail, side, knownIdRe, null);
+    consumeUsage(view, tail, side || !!(rec && rec.workerTop), knownIdRe, null);
     view.bytes += Buffer.byteLength(tail, 'utf8');
   }
   view.dirs = dirs;
@@ -413,6 +424,25 @@ const USAGE_BASELINE = path.join(STATE, 'usage-baseline.json');
 // generated — a 339:1 ratio. Output tokens are noise for quota; context re-read
 // per call is the bill. So the headline metrics are per-item context and per-item
 // model calls, not token share by model.
+// v0.17: model family (opus / sonnet / haiku / …) and a sortable version key, so an
+// OLDER version running beside a newer one is visible instead of blending in.
+function modelFamily(name) { const m = String(name).match(/claude-([a-z]+)/); return m ? m[1] : null; }
+function modelVersionKey(name) {
+  const m = String(name).match(/claude-[a-z]+-(\d+)(?:-(\d+))?(?:-(\d{8}))?/);
+  return m ? [parseInt(m[1], 10), m[2] && m[2].length < 3 ? parseInt(m[2], 10) : 0] : [0, 0];
+}
+function olderVersions(names) {
+  const byFam = {};
+  for (const n of names) { const f = modelFamily(n); if (f) (byFam[f] = byFam[f] || []).push(n); }
+  const res = [];
+  for (const [f, ns] of Object.entries(byFam)) {
+    if (ns.length < 2) continue;
+    const sorted = ns.slice().sort((a, b) => { const x = modelVersionKey(a), y = modelVersionKey(b); return y[0] - x[0] || y[1] - x[1]; });
+    res.push({ family: f, newest: sorted[0], older: sorted.slice(1) });
+  }
+  return res;
+}
+
 function usageMetrics(c, doneCount) {
   let calls = 0, cacheRead = 0, cacheCreate = 0, inTok = 0, outTok = 0, mainCalls = 0, sideCalls = 0;
   for (const threads of Object.values(c.models || {}))
@@ -669,6 +699,7 @@ function generateDashboard() {
         <div class="row"><span class="k">Verification</span><span class="vl">${lastV
           ? `${lastV.passed ? 'passed' : 'failed'} · ${esc(lastV.ts.slice(0, 16).replace('T', ' '))}${lastV.durationMs ? ` · ran ${fmtD(lastV.durationMs)}` : ''}${lastV.tree ? ' · tree-bound ✓' : ''}`
           : '<span class="mut">never run</span>'}</span></div>
+        ${t.commit ? `<div class="row"><span class="k">Commit</span><span class="vl"><code>${esc(t.commit.sha.slice(0, 10))}</code> on <code>${esc(t.commit.branch)}</code>${t.commit.pushed ? ' · pushed' : ' · <span class="warnv">not pushed</span>'}</span></div>` : ''}
         ${t.commits ? `<div class="row"><span class="k">Commits</span><span class="vl"><code title="git log ${esc(t.commits.base)}..${esc(t.commits.head)}">${esc(t.commits.base.slice(0, 7))}..${esc(t.commits.head.slice(0, 7))}</code> · ${t.commits.count === null ? '?' : t.commits.count} landed while in flight${t.commits.uncommitted ? ' · <span class="mut">work was uncommitted at DONE</span>' : ''}</span></div>` : ''}
         ${fails ? `<div class="row"><span class="k">Attempts</span><span class="vl">${fails} failed — a third identical retry is refused</span></div>` : ''}
         ${evid}
@@ -714,7 +745,7 @@ function generateDashboard() {
     const gateState = m === '(no milestone)' ? 'none' : (gate && gate.approved ? 'approved' : allClosed ? 'awaiting' : 'pending');
     const mName = milestoneName(w, m);
     const mc = (gate || {}).commits;
-    return `<details class="sec sub"${openAttr} data-gate="${gateState}" data-m="${esc(m)}"><summary>${esc(m)}${mName ? ` <b>${esc(mName)}</b>` : (m === '(no milestone)' ? '' : ' <span class="mut">(unnamed)</span>')} <span class="mut">${done}/${items.length} done</span> ${gateChip}${mc ? ` <span class="mut" title="git log ${esc(mc.base)}..${esc(mc.head)}">· ${esc(mc.base.slice(0, 7))}..${esc(mc.head.slice(0, 7))} (${mc.count})</span>` : ''}<span class="mcount"></span></summary>
+    return `<details class="sec sub"${openAttr} data-gate="${gateState}" data-m="${esc(m)}"><summary>${esc(m)}${mName ? ` <b>${esc(mName)}</b>` : (m === '(no milestone)' ? '' : ' <span class="mut">(unnamed)</span>')} <span class="mut">${done}/${items.length} done</span> ${gateChip}${mc ? ` <span class="mut" title="git log ${esc(mc.base)}..${esc(mc.head)}">· ${esc(mc.base.slice(0, 7))}..${esc(mc.head.slice(0, 7))} (${mc.count})</span>` : ''}${(gate || {}).ship ? ` <a class="mut" href="${esc(gate.ship.pr)}">· PR</a>` : ''}<span class="mcount"></span></summary>
       <div class="mgb">${rows}</div></details>`;
   }).join('');
 
@@ -1767,6 +1798,99 @@ function milestoneStarted(w, m) {
   return w.order.some(id => w.items[id].milestone === m && ['IN_PROGRESS', 'DONE'].includes(w.items[id].status));
 }
 
+// ---------------------------------------------------------------------------
+// v0.17: per-milestone git flow — Forge's own rule, enforced in the CLI
+// ---------------------------------------------------------------------------
+// A milestone is built on one branch (options.branchPattern, default milestone/<id>)
+// cut from options.baseBranch. `task done` makes exactly one commit per item — the
+// item's files plus Forge's authoritative state — and pushes it; no PR per item, so
+// no CI per item (task verify already ran the full suite locally). `milestone ship`
+// opens one PR per milestone at the gate, merged with a merge commit so the per-item
+// commits survive. Forge never pushes to main/production, never force-pushes, never
+// passes --no-verify. options.integration 'manual' opts out (recorded human decision).
+function gitCfg(cfg) {
+  const o = ((cfg || {}).options) || {};
+  return {
+    integration: o.integration || 'per-milestone',
+    base: o.baseBranch || null,
+    pattern: o.branchPattern || 'milestone/<id>',
+    merge: o.mergeMethod || 'merge',
+    remote: o.remote || 'origin',
+    gateSteps: Array.isArray(o.gateSteps) ? o.gateSteps
+      : String(o.gateSteps || '').split('||').map(x => x.trim()).filter(Boolean)
+  };
+}
+function perMilestone(cfg) { return gitCfg(cfg).integration === 'per-milestone'; }
+function milestoneBranch(cfg, m) { return gitCfg(cfg).pattern.replace('<id>', m); }
+function itemBranch(item) { return `item/${item.id}`; }
+function git(args, opts = {}) {
+  const r = spawnSync('git', args, { cwd: PROJECT, encoding: opts.buffer ? null : 'utf8', timeout: opts.timeout || 120000, maxBuffer: 64 * 1024 * 1024 });
+  return { code: r.status === null ? -1 : r.status, out: opts.buffer ? r.stdout : (r.stdout || '').trim(), err: opts.buffer ? String(r.stderr || '') : (r.stderr || '').trim() };
+}
+// alias for scopes that shadow `git` with a local (preflight has `const git = run(...)`)
+function gitx(args, opts) { return git(args, opts); }
+function currentBranch() { const r = git(['rev-parse', '--abbrev-ref', 'HEAD']); return r.code === 0 ? r.out : null; }
+function hasRemote(cfg) { return git(['remote', 'get-url', gitCfg(cfg).remote]).code === 0; }
+function branchExists(b) { return git(['rev-parse', '--verify', '--quiet', `refs/heads/${b}`]).code === 0; }
+// Forge's authoritative files are committed with the work; generated ones never are.
+const FORGE_AUTHORITATIVE = ['forge/config.json', 'forge/state/work.json', 'forge/state/components.json',
+  'forge/state/trace.jsonl', 'forge/state/baseline.json', 'forge/state/usage-baseline.json',
+  'forge/decisions.md', 'forge/discoveries.md', 'forge/briefs/', 'forge/changes/', 'forge/evidence/'];
+const FORGE_GENERATED = ['forge/dashboard.html', 'forge/state/usage.json', 'forge/state/usage-cache.json',
+  'forge/state/preflight.json', 'forge/state/session.json', 'forge/state/work.lock', 'forge/state/trace.jsonl.old'];
+function isAuthoritative(rel) { return FORGE_AUTHORITATIVE.some(p => p.endsWith('/') ? rel.startsWith(p) : rel === p); }
+function isForgePath(rel) { return rel === 'forge' || rel.startsWith('forge/'); }
+// Append-only files must start with exactly what HEAD holds. Field incident: a working
+// tree held trace.jsonl / discoveries.md a week BEHIND HEAD — committing "everything"
+// would have erased that history silently.
+const APPEND_ONLY = ['forge/state/trace.jsonl', 'forge/decisions.md', 'forge/discoveries.md'];
+function staleStateProblems() {
+  const bad = [];
+  for (const rel of APPEND_ONLY) {
+    const head = git(['show', `HEAD:${rel}`], { buffer: true });
+    if (head.code !== 0) continue; // not tracked at HEAD — nothing to be behind
+    let wt = null;
+    try { wt = fs.readFileSync(path.join(PROJECT, rel)); } catch (_) { wt = Buffer.alloc(0); }
+    const h = Buffer.from(head.out || '');
+    if (wt.length < h.length || !wt.subarray(0, h.length).equals(h)) {
+      // trace.jsonl rotates at 2MB: a rotated file is legitimately not a prefix of HEAD
+      if (rel === 'forge/state/trace.jsonl' && fs.existsSync(path.join(PROJECT, rel + '.old'))) {
+        try { const old = fs.readFileSync(path.join(PROJECT, rel + '.old')); if (Buffer.concat([old, wt]).subarray(0, h.length).equals(h) || old.subarray(0, h.length).equals(h)) continue; } catch (_) { }
+      }
+      bad.push(`${rel}: working tree ${wt.length} bytes, HEAD ${h.length} bytes — the working copy does not extend HEAD's content`);
+    }
+  }
+  return bad;
+}
+function staleStateMessage(bad) {
+  return `Refused: Forge's append-only history in the working tree is BEHIND or diverged from HEAD:\n` +
+    bad.map(b => `  - ${b}`).join('\n') +
+    `\nCommitting now would erase recorded history. Typical cause: switching branches with uncommitted Forge files ` +
+    `carries the older copy onto a HEAD that already holds newer content.\n` +
+    `Recover the HEAD content first (then re-append anything newer by hand):  git show HEAD:<file> > /tmp/head && diff /tmp/head <file>`;
+}
+// Porcelain -z parser: every changed path (tracked and untracked), rename targets included.
+function changedPaths() {
+  // raw output: trimming would eat the leading status column of the first entry
+  const r = spawnSync('git', ['status', '--porcelain', '-z', '-uall'], { cwd: PROJECT, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+  if (r.status !== 0) return [];
+  const parts = String(r.stdout || '').split('\0').filter(Boolean);
+  const res = [];
+  for (let i = 0; i < parts.length; i++) {
+    const code = parts[i].slice(0, 2), p = parts[i].slice(3);
+    res.push({ code, path: p });
+    if (code[0] === 'R' || code[0] === 'C') i++; // skip the rename source
+  }
+  return res;
+}
+function pathMatchesAny(rel, patterns) {
+  return (patterns || []).some(pt => {
+    if (pt === '**') return true;
+    if (pt.endsWith('/')) return rel.startsWith(pt);
+    return globMatch(rel, pt) || rel === pt;
+  });
+}
+
 // v0.16.2: the commit range a milestone or item spans. Forge does not commit; it
 // records what HEAD was, so plan and history can be joined afterwards.
 function gitHead() {
@@ -1840,6 +1964,17 @@ const commands = {
     } else if (action === 'set') {
       const [keyPath, value] = [argv[2], argv[3]];
       if (!keyPath || value === undefined) die('Usage: forge config set <dot.path> <value>');
+      // v0.17: leaving the per-milestone git flow is a recorded human decision
+      if (keyPath === 'options.integration') {
+        if (!['per-milestone', 'manual'].includes(value)) die(`options.integration must be 'per-milestone' (default) or 'manual' (Forge runs no git; the orchestrator follows a project convention).`);
+        if (value !== 'per-milestone') {
+          if (!opt('reason')) die(`Refused: opting out of the per-milestone git flow needs a recorded reason:\n  forge config set options.integration ${value} --reason "..."`);
+          appendMd(DECISIONS_FILE, '# Decisions log (append-only, via forge CLI)',
+            `\n### ${ts()} — Git flow: options.integration = ${value}\n- Authority: human\n- Decision: opt out of Forge's per-milestone git flow\n- Why: ${opt('reason')}\n`);
+        }
+      }
+      if (keyPath === 'options.baseBranch' && /^(main|master|prod|production)$/i.test(value))
+        die(`Refused: '${value}' looks like a production branch. Milestone branches merge into an integration branch (staging, develop); production is released from it, never built on directly.`);
       const keys = keyPath.split('.');
       let node = cfg;
       keys.slice(0, -1).forEach(k => { node[k] = node[k] || {}; node = node[k]; });
@@ -1899,6 +2034,20 @@ const commands = {
           if (seqPf.length)
             check('milestone names', unnamedPf.length === 0,
               unnamedPf.length ? `${unnamedPf.length} milestone(s) unnamed (${unnamedPf.slice(0, 6).join(', ')}${unnamedPf.length > 6 ? ', …' : ''}) — name each after the feature it enables: forge milestone update <id> --name "..."` : 'all milestones named', 'warning');
+        }
+        // v0.17: per-milestone git flow readiness
+        if (perMilestone(cfg)) {
+          const gc = gitCfg(cfg);
+          check('git flow: base branch', !!gc.base,
+            gc.base ? `per-milestone · base ${gc.base} · branches ${gc.pattern}` : `Forge's default flow since v0.17 is one branch + one PR per milestone. Confirm the base branch: forge config set options.baseBranch <branch> (opt out: forge config set options.integration manual --reason "...")`, 'decision');
+          check('git flow: remote', hasRemote(cfg), hasRemote(cfg) ? `${gc.remote}` : `no '${gc.remote}' remote — item commits stay local and ship cannot open a PR`, 'warning');
+          const ghOk = spawnSync(process.env.FORGE_GH || 'gh', ['--version'], { encoding: 'utf8' }).status === 0;
+          check('git flow: gh', ghOk, ghOk ? 'available' : `GitHub CLI not found — 'forge milestone ship' needs it (gh auth login)`, 'warning');
+          const tracked = gitx(['ls-files', '--', ...FORGE_GENERATED]).out.split('\n').filter(Boolean);
+          check('git flow: generated files', tracked.length === 0,
+            tracked.length ? `${tracked.length} generated Forge file(s) are tracked (${tracked.join(', ')}) — they change on every command and conflict on every merge. Untrack them (git rm --cached <files>) and add them to .gitignore` : 'none tracked', 'warning');
+          const staleP = staleStateProblems();
+          check('git flow: append-only history', staleP.length === 0, staleP.length ? staleP.join(' | ') + ' — task done will refuse to commit' : 'working tree extends HEAD', 'warning');
         }
         // v0.8: deterministic security scanning belongs in the verify path
         if ((cfg.options || {}).security !== 'off')
@@ -2030,6 +2179,35 @@ const commands = {
             `(A CANCELLED dependency must be dropped or re-pointed: forge task update ${item.id} --deps ...)`);
       const gateMsg = milestoneGateBlock(w, loadConfig(), item.milestone);
       if (gateMsg) die(`Refused: ${gateMsg}`);
+      // v0.17: per-milestone git flow — work happens on the milestone's branch
+      let ownBranchStart = null;
+      {
+        const cfgG = loadConfig() || {};
+        if (perMilestone(cfgG) && item.milestone) {
+          const gc = gitCfg(cfgG);
+          if (!gc.base)
+            die(`Refused: the per-milestone git flow needs a base branch (Forge's default flow since v0.17).\n` +
+                `  forge config set options.baseBranch <branch>     (e.g. staging or develop — never production)\n` +
+                `Opting out is a human decision: forge config set options.integration manual --reason "..."`);
+          const mb = milestoneBranch(cfgG, item.milestone);
+          const cur = currentBranch();
+          if (flag('own-branch')) {
+            if (!opt('reason')) die(`--own-branch requires --reason "..." — an item off the milestone branch is a recorded human decision.`);
+            const others = w.order.filter(id2 => id2 !== item.id && w.items[id2].status === 'IN_PROGRESS');
+            if (others.length) die(`Refused: --own-branch switches the working tree; finish the in-progress item(s) first: ${others.join(', ')}.`);
+            if (cur !== mb) die(`Refused: an own-branch item is cut from its milestone branch '${mb}' — you are on '${cur}'.\n  forge milestone branch ${item.milestone}`);
+            const ib = itemBranch(item);
+            const sw = git(branchExists(ib) ? ['switch', ib] : ['switch', '-c', ib]);
+            if (sw.code !== 0) die(`Refused: could not switch to '${ib}': ${sw.err}`);
+            ownBranchStart = { branch: ib, from: mb, reason: opt('reason'), ts: ts() };
+          } else {
+            const expected = (item.ownBranch && item.ownBranch.branch) || mb;
+            if (cur !== expected)
+              die(`Refused: '${item.id}' belongs to milestone '${item.milestone}', built on branch '${expected}' — you are on '${cur}'.\n` +
+                  (expected === mb ? `  forge milestone branch ${item.milestone}     (creates it from '${gc.base}' or switches to it)` : `  git switch ${expected}`));
+          }
+        }
+      }
       // v0.12: scope is part of the item's definition — no declared file scope, no start.
       // Field evidence (an 87-item project): scope derived only into brief prose is unenforceable.
       if (!(item.scope.allowed || []).length) {
@@ -2069,6 +2247,11 @@ const commands = {
         die(`Refused: '${item.id}' has failed ${fails} attempts. A third identical attempt is not allowed.\n` +
             `Escalate explicitly: forge task start ${item.id} --escalate <stronger-model|decompose|self|revisit-criteria> --note "what changes this time"`);
       // 1.2/F5: red-first — record each criterion check's pre-work result
+      if (ownBranchStart) {
+        item.ownBranch = ownBranchStart;
+        appendMd(DECISIONS_FILE, '# Decisions log (append-only, via forge CLI)',
+          `\n### ${ts()} — '${item.id}' built on its own branch\n- Authority: human\n- Decision: ${ownBranchStart.branch}, cut from ${ownBranchStart.from}; merges back into ${ownBranchStart.from} (never straight into the base branch)\n- Why: ${ownBranchStart.reason}\n`);
+      }
       item.preState = item.criteria.map(c => c.check ? { desc: c.desc, exit: run(c.check).exit } : null);
       item.startTree = treeState();
       // v0.16.2: HEAD at the first start — the lower bound of this item's commit range
@@ -2153,6 +2336,38 @@ const commands = {
         die(`Refused: every criterion check already passed BEFORE work started, and the tree is unchanged since start.\n` +
             `These checks prove nothing about this item. Either the item was already satisfied (forge task cancel ${item.id} --reason "already satisfied")\n` +
             `or the checks are vacuous (forge task update ${item.id} --criterion-remove/--criterion-add --reason "...").`);
+      // v0.17: per-milestone git flow — the pre-commit checks run BEFORE anything changes
+      const cfgD = loadConfig() || {};
+      const gitFlow = perMilestone(cfgD) && item.milestone;
+      let commitPlan = null;
+      if (gitFlow) {
+        const expected = (item.ownBranch && item.ownBranch.branch) || milestoneBranch(cfgD, item.milestone);
+        const cur = currentBranch();
+        if (cur !== expected)
+          die(`Refused: '${item.id}' is committed on '${expected}' — the working tree is on '${cur}'.\n  git switch ${expected}`);
+        const bad = staleStateProblems();
+        if (bad.length) die(staleStateMessage(bad));
+        const staged = git(['diff', '--cached', '--name-only']).out;
+        if (staged) die(`Refused: the index already holds staged changes (${staged.split('\n').slice(0, 6).join(', ')}).\n` +
+                        `Forge stages exactly the item's files itself. Unstage first: git restore --staged <paths>`);
+        const others = w.order.filter(id2 => id2 !== item.id && w.items[id2].status === 'IN_PROGRESS').map(id2 => w.items[id2]);
+        const exempt = String(((cfgD.options || {}).scopeExempt) || 'forge/,spec/,docs/').split(',').map(x => x.trim()).filter(x => x && x !== 'forge/');
+        if (cfgD.specDir) exempt.push(String(cfgD.specDir).replace(/\/?$/, '/'));
+        const mine = [], outside = [], deferred = [];
+        for (const c of changedPaths()) {
+          const rel = c.path;
+          if (isForgePath(rel)) continue; // Forge files are added below, authoritative ones only
+          if (pathMatchesAny(rel, item.scope.allowed) || pathMatchesAny(rel, exempt) || /\.md$/i.test(rel)) mine.push(rel);
+          else if (others.some(o => pathMatchesAny(rel, (o.scope || {}).allowed))) deferred.push(rel);
+          else outside.push(rel);
+        }
+        if (outside.length)
+          die(`Refused: the working tree holds changes outside '${item.id}''s scope and outside every in-progress item's scope:\n` +
+              outside.slice(0, 20).map(x => `  - ${x}`).join('\n') + (outside.length > 20 ? `\n  … and ${outside.length - 20} more` : '') +
+              `\nOne commit per item means exactly the item's files. Revert the stray changes, or widen the scope deliberately:\n` +
+              `  forge task update ${item.id} --allowed "..." --reason "..."`);
+        commitPlan = { branch: cur, mine, deferred };
+      }
       item.status = 'DONE';
       item.attempts.push({ ts: ts(), outcome: 'passed', note: opt('note') || null });
       // v0.16.2: the commits that landed while this item was in flight. Forge does not
@@ -2165,6 +2380,34 @@ const commands = {
       }
       item.updated = ts();
       saveWork(w);
+      if (commitPlan) {
+        const forgeFiles = changedPaths().map(c => c.path).filter(isAuthoritative);
+        const files = [...new Set([...commitPlan.mine, ...forgeFiles])];
+        const title = String(item.title || '').split('\n')[0].slice(0, 120);
+        const add = git(['add', '-A', '--', ...files]);
+        const commit = add.code === 0 ? git(['commit', '-m', `${item.id}: ${title}`]) : add;
+        if (commit.code !== 0) {
+          git(['reset', '-q', '--', ...files]);
+          item.status = 'IN_PROGRESS';
+          item.attempts.pop();
+          delete item.commits;
+          saveWork(w);
+          die(`Refused: the commit for '${item.id}' failed — the item stays IN_PROGRESS (a project hook may have rejected it):\n${(commit.err || commit.out).split('\n').slice(-20).join('\n')}\n` +
+              `Fix the cause and run 'forge task done ${item.id}' again. Never --no-verify.`);
+        }
+        const sha = git(['rev-parse', 'HEAD']).out;
+        let pushed = false, pushErr = null;
+        if (hasRemote(cfgD)) {
+          const pr = git(['push', '-u', gitCfg(cfgD).remote, commitPlan.branch]);
+          pushed = pr.code === 0; if (!pushed) pushErr = (pr.err || pr.out).split('\n').slice(-6).join('\n');
+        }
+        item.commit = { sha, branch: commitPlan.branch, pushed, ts: ts(), files: files.length };
+        saveWork(w);
+        out(`${item.id}: committed ${sha.slice(0, 10)} on ${commitPlan.branch} (${files.length} file(s))` +
+            (pushed ? ' and pushed.' : hasRemote(cfgD) ? ` — PUSH FAILED, the commit is local only:\n${pushErr}\nPush before 'milestone ship': git push -u ${gitCfg(cfgD).remote} ${commitPlan.branch}` : ' — no remote configured, local only.'));
+        if (commitPlan.deferred.length) out(`  ${commitPlan.deferred.length} changed file(s) belong to other in-progress items and were left for their own commits.`);
+        if (item.ownBranch) out(`  Own-branch item: open a PR ${item.ownBranch.branch} → ${item.ownBranch.from} (merge commit), merge it, then: forge milestone branch ${item.milestone}`);
+      }
       out(`${item.id} → DONE (verified ${v.ts})`);
       // v0.5: the spec is the living source of truth on EVERY project
       out(`Spec sync: if this item established, changed, or contradicted product behavior, update the affected ` +
@@ -2328,10 +2571,11 @@ const commands = {
             `  forge task dispatch ${item.id} --agent forge-implementer --note "<what it was handed>"`
           : `Refused: no launch on '${item.id}' to attach this message to (and no --agent given).\n` +
             `Record the launch first, or name the worker: forge task dispatch ${item.id} --kind message --agent <worker> --note "..."`);
-      item.dispatches.push({ ts: ts(), agent, kind, inherited: inherited || undefined, note: opt('note') || null });
+      item.dispatches.push({ ts: ts(), agent, kind, inherited: inherited || undefined, model: opt('model') || undefined, note: opt('note') || null });
       item.updated = ts();
       saveWork(w);
-      out(`${item.id} dispatch recorded → ${agent}${inherited ? ' (inherited from the last launch)' : ''}${kind === 'message' ? ' (mid-flight message)' : ''} (${item.dispatches.length} total on this item)`);
+      if (kind === 'launch' && !opt('model')) out(`NOTE: no --model recorded. Record the model the worker runs on (e.g. --model sonnet) — "which model did this item" is otherwise unanswerable.`);
+      out(`${item.id} dispatch recorded → ${agent}${opt('model') ? ` [${opt('model')}]` : ''}${inherited ? ' (inherited from the last launch)' : ''}${kind === 'message' ? ' (mid-flight message)' : ''} (${item.dispatches.length} total on this item)`);
 
     } else die('Usage: forge task add|list|show|start|dispatch|verify|done|fail|block|cancel|update ...');
   },
@@ -2679,6 +2923,20 @@ const commands = {
       const lastDisc = fs.readFileSync(DISCOVERIES_FILE, 'utf8').split('### ').slice(-1)[0];
       if (lastDisc && lastDisc.trim() && !lastDisc.startsWith('#')) out(`\nLatest discovery: ${lastDisc.split('\n')[0]}`);
     }
+    // v0.17: where the milestone's work lives in git
+    if (cfg && perMilestone(cfg)) {
+      const gc = gitCfg(cfg);
+      const am = activeMilestone(w);
+      const cur = currentBranch();
+      let line = `\nGit flow: per-milestone · base ${gc.base || 'NOT SET (forge config set options.baseBranch <branch>)'} · on ${cur || '?'}`;
+      if (am && gc.base) {
+        const b = milestoneBranch(cfg, am);
+        const ahead = git(['rev-list', '--count', `${gc.base}..${b}`]);
+        line += ` · active milestone ${am} → ${b}${cur === b ? '' : ' (NOT checked out)'}${ahead.code === 0 ? ` · ${ahead.out} commit(s) ahead of ${gc.base}` : ''}`;
+      }
+      out(line);
+      for (const m of milestoneSeq(w)) { const sh = ((w.gates || {})[m] || {}).ship; if (sh) out(`  ${m}: PR ${sh.pr}`); }
+    } else if (cfg) out(`\nGit flow: manual (Forge runs no git — recorded opt-out)`);
     out(`\nLogs: forge/decisions.md · forge/discoveries.md`);
   },
 
@@ -2741,6 +2999,16 @@ const commands = {
         const w = JSON.parse(fs.readFileSync(WORK_FILE, 'utf8'));
         const inProg = w.order.filter(id => w.items[id].status === 'IN_PROGRESS');
         check('work.json', true, `${w.order.length} items · ${inProg.length} IN_PROGRESS`);
+        // v0.17: git flow — the default changed; existing projects are told what to confirm
+        try {
+          const c2 = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
+          const gc2 = gitCfg(c2);
+          if (gc2.integration === 'per-milestone' && !gc2.base)
+            check('git flow', false, `v0.17 makes the per-milestone git flow Forge's default (one branch per milestone, one commit per item by 'task done', one PR per milestone by 'milestone ship'). Confirm the base branch: forge config set options.baseBranch <branch> — or opt out: forge config set options.integration manual --reason "..."`, true);
+          else check('git flow', true, gc2.integration === 'per-milestone' ? `per-milestone · base ${gc2.base}` : 'manual (recorded opt-out)');
+          const st2 = staleStateProblems();
+          if (st2.length) check('append-only history', false, st2.join(' | '), true);
+        } catch (_) { }
         const l = loadLock();
         if (inProg.length && (!l || l.released || !lockFresh(l)))
           check('orphaned work', false, `${inProg.join(', ')} IN_PROGRESS but no active orchestrator lock — a session likely died mid-item; audit before dispatching`, true);
@@ -2813,8 +3081,8 @@ const commands = {
     }
 
     // milestones
-    const ms = [];
-    items.forEach(i => { if (i.milestone && !ms.includes(i.milestone)) ms.push(i.milestone); });
+    // v0.17: the explicit milestone order (v0.16.2), not first appearance
+    const ms = milestoneSeq(w);
     if (ms.length) {
       out(`\n## Milestones`);
       for (const m of ms) {
@@ -2822,7 +3090,7 @@ const commands = {
         const mdone = mi.filter(i => i.status === 'DONE').length;
         const mfails = mi.reduce((a, i) => a + failsOf(i), 0);
         const g = (w.gates || {})[m];
-        out(`  ${m}: ${mdone}/${mi.length} done · ${mfails} failed attempt(s) · gate: ` +
+        out(`  ${milestoneLabel(w, m)}: ${mdone}/${mi.length} done · ${mfails} failed attempt(s) · gate: ` +
             (g && g.approved ? `approved ${g.ts.slice(0, 10)}` : (mdone === mi.length ? 'COMPLETE — awaiting human review' : 'pending')));
       }
     }
@@ -2850,6 +3118,8 @@ const commands = {
         out(`  ${model} [${thread}]: ${t.calls} calls · in ${t.in.toLocaleString()} · out ${t.out.toLocaleString()} · cache write ${t.cacheCreate.toLocaleString()} / read ${t.cacheRead.toLocaleString()}`);
       }
     }
+    for (const ov of olderVersions(Object.keys(c.models)))
+      out(`  Versions seen (${ov.family}): newest ${ov.newest} · older ${ov.older.join(', ')} — see the segment block below for whether an older one is still running`);
     const totOut = mainOut + sideOut;
     out(`\n## Delegation`);
     if (sideOut === 0 && c.dispatches > 0)
@@ -2891,6 +3161,16 @@ const commands = {
           dByAgent[a] = (dByAgent[a] || 0) + 1;
         }
       }
+      // v0.17: item-less dispatches (explore / review / security / advise) and models
+      const dByModel = {}; const dByPurpose = {};
+      for (const id of wU.order) for (const d3 of (wU.items[id].dispatches || [])) if (d3.kind !== 'message') dByModel[d3.model || '(model not recorded)'] = (dByModel[d3.model || '(model not recorded)'] || 0) + 1;
+      for (const d4 of (wU.dispatchLog || [])) {
+        dTotal++; dByAgent[d4.agent] = (dByAgent[d4.agent] || 0) + 1;
+        dByPurpose[d4.purpose] = (dByPurpose[d4.purpose] || 0) + 1;
+        dByModel[d4.model || '(model not recorded)'] = (dByModel[d4.model || '(model not recorded)'] || 0) + 1;
+      }
+      if (Object.keys(dByPurpose).length) out(`  Item-less dispatches (forge dispatch): ${Object.entries(dByPurpose).map(([k, v]) => `${k}×${v}`).join(' · ')}`);
+      if (Object.keys(dByModel).length) out(`  Dispatches by recorded model: ${Object.entries(dByModel).map(([k, v]) => `${k}×${v}`).join(' · ')}`);
       if (dTotal)
         out(`  Dispatch records in state (forge task dispatch — authoritative): ${dTotal} across ${dItems} item(s)` +
             (dMsg ? ` · ${dMsg} mid-flight message(s)` : '') + ` — ` +
@@ -2952,6 +3232,10 @@ const commands = {
               ` · ${fmtBig(e.context).padStart(7)} ctx ${String(Math.round(100 * e.context / tX)).padStart(3)}%` +
               ` · ${fmtBig(e.out).padStart(6)} out · ${fmtBig(e.calls ? e.context / e.calls : 0).padStart(6)}/call · ${role}`);
         }
+        // v0.17: an older version of a family ran beside a newer one in this segment
+        for (const ov of olderVersions(rows.filter(([, e]) => e.calls > 0).map(([n]) => n)))
+          out(`  ⚠ OLDER ${ov.family.toUpperCase()} VERSION IN THIS SEGMENT: ${ov.older.map(n => `${n} (${since.byModel[n].calls} calls, ${since.byModel[n].mainCalls ? 'incl. orchestrator' : 'workers'})`).join(', ')} ran beside ${ov.newest}.\n` +
+              `    Something resolved to an old model: an agent's 'model:' alias, a session /model, or an ANTHROPIC_DEFAULT_*_MODEL variable.`);
         if (since.mixedMain)
           out(`  ⚠ More than one orchestrator model ran in this segment. A code change and a model change are entangled here:\n` +
               `    the per-item delta above cannot be credited to either one. Re-baseline at the next gate and change one thing at a time.`);
@@ -2976,6 +3260,23 @@ const commands = {
     // every regen — writing it here just makes the manual run authoritative too.
     writeJson(USAGE_FILE, usageSnapshot(c));
     out(`\nSnapshot updated: forge/state/usage.json (the dashboard also refreshes this by itself — ${flag('write') ? '--write is no longer required' : 'no --write needed'}).`);
+  },
+
+  // -- dispatch (v0.17) — a dispatch with no work item is still a dispatch ---------
+  // Measured: ~30 explorer/reviewer/architect dispatches per project were invisible to
+  // state because 'task dispatch' requires an IN_PROGRESS item.
+  dispatch() {
+    const w = loadWork();
+    const agent = opt('agent'), purpose = opt('purpose');
+    const PURPOSES = ['explore', 'review', 'security', 'advise', 'test', 'other'];
+    if (!agent || !purpose || !PURPOSES.includes(purpose))
+      die(`Usage: forge dispatch --agent <worker> --purpose ${PURPOSES.join('|')} [--model <m>] [--item <id>] [--milestone <m>] [--note "..."]\n` +
+          `(A launch that implements a work item is 'forge task dispatch <id>' instead.)`);
+    if (opt('item') && !w.items[opt('item')]) die(`No work item '${opt('item')}'.`);
+    w.dispatchLog = w.dispatchLog || [];
+    w.dispatchLog.push({ ts: ts(), agent, purpose, model: opt('model') || undefined, item: opt('item') || undefined, milestone: opt('milestone') || undefined, note: opt('note') || null });
+    saveWork(w);
+    out(`Dispatch recorded → ${agent}${opt('model') ? ` [${opt('model')}]` : ''} (${purpose})${opt('item') ? ` about ${opt('item')}` : ''} — ${w.dispatchLog.length} item-less dispatch(es) in this project.`);
   },
 
   // -- milestone gates (F9) -------------------------------------------------------
@@ -3029,6 +3330,116 @@ const commands = {
       saveWork(w);
       out(`Milestone ${m} updated:\n` + changes.map(c => `  - ${c}`).join('\n'));
       const nw = milestoneNameWarning(r.name); if (nw && opt('name') !== null) out(`NAME WARNING: ${nw}`);
+    } else if (sub === 'branch') {
+      // v0.17: create or switch to a milestone's branch, safely
+      const cfgB = loadConfig() || {};
+      const gc = gitCfg(cfgB);
+      const m = argv[2];
+      if (!w.milestones[m]) die(`Unknown milestone '${m || ''}'. See: forge milestone list`);
+      if (!perMilestone(cfgB)) die(`options.integration is '${gc.integration}' — Forge runs no git in this project.`);
+      if (!gc.base) die(`Set the base branch first: forge config set options.baseBranch <branch>`);
+      const b = milestoneBranch(cfgB, m);
+      const cur = currentBranch();
+      if (cur !== b) {
+        const dirty = changedPaths().filter(c => !isForgePath(c.path));
+        if (dirty.length) die(`Refused: uncommitted changes outside forge/ would travel to '${b}':\n` + dirty.slice(0, 12).map(c => `  - ${c.path}`).join('\n') + `\nCommit them with their item, or stash them, first.`);
+        const remote = hasRemote(cfgB) ? gc.remote : null;
+        if (remote) git(['fetch', remote]);
+        let sw;
+        if (branchExists(b)) sw = git(['switch', b]);
+        else if (remote && git(['rev-parse', '--verify', '--quiet', `refs/remotes/${remote}/${b}`]).code === 0) sw = git(['switch', '-c', b, '--track', `${remote}/${b}`]);
+        else {
+          const start = remote && git(['rev-parse', '--verify', '--quiet', `refs/remotes/${remote}/${gc.base}`]).code === 0 ? `${remote}/${gc.base}` : gc.base;
+          sw = git(['switch', '--no-track', '-c', b, start]);
+        }
+        if (sw.code !== 0) die(`Refused: git could not switch to '${b}':\n${sw.err}\n(Forge files modified in the working tree differ from the target — commit them on the current branch first.)`);
+        out(`On ${b}${branchExists(b) ? '' : ''} (base: ${gc.base}).`);
+      } else out(`Already on ${b}.`);
+      const bad = staleStateProblems();
+      if (bad.length) out(`\n⚠ ${staleStateMessage(bad).replace(/^Refused: /, '')}`);
+      return;
+    } else if (sub === 'ship') {
+      // v0.17: one PR per milestone, opened at the gate, merged with a merge commit
+      const cfgS = loadConfig() || {};
+      const gc = gitCfg(cfgS);
+      const m = argv[2];
+      if (!w.milestones[m]) die(`Unknown milestone '${m || ''}'. See: forge milestone list`);
+      if (!perMilestone(cfgS)) die(`options.integration is '${gc.integration}' — ship is part of the per-milestone git flow.`);
+      if (!gc.base) die(`Set the base branch first: forge config set options.baseBranch <branch>`);
+      if (/^(main|master|prod|production)$/i.test(gc.base)) die(`Refused: base branch '${gc.base}' is a production branch — Forge never ships straight to production.`);
+      const g = w.gates[m] || {};
+      if (!g.approved) die(`Refused: milestone '${m}' is not approved. ship comes after the human gate: forge milestone approve ${m} --note "..."`);
+      const b = milestoneBranch(cfgS, m);
+      if (currentBranch() !== b) die(`Refused: switch to the milestone branch first: git switch ${b}`);
+      const bad = staleStateProblems();
+      if (bad.length) die(staleStateMessage(bad));
+      // commit the gate record (approval, security note) that the approve step left in forge/
+      {
+        const stray = changedPaths().filter(c => !isForgePath(c.path));
+        if (stray.length) die(`Refused: uncommitted changes outside forge/ on '${b}':\n` + stray.slice(0, 12).map(c => `  - ${c.path}`).join('\n') + `\nEvery change ships inside an item commit.`);
+        const ff = changedPaths().map(c => c.path).filter(isAuthoritative);
+        if (ff.length) {
+          const a = git(['add', '-A', '--', ...ff]);
+          const c = a.code === 0 ? git(['commit', '-m', `milestone ${m}: gate record`]) : a;
+          if (c.code !== 0) die(`Refused: committing the gate record failed:\n${c.err || c.out}`);
+        }
+      }
+      const remote = hasRemote(cfgS) ? gc.remote : null;
+      if (!remote) die(`Refused: no '${gc.remote}' remote — a milestone PR needs a pushed branch.`);
+      const push = git(['push', '-u', remote, b]);
+      if (push.code !== 0) die(`Refused: pushing '${b}' failed:\n${push.err}`);
+      git(['fetch', remote, gc.base]);
+      const range = `${remote}/${gc.base}..${b}`;
+      const log = git(['log', '--no-merges', '--format=%H%x09%s', range]);
+      if (log.code !== 0) die(`Refused: cannot read ${range}: ${log.err}`);
+      const commits = log.out ? log.out.split('\n').map(l => { const [sha, ...rest] = l.split('\t'); return { sha, subject: rest.join('\t') }; }) : [];
+      const mItems = w.order.map(id => w.items[id]).filter(t => t.milestone === m && t.status === 'DONE');
+      const ids = new Set(mItems.map(t => t.id));
+      const missing = mItems.filter(t => t.commit && t.commit.sha && git(['merge-base', '--is-ancestor', t.commit.sha, b]).code !== 0).map(t => t.id);
+      const extra = commits.filter(c => !(c.subject.startsWith(`milestone ${m}:`) || [...ids].some(id => c.subject.startsWith(`${id}: `))));
+      if (missing.length) die(`Refused: item commit(s) are not on '${b}': ${missing.join(', ')}` + (mItems.some(t => t.ownBranch) ? `\n(Own-branch items are merged into '${b}' before the milestone ships.)` : ''));
+      if (extra.length && !opt('reason'))
+        die(`Refused: '${b}' carries commits that are not this milestone's items:\n` + extra.slice(0, 12).map(c => `  - ${c.sha.slice(0, 10)} ${c.subject}`).join('\n') +
+            `\nA milestone PR contains exactly its item commits. If these belong, ship with --reason "..." (recorded).`);
+      const noCommit = mItems.filter(t => !t.commit).map(t => t.id);
+      if (gc.gateSteps.length && !flag('steps-done')) {
+        out(`Gate steps for this project (options.gateSteps) — do them, then re-run with --steps-done:`);
+        gc.gateSteps.forEach((st, i) => out(`  ${i + 1}. ${st}`));
+        die(`Refused: gate steps not confirmed.`);
+      }
+      const GH = process.env.FORGE_GH || 'gh';
+      const gh = (args) => { const r = spawnSync(GH, args, { cwd: PROJECT, encoding: 'utf8', timeout: 120000 }); return { code: r.status === null ? -1 : r.status, out: (r.stdout || '').trim(), err: (r.stderr || '').trim() || (r.error ? String(r.error.message) : '') }; };
+      if (gh(['--version']).code !== 0) die(`Refused: the GitHub CLI ('gh') is not available — install it and run 'gh auth login'.`);
+      const lastV = t => (t.verifications || []).filter(x => x.passed).pop();
+      const body = [`Milestone **${m}** — ${milestoneName(w, m) || '(unnamed)'}`, '',
+        `Gate approved ${g.ts}${g.note ? ` — ${String(g.note).slice(0, 300)}` : ''}`, '', '| Item | Commit | Verified |', '|---|---|---|',
+        ...mItems.map(t => { const lv = lastV(t); return `| ${t.id} ${String(t.title).replace(/\|/g, '/').slice(0, 90)} | ${t.commit ? t.commit.sha.slice(0, 10) : '—'} | ${lv ? `${lv.ts.slice(0, 16)} · ${lv.results.length} checks` : '—'} |`; }),
+        '', `Merge with a **merge commit** (never squash) so the per-item commits survive.`, '', `Opened by forge milestone ship.`].join('\n');
+      const bodyFile = path.join(STATE, `ship-${m}.md`);
+      fs.writeFileSync(bodyFile, body + '\n');
+      const pr = gh(['pr', 'create', '--base', gc.base, '--head', b, '--title', `${m}: ${milestoneName(w, m) || m}`, '--body-file', bodyFile]);
+      try { fs.unlinkSync(bodyFile); } catch (_) { }
+      if (pr.code !== 0) die(`Refused: gh pr create failed:\n${pr.err || pr.out}`);
+      const url = pr.out.split('\n').filter(Boolean).pop();
+      const allow = gh(['api', 'repos/{owner}/{repo}', '--jq', '.allow_merge_commit']);
+      if (allow.code === 0 && allow.out === 'false') out(`⚠ This repository does not allow merge commits — enable them (Settings → General → Pull Requests) or the per-item commits will be squashed away.`);
+      const prot = gh(['api', `repos/{owner}/{repo}/branches/${gc.base}/protection/required_status_checks`, '--jq', '((.contexts // []) + ((.checks // []) | map(.context))) | length']);
+      const requiredChecks = prot.code === 0 ? (parseInt(prot.out, 10) || 0) > 0 : null;
+      let autoMerge = false;
+      if (flag('auto-merge')) {
+        if (requiredChecks === true) { const am = gh(['pr', 'merge', url, '--auto', `--${gc.merge === 'merge' ? 'merge' : gc.merge}`]); autoMerge = am.code === 0; if (!autoMerge) out(`⚠ auto-merge could not be enabled: ${am.err}`); }
+        else out(`⚠ NOT enabling auto-merge: '${gc.base}' has ${requiredChecks === false ? 'NO required status checks' : 'unknown protection (no admin rights to read it)'} — auto-merge would merge before CI finishes.`);
+      }
+      w.gates[m] = Object.assign({}, w.gates[m], { ship: { pr: url, branch: b, head: git(['rev-parse', 'HEAD']).out, ts: ts(), requiredChecks, autoMerge, extraReason: extra.length ? opt('reason') : undefined } });
+      saveWork(w);
+      out(`Milestone ${m} shipped for review: ${url}`);
+      if (noCommit.length) out(`  Note: ${noCommit.length} DONE item(s) have no Forge commit (done before the git flow, or nothing to commit): ${noCommit.slice(0, 8).join(', ')}`);
+      if (requiredChecks === false) out(`⚠ '${gc.base}' has NO required status checks: merging is only gated by you waiting for CI. Merge with a merge commit once CI is green:\n  gh pr merge ${url} --merge`);
+      else if (requiredChecks === null) out(`⚠ Could not read '${gc.base}' branch protection (needs admin). Wait for CI, then: gh pr merge ${url} --merge`);
+      else if (!autoMerge) out(`Merge with a merge commit once CI is green: gh pr merge ${url} --merge   (or re-run with --auto-merge)`);
+      const checks = gh(['pr', 'checks', url]);
+      if (checks.out) out(`CI:\n${checks.out.split('\n').slice(0, 15).map(l => '  ' + l).join('\n')}`);
+      return;
     } else if (sub === 'remove') {
       // v0.16.2: a re-cut empties old milestones; only an empty, never-gated one can go
       const m = argv[2];
@@ -3152,6 +3563,7 @@ const commands = {
       out(`Milestone '${milestoneLabel(w, m)}' approved — later milestones may now start.`);
       if (mCommits) out(`Commit range recorded: ${mCommits.base.slice(0, 7)}..${mCommits.head.slice(0, 7)} (${mCommits.count} commit(s)) — git log ${mCommits.base}..${mCommits.head}`);
       out(`📊 forge/dashboard.html now shows this milestone closed — worth a look for the user.`);
+      if (perMilestone(loadConfig() || {})) out(`\nNext (per-milestone git flow): forge milestone ship ${m}   — opens ONE PR ${milestoneBranch(loadConfig() || {}, m)} → ${gitCfg(loadConfig() || {}).base || '<baseBranch>'} with every item commit.`);
       // v0.16: the gate is the designed session boundary. Measured: the orchestrator
       // re-read 601M cached tokens across one long session because context only ever
       // grows. Forge's state lives on disk precisely so a cold session can resume.
@@ -3437,7 +3849,7 @@ const commands = {
   task update <id> [--title|--objective|--milestone|--deps|--allowed|--forbidden|--mock]
                    [--criterion-add "d::cmd"]... [--criterion-remove i]... [--reason r]
                                          audited edits; criteria changes after failures require --reason
-  task dispatch <id> --agent <worker> [--kind launch|message] [--note]
+  task dispatch <id> --agent <worker> [--model <m>] [--kind launch|message] [--note]
                                          --agent is required on a launch; a --kind message inherits
                                          the agent of the launch it follows
   task block <id> --reason | cancel <id> --reason [--dependents drop|cancel]
@@ -3445,6 +3857,13 @@ const commands = {
   milestone update <m> [--name ..] [--demo ..] [--reason ..]
   milestone move <m> --before|--after <M> --reason ".." [--pull-deps]
   milestone remove <m> --reason ".."     only an empty milestone with no gate record
+  milestone branch <m>                   v0.17: create/switch to the milestone branch (from options.baseBranch)
+  milestone ship <m> [--steps-done] [--auto-merge] [--reason ..]
+                                         v0.17: after the gate — commit the gate record, push, open ONE PR
+                                         milestone branch → base (merge commit), record it; auto-merge only
+                                         when the base branch has required status checks
+  dispatch --agent <a> --purpose explore|review|security|advise|test|other [--model m] [--item id] [--note]
+                                         v0.17: record a dispatch that has no IN_PROGRESS item
                                          v0.16.2: milestones are named feature slices in an explicit
                                          order; a move that would break a dependency or jump ahead of
                                          started work is refused (--pull-deps brings blockers along)
@@ -3482,6 +3901,9 @@ const commands = {
   hook session-start|pretooluse|stop     (used by plugin hooks)
 
   config keys: verify.* · options.gates per-milestone|end-only · options.security off · options.protect "p1/,p2/"
+               options.integration per-milestone|manual (v0.17 git flow; manual needs --reason) · options.baseBranch
+               options.branchPattern "milestone/<id>" · options.mergeMethod merge · options.remote origin
+               options.gateSteps "step one || step two"   shown at 'milestone ship', confirmed with --steps-done
                options.concurrency N     max items IN_PROGRESS at once (default 1 = serial; raise only with
                                          disjoint scopes — see OPERATING.md parallel dispatch)
                options.scopeExempt "a/,b/"  dirs exempt from the scope whitelist (default forge/,spec/,docs/; *.md always exempt)

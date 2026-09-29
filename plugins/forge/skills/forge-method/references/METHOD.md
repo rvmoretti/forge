@@ -186,6 +186,15 @@ nearly mechanical, bottom-up in dependency order:
 `foundation → entities → API → logic → wire frontend`.
 `PLAN.md` captures this at Step 7.
 
+How that work reaches the repository is not designed per project either: Forge's
+per-milestone git flow (v0.17) builds each milestone on its own branch
+(`milestone/<id>` from the project's base branch), commits each verified item
+once (`<id>: <title>`), and ships one PR per milestone at the gate, merged with a
+merge commit. Step 7 confirms only the base branch (`forge config set
+options.baseBranch <branch>`) and any project gate steps (`options.gateSteps`,
+e.g. "apply the milestone's migrations to staging"). Opting out is a recorded
+human decision (`options.integration manual --reason`).
+
 ---
 
 ## File templates (authoritative — generate the skeleton from these)

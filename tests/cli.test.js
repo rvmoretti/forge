@@ -40,6 +40,9 @@ function freshProject() {
   forge(['config', 'set', 'phase', 'build']);
   forge(['config', 'set', 'verify.test', 'node -e "process.exit(0)"']);
   forge(['config', 'set', 'options.graphify', 'skip']);
+  // v0.17: the per-milestone git flow is the default; the legacy tests exercise the
+  // gates without git, so they opt out explicitly (the v0.17 tests opt back in).
+  forge(['config', 'set', 'options.integration', 'manual', '--reason', 'test fixture']);
 }
 function addItem(id, extra = []) {
   // v0.12: start refuses an unscoped item — default a scope; explicit --allowed in `extra` wins (opt() takes the first).
@@ -1458,4 +1461,206 @@ test('a closed item accepts a component tag and nothing else', () => {
   assert.notStrictEqual(other.code, 0);
   const mixed = forge(['task', 'update', 'C1', '--component', 'X', '--title', 'x']);
   assert.notStrictEqual(mixed.code, 0);
+});
+
+// --- v0.17: per-milestone git flow ----------------------------------------------
+
+function g(...args) { return spawnSync('git', args, { cwd: dir, encoding: 'utf8' }); }
+function gitFlowProject() {
+  const remote = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-remote-'));
+  spawnSync('git', ['init', '--bare', '-q', remote]);
+  g('checkout', '-q', '-b', 'staging');
+  forge(['config', 'set', 'options.integration', 'per-milestone']);
+  forge(['config', 'set', 'options.baseBranch', 'staging']);
+  fs.writeFileSync(path.join(dir, '.gitignore'), ['forge/dashboard.html', 'forge/state/usage.json', 'forge/state/usage-cache.json',
+    'forge/state/preflight.json', 'forge/state/session.json', 'forge/state/work.lock', ''].join('\n'));
+  fs.mkdirSync(path.join(dir, 'src'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'src', 'keep.txt'), 'x');
+  g('add', '-A'); g('commit', '-qm', 'base');
+  g('remote', 'add', 'origin', remote); g('push', '-q', '-u', 'origin', 'staging');
+  return remote;
+}
+function fakeGh() {
+  const bin = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-gh-'));
+  const log = path.join(bin, 'calls.log');
+  const script = path.join(bin, 'gh');
+  fs.writeFileSync(script, `#!/bin/sh\necho "$@" >> "${log}"\ncase "$1 $2" in\n  "pr create") echo "https://github.com/acme/app/pull/7" ;;\n  "api repos/{owner}/{repo}") echo true ;;\n  "api "*) exit 1 ;;\n  "pr checks") echo "ci  pending" ;;\nesac\nexit 0\n`);
+  fs.chmodSync(script, 0o755);
+  return { gh: script, log };
+}
+
+test('git flow: config guards — opting out needs a reason, production is never the base', () => {
+  assert.notStrictEqual(forge(['config', 'set', 'options.integration', 'manual']).code, 0);
+  assert.notStrictEqual(forge(['config', 'set', 'options.baseBranch', 'main']).code, 0);
+  assert.strictEqual(forge(['config', 'set', 'options.baseBranch', 'staging']).code, 0);
+});
+
+test('git flow: start refuses without a base branch and off the milestone branch', () => {
+  forge(['config', 'set', 'options.integration', 'per-milestone']);
+  addItem('A', ['--milestone', 'M1']);
+  const noBase = forge(['task', 'start', 'A']);
+  assert.notStrictEqual(noBase.code, 0);
+  assert.match(noBase.out, /needs a base branch/);
+  gitFlowProject();
+  const pf = forge(['preflight']);
+  assert.match(pf.out, /OK\s+git flow: base branch: per-milestone · base staging/);
+  assert.match(pf.out, /git flow: append-only history: working tree extends HEAD/);
+  const wrong = forge(['task', 'start', 'A']);
+  assert.notStrictEqual(wrong.code, 0);
+  assert.match(wrong.out, /built on branch 'milestone\/M1' — you are on 'staging'/);
+  const br = forge(['milestone', 'branch', 'M1']);
+  assert.strictEqual(br.code, 0, br.out);
+  assert.strictEqual(g('rev-parse', '--abbrev-ref', 'HEAD').stdout.trim(), 'milestone/M1');
+  assert.strictEqual(forge(['task', 'start', 'A']).code, 0);
+});
+
+test('git flow: done makes exactly one commit per item — its files plus Forge state — and pushes it', () => {
+  const remote = gitFlowProject();
+  forge(['task', 'add', '--id', 'A', '--title', 'Pass tokens', '--criterion', 'ok::node -e "process.exit(0)"', '--milestone', 'M1', '--allowed', 'src/']);
+  forge(['milestone', 'branch', 'M1']);
+  forge(['task', 'start', 'A']);
+  fs.writeFileSync(path.join(dir, 'src', 'a.js'), 'a');
+  assert.strictEqual(forge(['task', 'verify', 'A']).code, 0);
+  const d = forge(['task', 'done', 'A']);
+  assert.strictEqual(d.code, 0, d.out);
+  assert.strictEqual(g('log', '-1', '--format=%s').stdout.trim(), 'A: Pass tokens');
+  const files = g('show', '--name-only', '--format=', 'HEAD').stdout.trim().split('\n');
+  assert.ok(files.includes('src/a.js'));
+  assert.ok(files.includes('forge/state/work.json'));
+  assert.ok(!files.includes('forge/dashboard.html'));
+  assert.strictEqual(g('rev-list', '--count', 'staging..HEAD').stdout.trim(), '1');
+  const w = work();
+  assert.strictEqual(w.items.A.status, 'DONE');
+  assert.strictEqual(w.items.A.commit.pushed, true);
+  const r = spawnSync('git', ['--git-dir', remote, 'rev-parse', 'milestone/M1'], { encoding: 'utf8' });
+  assert.strictEqual(r.stdout.trim(), w.items.A.commit.sha);
+});
+
+test('git flow: done refuses changes outside the item scope', () => {
+  gitFlowProject();
+  addItem('A', ['--milestone', 'M1']);
+  forge(['milestone', 'branch', 'M1']);
+  forge(['task', 'start', 'A']);
+  fs.writeFileSync(path.join(dir, 'src', 'a.js'), 'a');
+  fs.writeFileSync(path.join(dir, 'stray.js'), 's');
+  forge(['task', 'verify', 'A']);
+  const d = forge(['task', 'done', 'A']);
+  assert.notStrictEqual(d.code, 0);
+  assert.match(d.out, /outside 'A''s scope/);
+  assert.match(d.out, /stray\.js/);
+  assert.strictEqual(work().items.A.status, 'IN_PROGRESS');
+});
+
+test('git flow: done refuses when append-only history is behind HEAD (stale state)', () => {
+  gitFlowProject();
+  addItem('A', ['--milestone', 'M1']);
+  addItem('B', ['--milestone', 'M1']);
+  forge(['milestone', 'branch', 'M1']);
+  forge(['task', 'start', 'A']);
+  fs.writeFileSync(path.join(dir, 'src', 'a.js'), 'a');
+  forge(['task', 'verify', 'A']);
+  assert.strictEqual(forge(['task', 'done', 'A']).code, 0);
+  forge(['task', 'start', 'B']);
+  fs.writeFileSync(path.join(dir, 'src', 'b.js'), 'b');
+  forge(['task', 'verify', 'B']);
+  // shorten the working copy of trace.jsonl below what HEAD holds
+  const tf = path.join(dir, 'forge', 'state', 'trace.jsonl');
+  fs.writeFileSync(tf, fs.readFileSync(tf, 'utf8').split('\n')[0] + '\n');
+  const d = forge(['task', 'done', 'B']);
+  assert.notStrictEqual(d.code, 0);
+  assert.match(d.out, /BEHIND or diverged from HEAD/);
+  assert.match(d.out, /trace\.jsonl/);
+});
+
+test('git flow: own-branch escape hatch needs a reason and commits on item/<id>', () => {
+  gitFlowProject();
+  addItem('R', ['--milestone', 'M1', '--title', 'Risky migration']);
+  forge(['milestone', 'branch', 'M1']);
+  assert.notStrictEqual(forge(['task', 'start', 'R', '--own-branch']).code, 0);
+  const s = forge(['task', 'start', 'R', '--own-branch', '--reason', 'large schema change']);
+  assert.strictEqual(s.code, 0, s.out);
+  assert.strictEqual(g('rev-parse', '--abbrev-ref', 'HEAD').stdout.trim(), 'item/R');
+  fs.writeFileSync(path.join(dir, 'src', 'r.js'), 'r');
+  forge(['task', 'verify', 'R']);
+  const d = forge(['task', 'done', 'R']);
+  assert.strictEqual(d.code, 0, d.out);
+  assert.match(d.out, /open a PR item\/R → milestone\/M1/);
+  assert.strictEqual(work().items.R.commit.branch, 'item/R');
+  assert.match(fs.readFileSync(path.join(dir, 'forge', 'decisions.md'), 'utf8'), /built on its own branch/);
+});
+
+test('git flow: ship refuses an unapproved gate, then opens one PR and records it', () => {
+  gitFlowProject();
+  const { gh, log } = fakeGh();
+  addItem('A', ['--milestone', 'M1']);
+  forge(['milestone', 'branch', 'M1']);
+  forge(['task', 'start', 'A']);
+  fs.writeFileSync(path.join(dir, 'src', 'a.js'), 'a');
+  forge(['task', 'verify', 'A']); forge(['task', 'done', 'A']);
+  const early = forge(['milestone', 'ship', 'M1'], { env: { FORGE_GH: gh } });
+  assert.notStrictEqual(early.code, 0);
+  assert.match(early.out, /not approved/);
+  forge(['milestone', 'security', 'M1', '--agent', 'forge-reviewer', '--note', 'clean']);
+  forge(['milestone', 'approve', 'M1', '--note', 'ok']);
+  forge(['config', 'set', 'options.gateSteps', 'apply migrations to staging']);
+  const noSteps = forge(['milestone', 'ship', 'M1'], { env: { FORGE_GH: gh } });
+  assert.notStrictEqual(noSteps.code, 0);
+  assert.match(noSteps.out, /apply migrations to staging/);
+  const ok = forge(['milestone', 'ship', 'M1', '--steps-done'], { env: { FORGE_GH: gh } });
+  assert.strictEqual(ok.code, 0, ok.out);
+  assert.match(ok.out, /pull\/7/);
+  assert.match(ok.out, /Could not read 'staging' branch protection/);
+  const calls = fs.readFileSync(log, 'utf8');
+  assert.match(calls, /pr create --base staging --head milestone\/M1/);
+  assert.doesNotMatch(calls, /pr merge/);
+  assert.strictEqual(work().gates.M1.ship.pr, 'https://github.com/acme/app/pull/7');
+  assert.strictEqual(g('log', '-1', '--format=%s').stdout.trim(), 'milestone M1: gate record');
+});
+
+test('dispatches: item-less dispatches and models are recorded', () => {
+  const r = forge(['dispatch', '--agent', 'forge-explorer', '--purpose', 'explore', '--model', 'haiku', '--note', 'map the checkout']);
+  assert.strictEqual(r.code, 0, r.out);
+  assert.notStrictEqual(forge(['dispatch', '--agent', 'x', '--purpose', 'nonsense']).code, 0);
+  addItem('D');
+  forge(['task', 'start', 'D']);
+  forge(['task', 'dispatch', 'D', '--agent', 'forge-implementer', '--model', 'sonnet']);
+  const w = work();
+  assert.strictEqual(w.dispatchLog[0].purpose, 'explore');
+  assert.strictEqual(w.dispatchLog[0].model, 'haiku');
+  assert.strictEqual(w.items.D.dispatches[0].model, 'sonnet');
+});
+
+test('usage: a top-level transcript that opens with a Forge brief is a worker, and an older model version is flagged', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-ver-'));
+  const projDir = path.join(root, dir.replace(/[^a-zA-Z0-9]/g, '-'));
+  fs.mkdirSync(projDir, { recursive: true });
+  const line = (model, out, ctx) => JSON.stringify({
+    type: 'assistant', timestamp: '2026-09-29T10:00:00.000Z',
+    message: { model, usage: { output_tokens: out, input_tokens: 10, cache_read_input_tokens: ctx } }
+  });
+  const userL = (txt) => JSON.stringify({ type: 'user', timestamp: '2026-09-29T10:00:00.000Z', message: { content: txt } });
+  addItem('V0');
+  forge(['task', 'start', 'V0']); touch('v0.txt'); forge(['task', 'verify', 'V0']); forge(['task', 'done', 'V0']);
+  fs.writeFileSync(path.join(projDir, 'orch.jsonl'), [userL('continue'), line('claude-opus-5-5', 100, 200000)].join('\n') + '\n');
+  forge(['usage', '--baseline', '--label', 'pre'], { env: { FORGE_CLAUDE_PROJECTS: root } });
+  // in the new segment a review runs as a TOP-LEVEL transcript on an older Opus
+  fs.appendFileSync(path.join(projDir, 'orch.jsonl'), line('claude-opus-5-5', 50, 100000) + '\n');
+  fs.writeFileSync(path.join(projDir, 'rev.jsonl'), [userL('# Review brief — V1: check'), line('claude-opus-4-7', 20, 30000)].join('\n') + '\n');
+  addItem('V1');
+  forge(['task', 'start', 'V1']); touch('v1.txt'); forge(['task', 'verify', 'V1']); forge(['task', 'done', 'V1']);
+  const r = forge(['usage'], { env: { FORGE_CLAUDE_PROJECTS: root } });
+  assert.strictEqual(r.code, 0, r.out);
+  assert.match(r.out, /claude-opus-4-7 \[side\]/);
+  assert.doesNotMatch(r.out, /claude-opus-4-7 \[main\]/);
+  assert.match(r.out, /Versions seen \(opus\): newest claude-opus-5-5 · older claude-opus-4-7/);
+  assert.match(r.out, /OLDER OPUS VERSION IN THIS SEGMENT: claude-opus-4-7 \(1 calls, workers\)/);
+});
+
+test('opus-tier agents inherit the session model; no agent pins a version', () => {
+  const agents = path.resolve(__dirname, '..', 'plugins', 'forge', 'agents');
+  for (const f of fs.readdirSync(agents)) {
+    const m = fs.readFileSync(path.join(agents, f), 'utf8').match(/^model:\s*(\S+)/m);
+    assert.ok(m, f + ' declares a model');
+    assert.ok(['inherit', 'sonnet', 'haiku'].includes(m[1]), `${f}: model '${m[1]}' — Opus-tier agents inherit; nothing pins a version`);
+  }
 });

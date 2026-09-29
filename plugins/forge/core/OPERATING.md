@@ -74,8 +74,11 @@ from confirmed goals, milestone cut across everything. Then the same loop.
    are not optional.
 3. **Dispatch** to a worker agent (`forge-implementer`, `forge-tester`, …) in
    a fresh context, with the brief as the complete task. **Record the handoff
-   first**: `forge task dispatch <id> --agent <worker>` immediately before
-   launching — the agent mix and brief-vs-execution timing then live in
+   first**: `forge task dispatch <id> --agent <worker> --model <model>` immediately
+   before launching (v0.17: the model is recorded too). A dispatch with no work
+   item — exploration, a review, the security pass, advice — is recorded with
+   `forge dispatch --agent <a> --purpose explore|review|security|advise --model <m>`;
+   unrecorded dispatches are invisible to every measurement — the agent mix and brief-vs-execution timing then live in
    state, not in transcript archaeology. The dispatch prompt's first line
    must still be the brief header (`# Work brief — <id>: <title>`) even when
    the brief body is passed by file path — `forge usage` ties old logs
@@ -87,11 +90,16 @@ from confirmed goals, milestone cut across everything. Then the same loop.
    worker is never resumed through chat; that path is retry-by-fresh-brief,
    nothing else.
 4. **Verify**: `forge task verify <id>` — machine evidence, not the worker's
-   claim. Then review the diff and the worker's report yourself; read code
-   deeply only where evidence is ambiguous or risk is high. **For high-risk
-   diffs, dispatch the review to `forge-reviewer` in a fresh context** — you
-   briefed this work, so your own read is colored by the assumptions that
-   produced it; a fresh context's verdict is not. Machine checks are already
+   claim. **Then dispatch the review — by default, not by exception** (v0.17):
+   routine items to `forge-reviewer` with a model override to `sonnet`,
+   high-risk items (auth, data access, payments, migrations, security) to
+   `forge-reviewer` as defined — it inherits YOUR model, the newest Opus you run
+   (v0.17: never an alias that can lag). The review prompt's first line is
+   `# Review brief — <id>: <title>` so usage attributes it to the worker lane. You briefed this work, so your own read is
+   colored by the assumptions that produced it — and every token you spend
+   reading a diff is re-read on every later turn of this session, while a
+   worker's window is thrown away. Read the diff yourself only when the
+   verdict is ambiguous or the evidence conflicts. Machine checks are already
    unbiased; this rule is about the judgment layer. **Screen items get the
    UX review**: capture the rendered screen (Playwright screenshot), attach
    it to the evidence (`forge task verify <id> --artifact <path>`), and have
@@ -99,7 +107,14 @@ from confirmed goals, milestone cut across everything. Then the same loop.
    `design-ux` pack's review protocol — a screen whose checks pass but whose
    UX review fails is a failed item, not a nit.
 5. **Close or retry**:
-   - Pass and review clean → `forge task done <id>`; then **sync the spec —
+   - Pass and review clean → `forge task done <id>`. Under the per-milestone
+     git flow (v0.17 default) `done` also makes the item's ONE commit
+     (`<id>: <title>` — its scope's files plus Forge's authoritative state) on
+     the milestone branch and pushes it; no PR per item, no CI per item —
+     `task verify` already ran the suite. `done` refuses off-branch, with
+     changes outside every in-progress scope, or when Forge's append-only
+     history in the working tree is behind HEAD. Never commit item work by
+     hand; never `--no-verify`; never force-push. Then **sync the spec —
      on every project, not just brownfield**: if this item established,
      changed, or contradicted product behavior relative to the spec, update
      the affected spec layer file(s) in the same close, citing the decision
@@ -146,6 +161,15 @@ from confirmed goals, milestone cut across everything. Then the same loop.
    milestone starts. The CLI refuses to start later-milestone items until
    the gate is approved — this is the user's early-drift catch; never ask
    them to skip it, though they may switch to `end-only` themselves.
+   **Then ship it** (per-milestone git flow): `forge milestone ship <M>` commits
+   the gate record, pushes, shows the project's `gateSteps` (confirm with
+   `--steps-done`), and opens ONE PR milestone branch → base with every item
+   commit, to be merged with a merge commit once CI is green. It never merges on
+   its own unless the base branch has required status checks. The next milestone
+   starts on its own branch: `forge milestone branch <next>`. An item too large
+   or risky for the shared branch gets its own only by recorded human decision:
+   `forge task start <id> --own-branch --reason "..."` (it merges back into the
+   milestone branch, never straight into base).
    **Then end the session.** After `approve` succeeds, tell the user to close
    this session and open a new one before the next milestone. Forge's state is on
    disk exactly so a cold session can resume; a session carried across milestones
@@ -200,6 +224,12 @@ specialists, run deep exploration, or write long briefs for work that does
 not need them. Optimize total time to a **correct** result.
 
 ## Model economics
+
+**Route by tier (v0.17).** Mapping, fact-finding and "how does X work" go to
+`forge-explorer` (haiku); implementation, tests and routine reviews go to
+sonnet-tier workers; `opus` is for the orchestrator, the architect, and
+high-risk or security reviews. Anything you would otherwise read at length,
+delegate. Record the model on every dispatch so the mix is measurable.
 
 Global reasoning, briefs, review, integration → you. Bounded execution →
 the cheapest agent that is reliably capable: `forge-explorer` (haiku) for

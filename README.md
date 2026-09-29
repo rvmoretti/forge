@@ -166,7 +166,54 @@ memory.
 
 ## Changelog
 
-### v0.16.3 — lock hygiene found in the field
+### v0.17.0 — the git flow is Forge's, and more work goes to the workers
+Measured on a field project: every item waited ~11 minutes for CI to re-run the
+suite `task verify` had just run locally (about half of each item's cycle, ~3,000
+Actions minutes a month), the base branch had no required checks so the wait was
+the only gate, and a working tree held Forge's history a week behind HEAD.
+
+- **Per-milestone git flow, enforced in the CLI (the new default).** A milestone
+  is built on `milestone/<id>` from `options.baseBranch`. `task done` makes the
+  item's one commit — `<id>: <title>`, its scope's files plus Forge's
+  authoritative state, nothing else — and pushes it; no PR and no CI per item.
+  It refuses off-branch, with changes outside every in-progress scope, or with a
+  non-empty index. `forge milestone branch <id>` creates or switches safely.
+- **`forge milestone ship <id>`** — after the human gate: commits the gate record,
+  pushes, checks the branch carries exactly the milestone's item commits, shows
+  `options.gateSteps` (confirmed with `--steps-done`), opens ONE PR to the base
+  branch listing every item with its commit and verify record, and records it.
+  Merge commit, never squash. It never merges unless asked (`--auto-merge`) AND
+  the base branch has required status checks; otherwise it says so loudly. It
+  warns when the repo disallows merge commits. Never main/production, never
+  force-push, never `--no-verify`.
+- **Stale-state guard.** Before any commit, `trace.jsonl`, `decisions.md` and
+  `discoveries.md` must extend HEAD's content exactly; `preflight` and `doctor`
+  check the same. Likely cause of the field incident: switching branches with
+  uncommitted Forge files carries the older copy onto a newer HEAD.
+- **Escape hatch.** `task start <id> --own-branch --reason` (recorded as a human
+  decision) builds a large or risky item on `item/<id>`, merged back into the
+  milestone branch — never straight into base, so Forge state never conflicts.
+- **Opting out** is a recorded human decision: `options.integration manual
+  --reason`. Existing projects are told by `doctor`/`preflight` to confirm the
+  base branch; `preflight` also flags tracked generated files (dashboard, usage
+  snapshots) that change on every command and conflict on every merge.
+- **Delegation you can see.** `forge dispatch --agent --purpose
+  explore|review|security|advise` records dispatches that have no work item (they
+  were invisible before); `--model` is recorded on every dispatch; `usage` shows
+  both. The contract now dispatches the review by default — sonnet for routine
+  items, opus for high-risk — and routes by tier (haiku explores, sonnet builds).
+- `stats` lists milestones in their explicit order with their names.
+- **Opus-tier agents inherit your model.** `forge-reviewer` and `forge-architect`
+  now use `model: inherit` instead of the `opus` alias. Field evidence: 48 reviewer
+  runs resolved `opus` to an older Opus than the session's own, and `usage`
+  counted them as orchestrator calls, which hid it. `usage` now counts a
+  top-level transcript that opens with a Forge brief (`# Work brief —`,
+  `# Review brief —`) as a worker, lists every version seen per model family, and
+  warns when an OLDER version ran in the measured segment. The usage cache is
+  rebuilt once (v3) so past transcripts are re-classified.
+
+Also folded in from the unreleased v0.16.3:
+
 - **`/clear` no longer locks you out.** `/clear` starts a new session id; the old
   id's orchestrator lock stayed fresh for the full 15-minute TTL and the edit-war
   guard blocked the session that replaced it. A new `SessionEnd` hook releases the

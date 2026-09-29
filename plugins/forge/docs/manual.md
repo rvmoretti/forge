@@ -4,7 +4,7 @@ Forge turns one Claude Code session into an engineering organization. The user i
 **product owner** (owns WHAT & WHY). The main session is the **CTO/orchestrator** (owns HOW:
 spec, briefs, review, integration) on the strongest model. **Workers** are cheaper-model agents
 (forge-explorer haiku · forge-implementer/forge-tester sonnet · forge-reviewer/forge-architect
-opus), each given one bounded task in a fresh context; workers never delegate. **Gates** are
+inherit — the session's own model, since v0.17), each given one bounded task in a fresh context; workers never delegate. **Gates** are
 enforced by the forge CLI + hooks — refusals in code that the model cannot skip. All memory
 lives on disk under `forge/` (git-versioned); the conversation is never the memory.
 
@@ -115,7 +115,8 @@ changes how intent is gathered, never which gates apply. No special commands.
    IN_PROGRESS item (`options.concurrency`, default 1), and at higher caps refuses scope overlap.
 2. **Brief & dispatch** — `forge brief` skeleton + spec excerpts, decisions, domain pack(s).
    Screen work: brief carries the design-ux pack + the approved mock. Record the handoff in
-   state — `forge task dispatch <id> --agent <worker>` — immediately before launching; a
+   state — `forge task dispatch <id> --agent <worker> --model <m>` — immediately before launching
+   (item-less dispatches — explore/review/security/advise — `forge dispatch --agent --purpose --model`); a
    mid-flight message to a running worker is recorded too (`--kind message --note`). Dispatch
    prompts still start with `# Work brief — <id>: <title>` (ties old logs in usage telemetry).
    **Worker executes** — one bounded task, fresh context; stops and reports on spec holes or
@@ -124,17 +125,26 @@ changes how intent is gathered, never which gates apply. No special commands.
 3. **Verify** — `forge task verify <id>`: all `verify.*` commands (incl. `verify.security`) +
    criterion checks + baseline guard; output stored as evidence bound to the git tree.
    `--artifact <file>` attaches screenshots/reports.
-4. **Review** — diff + report; high-risk diffs go to forge-reviewer in a FRESH context (the
-   author-orchestrator's read is biased); screens get the UX review vs mock per the design-ux
+4. **Review** — dispatched by default (v0.17): routine items to forge-reviewer with a sonnet
+   model override, high-risk ones on the session's own model, in a FRESH context (the author-orchestrator's read is
+   biased, and its tokens are re-read every later turn); screens get the UX review vs mock per the design-ux
    pack protocol. A screen whose checks pass but UX review fails is a failed item.
 5. **Done** — `forge task done` (refused without passing record for the current tree; refused
-   when checks were green pre-work and tree unchanged). Same close: spec sync — any established/
+   when checks were green pre-work and tree unchanged). Per-milestone git flow (v0.17 default):
+   `done` also makes the item's one commit `<id>: <title>` (its scope + Forge's authoritative
+   state) on `milestone/<id>` and pushes it — refused off-branch, with changes outside every
+   in-progress scope, or when Forge's append-only history is behind HEAD. Same close: spec sync — any established/
    changed product behavior updates the affected spec layer, citing the decision/discovery.
 6. **Failure** — `forge task fail --note "<diagnosis>"`; retry = fresh worker + revised brief;
    third identical attempt refused: `start --escalate stronger-model|decompose|self|
    revisit-criteria`. **Milestone complete** → security review (`forge milestone security <M>
    --note`), demo, `forge milestone approve <M> --note` (refuses without security unless
-   `--skip-security --reason` or `options.security off`).
+   `--skip-security --reason` or `options.security off`), then `forge milestone ship <M>`: commits
+   the gate record, pushes, shows `options.gateSteps` (confirm `--steps-done`), opens ONE PR
+   milestone branch → `options.baseBranch`, merged with a merge commit once CI is green (auto-merge
+   only with `--auto-merge` AND required status checks on the base). Next milestone:
+   `forge milestone branch <next>`. Escape hatch (recorded human decision): `task start <id>
+   --own-branch --reason` → `item/<id>`, merged back into the milestone branch.
 
 Session habits: resume with "continue" (session-start hook restores everything); fresh session
 at every gate or ~⅓ context; stopping triggers the stop gate (every open item settled: done /
@@ -218,6 +228,10 @@ refused) · living spec.
 - "no acceptance criteria" → write criteria first.
 - "unfinished dependencies" → pick a ready item.
 - "already IN_PROGRESS" → resolve (done/fail/block) before re-start.
+- "needs a base branch" → `forge config set options.baseBranch <branch>` (or opt out: `options.integration manual --reason`).
+- "built on branch 'milestone/<id>'" → `forge milestone branch <id>`.
+- "outside … scope" at done → revert stray changes or widen scope with `task update --allowed --reason`.
+- "BEHIND or diverged from HEAD" → the working copy lost Forge history; restore from `git show HEAD:<file>` before committing.
 - "requires --escalate" → 2 failures recorded; change approach explicitly.
 - "no passing verification record" → run verify; DONE is evidence, not claim.
 - "tree changed since the passing verification" → re-verify (stale evidence).
