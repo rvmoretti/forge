@@ -1964,3 +1964,32 @@ test('dashboard v0.19: one page per menu entry, architecture drawing data, scree
   assert.match(dash, /Plan standards/);
   assert.doesNotMatch(dash, /Project map/);
 });
+
+test('v0.19.1: a released lock marker is free; arch writes wait on a live lock; a failed change script is recorded and revertable', () => {
+  // no-delete filesystems leave a released marker instead of removing the lock
+  fs.writeFileSync(path.join(dir, 'forge', 'state', 'work.lock'), JSON.stringify({ released: true, pid: 1, ts: new Date().toISOString() }));
+  assert.strictEqual(forge(['arch', 'add', 'app', '--name', 'App', '--kind', 'frontend', '--runs-on', 'Browser']).code, 0);
+  // a live holder blocks components.json writes too (they are state writes)
+  fs.writeFileSync(path.join(dir, 'forge', 'state', 'work.lock'), JSON.stringify({ pid: process.pid, ts: new Date().toISOString(), cmd: 'test' }));
+  const blocked = forge(['arch', 'add', 'db', '--kind', 'db'], { env: { FORGE_LOCK_WAIT_MS: '300' } });
+  assert.notStrictEqual(blocked.code, 0);
+  assert.match(blocked.out, /write-locked/);
+  fs.unlinkSync(path.join(dir, 'forge', 'state', 'work.lock'));
+  // a script that fails part-way: recorded (ok false) and revertable
+  fs.mkdirSync(path.join(dir, 'forge', 'changes'), { recursive: true });
+  const sc = path.join('forge', 'changes', 'half.sh');
+  fs.writeFileSync(path.join(dir, sc), '#!/usr/bin/env bash\n# forge-upgrade-step: architecture\nset -euo pipefail\nforge() { node "$FORGE_JS" "$@"; }\nforge arch add db --name DB --kind db --runs-on Supabase\nexit 3\n');
+  forge(['upgrade', 'dry-run', sc]);
+  // the dry run failed, so run refuses; allow the check by making the script pass in dry-run but fail for real
+  fs.writeFileSync(path.join(dir, sc), '#!/usr/bin/env bash\n# forge-upgrade-step: architecture\nset -euo pipefail\nforge() { node "$FORGE_JS" "$@"; }\nforge arch add db --name DB --kind db --runs-on Supabase\n[ -n "${FAIL_REAL:-}" ] && exit 3 || true\n');
+  assert.strictEqual(forge(['upgrade', 'dry-run', sc]).code, 0);
+  const run = forge(['upgrade', 'run', sc], { env: { FAIL_REAL: '1' } });
+  assert.notStrictEqual(run.code, 0);
+  const w = JSON.parse(fs.readFileSync(path.join(dir, 'forge', 'state', 'work.json'), 'utf8'));
+  const h = w.upgrade.history.slice(-1)[0];
+  assert.strictEqual(h.kind, 'run'); assert.strictEqual(h.ok, false); assert.ok(h.backup);
+  assert.strictEqual(forge(['upgrade', 'revert']).code, 0);
+  const c = JSON.parse(fs.readFileSync(path.join(dir, 'forge', 'state', 'components.json'), 'utf8'));
+  assert.ok(!c.components.db, 'revert removed the half-applied part');
+  assert.ok(c.components.app);
+});

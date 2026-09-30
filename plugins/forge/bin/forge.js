@@ -132,11 +132,21 @@ function acquireWorkLock() {
       if (e.code !== 'EEXIST') { LOCK_HELD = true; return; } // fs oddity — fail open; never brick the CLI on its own guard
       let holder = null; try { holder = JSON.parse(fs.readFileSync(WORK_LOCK, 'utf8')); } catch (_) { }
       const age = holder && Number.isFinite(Date.parse(holder.ts)) ? Date.now() - Date.parse(holder.ts) : Infinity;
-      if (!holder || !pidAlive(holder.pid) || age > LOCK_STALE_MS) {
-        try { fs.unlinkSync(WORK_LOCK); } catch (_) { }
-        traceWrite({ ts: new Date().toISOString(), v: VERSION, cmd: process.argv.slice(2).join(' ').slice(0, 300),
+      if (!holder || holder.released || !pidAlive(holder.pid) || age > LOCK_STALE_MS) {
+        if (!holder || !holder.released) traceWrite({ ts: new Date().toISOString(), v: VERSION, cmd: process.argv.slice(2).join(' ').slice(0, 300),
           outcome: 'lock-break', holder: holder || 'unreadable' });
-        continue;
+        try { fs.unlinkSync(WORK_LOCK); continue; } catch (u) {
+          if (u.code === 'ENOENT') continue;
+          // v0.19.1: a filesystem that refuses deletes (some sandboxes / mounted folders) must not
+          // spin here forever — claim the free lock in place and confirm the claim is ours
+          const mine = { pid: process.pid, ts: ts(), cmd: process.argv.slice(2).join(' ').slice(0, 160), nonce: crypto.randomBytes(6).toString('hex') };
+          try {
+            fs.writeFileSync(WORK_LOCK, JSON.stringify(mine));
+            const back = JSON.parse(fs.readFileSync(WORK_LOCK, 'utf8'));
+            if (back.nonce === mine.nonce) { LOCK_HELD = true; LOCK_INPLACE = true; return; }
+          } catch (_) { }
+          die(`Refused: the state lock ${path.relative(PROJECT, WORK_LOCK)} is stale (holder pid ${(holder || {}).pid || '?'}) but cannot be removed or claimed (${u.code}).\nRemove the file by hand, then retry.`);
+        }
       }
       if (Date.now() >= deadline)
         die(`Refused: forge state is write-locked by another forge process (pid ${holder.pid}: '${holder.cmd}', since ${holder.ts}).\n` +
@@ -146,7 +156,13 @@ function acquireWorkLock() {
     }
   }
 }
-function releaseWorkLock() { if (LOCK_HELD) { try { fs.unlinkSync(WORK_LOCK); } catch (_) { } LOCK_HELD = false; } }
+let LOCK_INPLACE = false;
+function releaseWorkLock() {
+  if (!LOCK_HELD) return;
+  try { fs.unlinkSync(WORK_LOCK); }
+  catch (_) { try { fs.writeFileSync(WORK_LOCK, JSON.stringify({ released: true, pid: process.pid, ts: ts() })); } catch (_) { } } // v0.19.1: no-delete filesystems
+  LOCK_HELD = false;
+}
 process.on('exit', releaseWorkLock);
 
 // -- orchestrator session lock (v0.5): one active orchestrator per project ----
@@ -1074,11 +1090,12 @@ function diffShape(a, b) {
 }
 function runChangeScript(script, cwd) {
   const r = spawnSync('bash', [script], { cwd, encoding: 'utf8', timeout: 10 * 60 * 1000,
-    env: Object.assign({}, process.env, { FORGE_JS: __filename, CLAUDE_PROJECT_DIR: cwd, FORGE_UPGRADE: '1', FORGE_SCAN_ROOT: PROJECT }) });
+    env: Object.assign({}, process.env, { FORGE_JS: __filename, CLAUDE_PROJECT_DIR: cwd, FORGE_UPGRADE: '1', FORGE_SCAN_ROOT: PROJECT, FORGE_DEFER_REGEN: '1' }) });
   return { code: r.status, out: ((r.stdout || '') + (r.stderr || '')).trim() };
 }
 
 function regenDashboard() {
+  if (process.env.FORGE_DEFER_REGEN === '1') return; // v0.19.1: a change script regenerates once, at its end
   try { usageAutoRefresh(readJson(CONFIG_FILE, null)); } catch (_) { /* never block state ops */ }
   try { generateDashboard(); } catch (_) { /* dashboard is best-effort; never block state ops */ }
 }
@@ -4002,6 +4019,7 @@ const commands = {
   // -- components (v0.10; v0.19 routes into architecture / screens / tags) --------
   component() {
     const sub = argv[1];
+    if (MUTATING) acquireWorkLock(); // v0.19.1: components.json writes are state writes
     const c = loadComps();
     if (sub === 'add' || sub === 'update') {
       const id = argv[2];
@@ -4039,6 +4057,7 @@ const commands = {
   // -- architecture (v0.19) — runtime parts, where they run, who talks to whom ----
   arch() {
     const sub = argv[1];
+    if (MUTATING) acquireWorkLock(); // v0.19.1: components.json writes are state writes
     const c = loadComps();
     const need = id => { if (!c.components[id]) die(`Unknown architecture part '${id}'. See: forge arch list`); return c.components[id]; };
     const setFields = (x) => {
@@ -4149,6 +4168,7 @@ const commands = {
   // -- screens (v0.19) — UI screens and their mocks, each belonging to an app -----
   screen() {
     const sub = argv[1];
+    if (MUTATING) acquireWorkLock(); // v0.19.1: components.json writes are state writes
     const c = loadComps();
     if (sub === 'add' || sub === 'update') {
       const id = argv[2];
@@ -4283,16 +4303,24 @@ const commands = {
       if (!dr.ok) die(`Refused: the last dry-run of this script failed or touched work history. Fix it and dry-run again.`);
       if (dr.stateSha !== stateSha() && !flag('force')) die(`Refused: the plan changed since the dry-run (${dr.ts}). Dry-run again so what you reviewed is what runs.`);
       const backup = backupState(path.basename(s.rel, '.sh'));
+      const step = (s.text.match(/^#\s*forge-upgrade-step:\s*([\w-]+)/m) || [])[1] || null;
+      // v0.19.1: the run is recorded BEFORE it starts, so a run that is killed part-way can still be reverted
+      const record = patch => {
+        acquireWorkLock();
+        const w0 = readJson(WORK_FILE, { items: {}, order: [] });
+        w0.upgrade = w0.upgrade || { history: [], accepted: {} };
+        const h = w0.upgrade.history = w0.upgrade.history || [];
+        const i = h.findIndex(x => x.kind === 'run' && x.backup === backup);
+        if (i < 0) h.push(Object.assign({ ts: ts(), kind: 'run', script: s.rel, step, ok: null, backup, forge: VERSION }, patch));
+        else Object.assign(h[i], patch);
+        writeJson(WORK_FILE, w0);
+        releaseWorkLock();
+      };
+      record({});
       const r = runChangeScript(s.abs, PROJECT);
       out(r.out);
-      acquireWorkLock();
-      const w = readJson(WORK_FILE, { items: {}, order: [] });
-      const step = (s.text.match(/^#\s*forge-upgrade-step:\s*([\w-]+)/m) || [])[1] || null;
-      w.upgrade = w.upgrade || { history: [], accepted: {} };
-      w.upgrade.history = (w.upgrade.history || []).concat([{ ts: ts(), kind: 'run', script: s.rel, step, ok: r.code === 0, backup, forge: VERSION }]);
-      writeJson(WORK_FILE, w);
-      w.upgrade.history[w.upgrade.history.length - 1].postState = stateSha();
-      writeJson(WORK_FILE, w);
+      record({ ok: r.code === 0 });
+      record({ postState: stateSha() });
       regenDashboard();
       traceEvent({ outcome: r.code === 0 ? 'upgrade-run' : 'upgrade-run-failed', script: s.rel, step, backup });
       appendMd(DECISIONS_FILE, '# Decisions log (append-only, via forge CLI)', `\n### ${ts()} — upgrade${step ? ` '${step}'` : ''}: ${s.rel}\n- Authority: human\n- Decision: applied the reviewed change script ${s.rel}${r.code === 0 ? '' : ' (it FAILED part-way)'}\n- Why: bring the plan to the standards of Forge v${VERSION}; backup ${backup}\n`);

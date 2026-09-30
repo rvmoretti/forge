@@ -166,6 +166,21 @@ memory.
 
 ## Changelog
 
+### v0.19.1 — upgrades survive a hostile filesystem and a killed run
+- **The state lock no longer spins where files cannot be deleted.** Field incident: a
+  change script run from a sandbox whose mounted folders refuse deletes left the state
+  lock behind; the next command broke the "stale" lock, failed to remove it, and looped
+  (thousands of trace lines) until killed. Releasing now leaves a *released* marker when
+  delete is refused, a stale lock is claimed in place (and the claim verified) when it
+  cannot be removed, and a lock that can be neither removed nor claimed is refused with the
+  file to delete — never a loop.
+- **`arch`, `screen` and `component` writes take the state lock** like every other state
+  write.
+- **Change scripts regenerate the dashboard once, at the end**, not after every command —
+  a 25-command script no longer rebuilds the dashboard 25 times.
+- **`upgrade run` is recorded before the script starts**, so a run that is killed part-way
+  still has its backup on record and `upgrade revert` restores it.
+
 ### v0.19.0 — plan upgrades, the architecture from the repo, a paged dashboard
 - **`forge upgrade` brings an existing plan to the installed Forge's standards.**
   Each standard a Forge version introduces is a detected step, never a stored level.
