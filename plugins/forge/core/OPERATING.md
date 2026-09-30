@@ -49,7 +49,10 @@ from confirmed goals, milestone cut across everything. Then the same loop.
 
 ## The build loop (per work item)
 
-1. **Pick** the next READY item (`forge task list`). Before starting, derive
+1. **Pick** the next item **in plan order** — `forge task next`, then
+   `forge task start` with no id (v0.18). The plan's order is the work order: a
+   different READY item needs `--reason`, or reorder deliberately with `forge task
+   move`. Labels (`V0.3.2`) are how the user reads the plan; ids are what you cite. Before starting, derive
    its allowed-files scope from the dependency closure (use Graphify when
    available: query what depends on what — do not guess blast radius) and
    **record it in state** (`forge task update <id> --allowed "..."`) — scope

@@ -103,9 +103,10 @@ let LOCK_HELD = false;
 const MUTATING = (() => {
   const c = process.argv[2] || '', s = process.argv[3] || '';
   if (c === 'init') return true;
-  if (c === 'task') return !['list', 'show', ''].includes(s);
+  if (c === 'task') return !['list', 'show', 'next', ''].includes(s);
   if (c === 'milestone') return ['security', 'approve', 'reopen', 'add', 'update', 'move', 'remove', 'ship'].includes(s);
   if (c === 'dispatch') return true;
+  if (c === 'release') return ['add', 'update', 'move', 'remove', 'freeze', 'tag'].includes(s);
   if (c === 'component') return ['add', 'update'].includes(s);
   return false;
 })();
@@ -665,9 +666,27 @@ function generateDashboard() {
   const actM = activeMilestone(w);
   // v0.16.2: blocks follow the explicit milestone order, not item insertion order
   const mOrder = ensureMilestones(w);
+  // v0.18: version labels (computed, frozen once started) and items in plan order
+  const VL = computeLabels(w);
+  const NEXT_ID = (() => { try { const nx = nextReady(w, cfg); return nx ? nx.id : null; } catch (_) { return null; } })();
+  for (const m of mOrder) if (byMilestone[m]) {
+    const pos = new Map(milestoneDisplayOrder(w, m).map((id, i) => [id, i]));
+    byMilestone[m].sort((a, b) => (pos.has(a.t.id) ? pos.get(a.t.id) : 1e9) - (pos.has(b.t.id) ? pos.get(b.t.id) : 1e9));
+  }
   const byMilestoneOrdered = [...mOrder.filter(m => byMilestone[m]).map(m => [m, byMilestone[m]]),
     ...Object.entries(byMilestone).filter(([m]) => !mOrder.includes(m))];
-  const milestoneBlocks = byMilestoneOrdered.map(([m, items]) => {
+  let lastRel = undefined;
+  const relHeader = (m) => {
+    if (!(w.releaseOrder || []).length || m === '(no milestone)') return '';
+    const r = releaseOf(w, m) || null;
+    if (r === lastRel) return '';
+    lastRel = r;
+    if (!r) return `<div class="relh"><span class="vtag">—</span>Not in a release <span class="mut">assign: forge milestone update &lt;m&gt; --release &lt;R&gt;</span></div>`;
+    const ms = mOrder.filter(x => releaseOf(w, x) === r);
+    const appr = ms.filter(x => ((w.gates || {})[x] || {}).approved).length;
+    return `<div class="relh"><span class="vtag rel">${esc(VL.releaseLabel[r])}</span>${esc((w.releases[r] || {}).name || r)} <span class="mut">${appr}/${ms.length} milestones approved${(w.releases[r] || {}).tag ? ` · tagged ${esc(w.releases[r].tag)}` : ''}</span></div>`;
+  };
+  const milestoneBlocks = byMilestoneOrdered.map(([m, items]) => relHeader(m) + (() => {
     const gate = (w.gates || {})[m];
     const allClosed = items.every(x => ['DONE', 'CANCELLED'].includes(x.t.status));
     const gateChip = m === '(no milestone)' ? '' :
@@ -743,7 +762,7 @@ function generateDashboard() {
         const st0 = t.attempts.filter(a => a.outcome === 'started').map(a => Date.parse(a.ts)).filter(Number.isFinite).pop();
         const agent = (disp.filter(d => d.kind !== 'message').pop() || {}).agent;
         meta = `${st0 ? `<span data-since="${new Date(st0).toISOString()}">${fmtD(Date.now() - st0)}</span>` : ''}${agent ? ` · ${esc(agent)}` : ''}`;
-      } else if (stat === 'READY') meta = fails ? `${fails} failed attempt(s)` : 'next up';
+      } else if (stat === 'READY') meta = fails ? `${fails} failed attempt(s)` : (t.id === NEXT_ID ? 'next up' : 'ready');
       else if (stat === 'BLOCKED') meta = 'needs your answer';
       else if (stat === 'CANCELLED') meta = 'superseded';
       else meta = t.criteria.length ? 'planned' : 'thin item';
@@ -753,7 +772,7 @@ function generateDashboard() {
         : noScope ? `<span class="warnv">⚠ no file scope — start will refuse (task update --allowed)</span>` : '';
       return `<details class="icd" data-s="${stat}" data-act="${m === actM || m === '(no milestone)' ? '1' : '0'}"><summary class="irow">
         <span class="stripe" style="background:${sVar}"></span>
-        <span class="iid">${esc(t.id || '')}</span>
+        <span class="iid">${VL.item[t.id] ? `<b class="vlab" title="version label — ${t.label ? 'frozen when work started' : 'provisional: renumbers if the plan is reordered'}">${esc(VL.item[t.id])}${t.label ? '' : '<i>·</i>'}</b>` : ''}${esc(t.id || '')}</span>
         <span class="itt">${stat === 'IN_PROGRESS' ? '<span class="dot-open"></span>' : ''}${esc(t.title)}${t.component ? compChip(t.component) : ''}${designStrip ? '<span class="cchip">🎨 mock</span>' : ''}${hasBrief ? `<button type="button" class="cchip docopen" data-doc="${esc(briefKey)}" title="Read the brief">📄 brief</button>` : ''}${subline}</span>
         <span class="imeta"><span class="st ${sCls}">${stat === 'IN_PROGRESS' ? 'IN PROGRESS' : stat}</span>${meta ? `<span>${meta}</span>` : ''}</span>
       </summary><div class="icdb">
@@ -770,9 +789,9 @@ function generateDashboard() {
     const gateState = m === '(no milestone)' ? 'none' : (gate && gate.approved ? 'approved' : allClosed ? 'awaiting' : 'pending');
     const mName = milestoneName(w, m);
     const mc = (gate || {}).commits;
-    return `<details class="sec sub"${openAttr} data-gate="${gateState}" data-m="${esc(m)}"><summary>${esc(m)}${mName ? ` <b>${esc(mName)}</b>` : (m === '(no milestone)' ? '' : ' <span class="mut">(unnamed)</span>')} <span class="mut">${done}/${items.length} done</span> ${gateChip}${mc ? ` <span class="mut" title="git log ${esc(mc.base)}..${esc(mc.head)}">· ${esc(mc.base.slice(0, 7))}..${esc(mc.head.slice(0, 7))} (${mc.count})</span>` : ''}${(gate || {}).ship ? ` <a class="mut" href="${esc(gate.ship.pr)}">· PR</a>` : ''}<span class="mcount"></span></summary>
+    return `<details class="sec sub"${openAttr} data-gate="${gateState}" data-m="${esc(m)}"><summary>${VL.milestone[m] ? `<span class="vtag">${esc(VL.milestone[m])}</span>` : ''}${esc(m)}${mName ? ` <b>${esc(mName)}</b>` : (m === '(no milestone)' ? '' : ' <span class="mut">(unnamed)</span>')} <span class="mut">${done}/${items.length} done</span> ${gateChip}${mc ? ` <span class="mut" title="git log ${esc(mc.base)}..${esc(mc.head)}">· ${esc(mc.base.slice(0, 7))}..${esc(mc.head.slice(0, 7))} (${mc.count})</span>` : ''}${(gate || {}).ship ? ` <a class="mut" href="${esc(gate.ship.pr)}">· PR</a>` : ''}<span class="mcount"></span></summary>
       <div class="mgb">${rows}</div></details>`;
-  }).join('');
+  })()).join('');
 
   // v0.10: project map — one box per registered component
   let mapBlock = '';
@@ -1006,15 +1025,22 @@ function generateDashboard() {
   {
     const seqR = milestoneSeq(w);
     if (seqR.length) {
+      const VLr = computeLabels(w);
+      let lastR = undefined;
       const nodes = seqR.map((m, i) => {
+        const r0 = releaseOf(w, m) || null;
+        const sep = (w.releaseOrder || []).length && r0 !== lastR ? `<div class="rsep"><span>${esc(r0 ? VLr.releaseLabel[r0] : '—')}</span><em>${esc(r0 ? ((w.releases[r0] || {}).name || r0) : 'no release')}</em></div>` : '';
+        lastR = r0;
+        return sep + (() => {
         const ids = w.order.filter(id => w.items[id].milestone === m);
         const doneN = ids.filter(id => ['DONE', 'CANCELLED'].includes(w.items[id].status)).length;
         const g2 = (w.gates || {})[m]; const complete = milestoneComplete(w, m);
         const cls = g2 && g2.approved ? 'done' : complete ? 'awaitg' : m === actM ? 'activeg' : 'futureg';
-        const sym = g2 && g2.approved ? '✓' : complete ? '!' : String(i + 1);
+        const sym = g2 && g2.approved ? '✓' : complete ? '!' : String((VLr.milestone[m] || '').split('.')[1] || (i + 1));
         const label = cls === 'awaitg' ? 'your review' : cls === 'done' ? `${doneN}/${ids.length} · gate ✓` : `${doneN}/${ids.length} items`;
         const mc = [...new Set(ids.map(id => w.items[id].component).filter(Boolean))].slice(0, 4);
-        return `<a class="mnode ${cls}" href="#work"><span class="mdot">${sym}</span><span class="mn">${esc(m)}</span>${milestoneName(w, m) ? `<span class="mi">${esc(milestoneName(w, m))}</span>` : ''}<span class="mi">${label}</span>${mc.length ? `<span class="cdots">${mc.map(c => `<i style="background:${kindColor[(comps[c] || {}).kind] || '#57606f'}"></i>`).join('')}</span>` : ''}</a>`;
+        return `<a class="mnode ${cls}" href="#work"><span class="mdot">${sym}</span><span class="mv">${esc(VLr.milestone[m] || '')}</span><span class="mn">${esc(m)}</span>${milestoneName(w, m) ? `<span class="mi">${esc(milestoneName(w, m))}</span>` : ''}<span class="mi">${label}</span>${mc.length ? `<span class="cdots">${mc.map(c => `<i style="background:${kindColor[(comps[c] || {}).kind] || '#57606f'}"></i>`).join('')}</span>` : ''}</a>`;
+        })();
       }).join('');
       railBlock = `<details class="sec" open id="milestones"><summary>Milestones <span class="mut">(the whole journey — every planned milestone, not a side document)</span></summary>
         <div class="railcard"><div class="railwrap"><div class="rail">${nodes}</div></div></div></details>`;
@@ -1220,6 +1246,18 @@ button.cchip:hover{background:var(--accsoft);color:var(--accent)}
 .mn{font-size:10.5px;font-weight:600;text-align:center;line-height:1.22;max-width:102px;color:var(--ink)}
 .mnode.futureg .mn{color:var(--ink3);font-weight:500}
 .mi{font-size:10px;color:var(--ink3);font-variant-numeric:tabular-nums}
+/* ---- v0.18 version labels ---- */
+.mv{font-size:10.5px;font-weight:700;color:var(--accent);font-variant-numeric:tabular-nums;letter-spacing:.02em}
+.mnode.futureg .mv{color:var(--ink3)}
+.rsep{flex:none;width:74px;display:flex;flex-direction:column;align-items:center;justify-content:flex-start;gap:3px;padding-top:2px;border-left:1px dashed var(--line);margin-left:6px}
+.rsep span{font-size:12px;font-weight:800;color:var(--ink);letter-spacing:.03em}
+.rsep em{font-style:normal;font-size:9.5px;color:var(--ink3);text-align:center;line-height:1.2;max-width:68px}
+.vtag{display:inline-block;font-size:11px;font-weight:700;font-variant-numeric:tabular-nums;color:var(--accent);background:var(--accsoft);border-radius:5px;padding:1px 6px;margin-right:8px;vertical-align:1px}
+.vtag.rel{font-size:12.5px;padding:2px 8px;color:#fff;background:var(--accent)}
+.relh{margin:18px 0 8px;font-size:14px;font-weight:700;color:var(--ink);display:flex;align-items:center;gap:6px}
+.relh .mut{font-weight:500;font-size:12px}
+.vlab{font-weight:700;color:var(--accent);margin-right:6px;font-variant-numeric:tabular-nums}
+.vlab i{font-style:normal;color:var(--ink3);margin-left:1px}
 .cdots{display:flex;gap:3px} .cdots i{width:6px;height:6px;border-radius:50%;display:block}
 /* ---- project map ---- */
 .mapgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(238px,1fr));gap:12px;align-items:start}
@@ -1776,7 +1814,147 @@ function ensureMilestones(w) {
     if (m && !w.milestoneOrder.includes(m)) w.milestoneOrder.push(m);
   }
   for (const m of Object.keys(w.milestones)) if (!w.milestoneOrder.includes(m)) w.milestoneOrder.push(m);
+  // v0.18: releases group milestones; the milestone sequence is always grouped by
+  // release (release order first, then milestone order inside it; unassigned last)
+  if (!w.releases) w.releases = {};
+  if (!Array.isArray(w.releaseOrder)) w.releaseOrder = [];
+  for (const r of Object.keys(w.releases)) if (!w.releaseOrder.includes(r)) w.releaseOrder.push(r);
+  if (w.releaseOrder.length) {
+    const ri = r => { const i = w.releaseOrder.indexOf(r); return i < 0 ? 1e6 : i; };
+    const pos = new Map(w.milestoneOrder.map((m, i) => [m, i]));
+    w.milestoneOrder.sort((a, b) => ri((w.milestones[a] || {}).release) - ri((w.milestones[b] || {}).release) || pos.get(a) - pos.get(b));
+  }
+  // v0.18: an explicit task order per milestone — initialised in dependency order
+  for (const m of w.milestoneOrder) ensureTaskOrder(w, m);
   return w.milestoneOrder;
+}
+// Per-milestone task order. New items are placed after every in-milestone item they
+// depend on (dependency-first), otherwise at the end; removed/moved items drop out.
+function ensureTaskOrder(w, m) {
+  const rec = w.milestones[m]; if (!rec) return [];
+  const mine = (w.order || []).filter(id => w.items[id].milestone === m);
+  const set = new Set(mine);
+  let order = Array.isArray(rec.taskOrder) ? rec.taskOrder.filter(id => set.has(id)) : [];
+  const missing = mine.filter(id => !order.includes(id));
+  if (missing.length) {
+    // topological insertion for the missing ones, stable on their original order
+    const placed = new Set(order);
+    let guard = 0;
+    while (missing.length && guard++ < 10000) {
+      const i = missing.findIndex(id => (w.items[id].deps || []).every(d => !set.has(d) || placed.has(d) || !missing.includes(d)));
+      const id = missing.splice(i < 0 ? 0 : i, 1)[0];
+      order.push(id); placed.add(id);
+    }
+  }
+  rec.taskOrder = order;
+  return order;
+}
+function releaseOf(w, m) { return ((w.milestones || {})[m] || {}).release || null; }
+
+// v0.18: VERSION LABELS — computed from position, never identity. An item's id stays
+// fixed (commits, deps, briefs and decisions cite it); its label (V0.3.2) is derived
+// from release / milestone / task order and FREEZES once work starts, so history
+// never renumbers. Everything not yet started renumbers when the plan is reordered.
+function versionStart() {
+  const v = parseInt((((readJson(CONFIG_FILE, {}) || {}).options) || {}).versionStart, 10);
+  return Number.isFinite(v) ? v : 0;
+}
+function itemStarted(t) { return !!t && (['IN_PROGRESS', 'DONE'].includes(t.status) || (t.attempts || []).some(a => a.outcome === 'started')); }
+function firstStartTs(t) { const a = (t.attempts || []).find(x => x.outcome === 'started'); return a ? Date.parse(a.ts) || 0 : Infinity; }
+// Freeze what has started but carries no label yet. Runs at explicit moments only —
+// 'task start', 'milestone approve' and 'release freeze' — never on a plain read, so a
+// project can assign its releases BEFORE anything is frozen.
+function freezeLabels(w) {
+  ensureMilestones(w);
+  const start = versionStart();
+  const labels = computeLabels(w);
+  for (const r of w.releaseOrder) {
+    const rr = w.releases[r];
+    if (rr && rr.num == null && w.milestoneOrder.some(m => releaseOf(w, m) === r && milestoneStarted(w, m))) rr.num = labels.release[r];
+  }
+  for (const m of w.milestoneOrder) {
+    const mr = w.milestones[m];
+    if (mr && !mr.label && milestoneStarted(w, m)) mr.label = labels.milestone[m];
+    if (!mr || !mr.label) continue;
+    // tasks that started without a label get the next numbers, in the order they started
+    const started = (mr.taskOrder || []).map(id => w.items[id]).filter(t => itemStarted(t) && !t.label)
+      .sort((a, b) => firstStartTs(a) - firstStartTs(b));
+    for (const t of started) { mr.taskSeq = (mr.taskSeq || 0) + 1; t.label = `${mr.label}.${mr.taskSeq}`; }
+  }
+  void start;
+}
+// labels: { release: {id: number}, milestone: {id: 'V0.3'}, item: {id: 'V0.3.2'} }
+function computeLabels(w) {
+  ensureMilestones(w);
+  const start = versionStart();
+  const out = { release: {}, milestone: {}, item: {}, releaseLabel: {} };
+  // releases: frozen numbers are kept; the rest count on from the highest used so far
+  let nextNum = start;
+  for (const r of w.releaseOrder) {
+    const rr = w.releases[r] || {};
+    const num = rr.num != null ? rr.num : nextNum;
+    out.release[r] = num; out.releaseLabel[r] = `V${num}`;
+    nextNum = Math.max(nextNum, num + 1);
+  }
+  // milestones: numbered inside their release (unassigned ones inside an implicit
+  // release that follows the last defined one)
+  const implicit = w.releaseOrder.length ? nextNum : start;
+  const perRel = {};
+  for (const m of w.milestoneOrder) {
+    const mr = w.milestones[m] || {};
+    const r = mr.release || null;
+    const key = r || '__none';
+    const num = r ? out.release[r] : implicit;
+    perRel[key] = perRel[key] || { n: 0 };
+    if (mr.label) {
+      out.milestone[m] = mr.label;
+      const k = parseInt(String(mr.label).split('.')[1], 10);
+      if (Number.isFinite(k)) perRel[key].n = Math.max(perRel[key].n, k);
+    } else {
+      perRel[key].n += 1;
+      out.milestone[m] = `V${num}.${perRel[key].n}`;
+    }
+  }
+  // tasks: frozen labels kept; unstarted ones numbered after the highest frozen seq,
+  // in the milestone's task order
+  for (const m of w.milestoneOrder) {
+    const mr = w.milestones[m] || {};
+    const ml = out.milestone[m];
+    let seq = mr.taskSeq || 0;
+    for (const id of milestoneDisplayOrder(w, m)) {
+      const t = w.items[id]; if (!t) continue;
+      if (t.label) { out.item[id] = t.label; continue; }
+      if (t.status === 'CANCELLED') continue;
+      seq += 1; out.item[id] = `${ml}.${seq}`;
+    }
+  }
+  return out;
+}
+// the order work is shown and picked: started work by its frozen number, then the
+// milestone's task order for everything not started yet
+function milestoneDisplayOrder(w, m) {
+  const mr = w.milestones[m] || {};
+  const ord = mr.taskOrder || [];
+  const seqOf = t => { const x = String(t.label || '').split('.').pop(); return parseInt(x, 10) || 0; };
+  const frozen = ord.filter(id => w.items[id] && w.items[id].label).sort((a, b) => seqOf(w.items[a]) - seqOf(w.items[b]));
+  const startedOpen = ord.filter(id => w.items[id] && !w.items[id].label && itemStarted(w.items[id])).sort((a, b) => firstStartTs(w.items[a]) - firstStartTs(w.items[b]));
+  const rest = ord.filter(id => w.items[id] && !w.items[id].label && !itemStarted(w.items[id]));
+  return [...frozen, ...startedOpen, ...rest];
+}
+function isReady(w, t) {
+  return t.status === 'TODO' && depsSatisfied(w, t).length === 0 && (t.criteria || []).length > 0 && ((t.scope || {}).allowed || []).length > 0;
+}
+// the next READY task in plan order: gated milestone sequence, then task order
+function nextReady(w, cfg) {
+  for (const m of milestoneSeq(w)) {
+    if (milestoneGateBlock(w, cfg, m)) break;
+    for (const id of milestoneDisplayOrder(w, m)) {
+      const t = w.items[id];
+      if (t && isReady(w, t)) return t;
+    }
+  }
+  for (const id of w.order) { const t = w.items[id]; if (!t.milestone && isReady(w, t)) return t; }
+  return null;
 }
 function milestoneName(w, m) {
   const r = ((w || {}).milestones || {})[m];
@@ -1786,6 +1964,7 @@ function milestoneLabel(w, m) {
   const n = milestoneName(w, m);
   return n ? `${m} — ${n}` : m;
 }
+function versionOf(w, m) { try { return computeLabels(w).milestone[m] || null; } catch (_) { return null; } }
 // A milestone is named after what it lets a user DO. Layer-shaped names are the
 // smell this release exists to remove; advisory only — names are a human call.
 const LAYER_NAME_RE = /^(foundation|foundations|setup|set-up|scaffold(ing)?|infra(structure)?|backend|frontend|database|db|schema|core|plumbing|misc(ellaneous)?|polish|cleanup|clean-up|refactor(ing)?|tech(nical)? debt|base|groundwork|bootstrap)\b/i;
@@ -2168,7 +2347,11 @@ const commands = {
 
     } else if (sub === 'list') {
       const filter = opt('status');
-      for (const id of w.order) {
+      // v0.18: plan order — milestone sequence, then each milestone's task order — with labels
+      ensureMilestones(w);
+      const labs = computeLabels(w);
+      const planOrder = [...w.milestoneOrder.flatMap(m => milestoneDisplayOrder(w, m)), ...w.order.filter(id => !w.items[id].milestone)];
+      for (const id of planOrder) {
         const t = w.items[id];
         if (filter && t.status !== filter) continue;
         const noScope = !((t.scope || {}).allowed || []).length;
@@ -2176,7 +2359,7 @@ const commands = {
         // v0.13: thin backlog items are legitimate — warn only where the work is live (active milestone or unmilestoned)
         const actM = activeMilestone(w);
         const warnScope = noScope && !['DONE', 'CANCELLED'].includes(t.status) && (!t.milestone || t.milestone === actM);
-        out(`${t.status.padEnd(11)} ${id.padEnd(8)} ${t.title}${ready ? '  [READY]' : ''}` +
+        out(`${t.status.padEnd(11)} ${(labs.item[id] || '').padEnd(9)} ${id.padEnd(8)} ${t.title}${ready ? '  [READY]' : ''}` +
             (warnScope ? '  [NO SCOPE — start will refuse]' : '') +
             (t.deps.length ? `  deps: ${t.deps.join(',')}` : '') +
             (failedAttempts(t) ? `  failed-attempts: ${failedAttempts(t)}` : ''));
@@ -2186,7 +2369,22 @@ const commands = {
       out(JSON.stringify(getItem(w, argv[2]), null, 2));
 
     } else if (sub === 'start') {
+      // v0.18: no id → the next READY task in plan order (milestone sequence, then task order)
+      let pickedNext = false;
+      if (!argv[2] || String(argv[2]).startsWith('--')) {
+        const nx = nextReady(w, loadConfig() || {});
+        if (!nx) die(`Nothing READY in plan order. See: forge task list`);
+        argv.splice(2, 0, nx.id); pickedNext = true;
+      }
       const item = getItem(w, argv[2]);
+      if (!pickedNext && item.milestone && isReady(w, item) && !opt('reason')) {
+        const ord = milestoneDisplayOrder(w, item.milestone);
+        const earlier = ord.slice(0, ord.indexOf(item.id)).filter(id => isReady(w, w.items[id]));
+        if (earlier.length)
+          die(`Refused: '${item.id}' is not next in plan order — READY before it in '${item.milestone}': ${earlier.slice(0, 6).join(', ')}.\n` +
+              `Work follows the plan's order. Start the next one (forge task start), reorder deliberately\n` +
+              `(forge task move ${item.id} --before ${earlier[0]} --reason "..."), or record why: forge task start ${item.id} --reason "..."`);
+      }
       // 1.1/F3: an in-flight item must be resolved before any re-start — no silent re-dispatch
       if (item.status === 'IN_PROGRESS')
         die(`Refused: '${item.id}' is already IN_PROGRESS. Resolve the current attempt first:\n` +
@@ -2284,10 +2482,11 @@ const commands = {
       const alreadyGreen = item.preState.filter(p => p && p.exit === 0);
       item.status = 'IN_PROGRESS';
       item.blockReason = null;
-      item.attempts.push({ ts: ts(), outcome: 'started', escalation: opt('escalate') || null, note: opt('note') || null, agent: opt('agent') || null });
+      item.attempts.push({ ts: ts(), outcome: 'started', escalation: opt('escalate') || null, note: opt('note') || null, agent: opt('agent') || null, outOfOrder: (!pickedNext && opt('reason')) ? opt('reason') : undefined });
       item.updated = ts();
+      if (item.milestone) freezeLabels(w); // v0.18: the version label freezes when work starts
       saveWork(w);
-      out(`${item.id} → IN_PROGRESS${opt('escalate') ? ` (escalation: ${opt('escalate')})` : ''}`);
+      out(`${item.id}${item.label ? ` (${item.label})` : ''} → IN_PROGRESS${opt('escalate') ? ` (escalation: ${opt('escalate')})` : ''}`);
       for (const wmsg of itemShapeWarnings(item)) out(`ITEM-SHAPE WARNING: ${wmsg}`);
       if (alreadyGreen.length)
         out(`WARNING: ${alreadyGreen.length} criterion check(s) ALREADY PASS before any work:\n` +
@@ -2410,7 +2609,7 @@ const commands = {
         const files = [...new Set([...commitPlan.mine, ...forgeFiles])];
         const title = String(item.title || '').split('\n')[0].slice(0, 120);
         const add = git(['add', '-A', '--', ...files]);
-        const commit = add.code === 0 ? git(['commit', '-m', `${item.id}: ${title}`]) : add;
+        const commit = add.code === 0 ? git(['commit', '-m', `${item.id}${item.label ? ` (${item.label})` : ''}: ${title}`]) : add;
         if (commit.code !== 0) {
           git(['reset', '-q', '--', ...files]);
           item.status = 'IN_PROGRESS';
@@ -2538,6 +2737,8 @@ const commands = {
       if (touchingCriteria && item.attempts.some(a => a.outcome === 'failed') && !opt('reason'))
         die(`Refused: this item has failed attempts — changing its criteria moves the goalposts.\n` +
             `That can be right, but it must be auditable: add --reason "why the criteria change".`);
+      if (opt('milestone') !== null && item.label && opt('milestone') !== item.milestone)
+        die(`Refused: '${item.id}' has started and carries version ${item.label} — started work keeps its milestone.`);
       for (const k of ['title', 'objective', 'milestone']) {
         const v = opt(k);
         if (v !== null) { changes.push(`${k}: '${item[k]}' → '${v}'`); item[k] = v; }
@@ -2569,6 +2770,45 @@ const commands = {
         for (const v of milestoneOrderViolations(w, ensureMilestones(w)).filter(v => v.item === item.id || v.dep === item.id))
           out(`MILESTONE-ORDER WARNING: '${v.item}' (${v.itemM}) depends on '${v.dep}', which sits in a LATER milestone (${v.depM}).`);
       for (const wmsg of itemShapeWarnings(item)) out(`ITEM-SHAPE WARNING: ${wmsg}`);
+
+    } else if (sub === 'next') {
+      // v0.18: what the plan says comes next (read-only)
+      const nx = nextReady(w, loadConfig() || {});
+      if (!nx) { out('Nothing READY in plan order.'); return; }
+      const lab = computeLabels(w).item[nx.id];
+      out(`${lab ? lab + '  ' : ''}${nx.id}  ${nx.title}${nx.milestone ? `  [${nx.milestone}]` : ''}`);
+      out(`Start it: forge task start   (no id = next in plan order)`);
+
+    } else if (sub === 'move') {
+      // v0.18: reorder unstarted work inside its milestone — dependency-checked
+      const item = getItem(w, argv[2]);
+      const anchorId = opt('before') || opt('after');
+      if (!anchorId || (opt('before') && opt('after'))) die('Usage: forge task move <id> --before|--after <id> [--reason "..."]');
+      const anchor = getItem(w, anchorId);
+      if (!item.milestone || item.milestone !== anchor.milestone) die(`Refused: tasks are ordered inside their milestone — '${item.id}' (${item.milestone || 'none'}) and '${anchor.id}' (${anchor.milestone || 'none'}) differ. Change milestone with: forge task update ${item.id} --milestone <m>`);
+      if (itemStarted(item) || item.status === 'CANCELLED') die(`Refused: '${item.id}' has started (or is closed) — its version number is frozen.`);
+      if (itemStarted(anchor)) die(`Refused: '${anchor.id}' has started — reorder relative to work that has not started.`);
+      ensureMilestones(w);
+      const mr = w.milestones[item.milestone];
+      const next = mr.taskOrder.filter(x => x !== item.id);
+      next.splice(opt('before') ? next.indexOf(anchor.id) : next.indexOf(anchor.id) + 1, 0, item.id);
+      const pos = new Map(next.map((x, i) => [x, i]));
+      const bad = [];
+      for (const id2 of next) {
+        const t = w.items[id2]; if (itemStarted(t) || t.status === 'CANCELLED') continue;
+        for (const d of t.deps || []) {
+          const dep = w.items[d];
+          if (!dep || dep.milestone !== item.milestone || ['DONE', 'CANCELLED'].includes(dep.status) || itemStarted(dep)) continue;
+          if (pos.get(d) > pos.get(id2)) bad.push(`${id2} depends on ${d}`);
+        }
+      }
+      if (bad.length) die(`Refused: that order puts work before what it depends on:\n` + bad.map(b => `  - ${b}`).join('\n'));
+      const before = computeLabels(w).item[item.id];
+      mr.taskOrder = next;
+      (item.history = item.history || []).push({ ts: ts(), change: `task order: ${opt('before') ? 'before' : 'after'} ${anchor.id}`, reason: opt('reason') || null });
+      item.updated = ts();
+      saveWork(w);
+      out(`${item.id} moved ${opt('before') ? 'before' : 'after'} ${anchor.id} — ${before} → ${computeLabels(w).item[item.id]}`);
 
     } else if (sub === 'dispatch') {
       // v0.12: the handoff to a worker is a state event, not transcript archaeology.
@@ -2602,7 +2842,7 @@ const commands = {
       if (kind === 'launch' && !opt('model')) out(`NOTE: no --model recorded. Record the model the worker runs on (e.g. --model sonnet) — "which model did this item" is otherwise unanswerable.`);
       out(`${item.id} dispatch recorded → ${agent}${opt('model') ? ` [${opt('model')}]` : ''}${inherited ? ' (inherited from the last launch)' : ''}${kind === 'message' ? ' (mid-flight message)' : ''} (${item.dispatches.length} total on this item)`);
 
-    } else die('Usage: forge task add|list|show|start|dispatch|verify|done|fail|block|cancel|update ...');
+    } else die('Usage: forge task add|list|show|next|start|move|dispatch|verify|done|fail|block|cancel|update ...');
   },
 
   // -- brief ------------------------------------------------------------------
@@ -2957,7 +3197,7 @@ const commands = {
       if (am && gc.base) {
         const b = milestoneBranch(cfg, am);
         const ahead = git(['rev-list', '--count', `${gc.base}..${b}`]);
-        line += ` · active milestone ${am} → ${b}${cur === b ? '' : ' (NOT checked out)'}${ahead.code === 0 ? ` · ${ahead.out} commit(s) ahead of ${gc.base}` : ''}`;
+        line += ` · active milestone ${versionOf(w, am) || ''} ${am} → ${b}${cur === b ? '' : ' (NOT checked out)'}${ahead.code === 0 ? ` · ${ahead.out} commit(s) ahead of ${gc.base}` : ''}`;
       }
       out(line);
       for (const m of milestoneSeq(w)) { const sh = ((w.gates || {})[m] || {}).ship; if (sh) out(`  ${m}: PR ${sh.pr}`); }
@@ -3115,7 +3355,7 @@ const commands = {
         const mdone = mi.filter(i => i.status === 'DONE').length;
         const mfails = mi.reduce((a, i) => a + failsOf(i), 0);
         const g = (w.gates || {})[m];
-        out(`  ${milestoneLabel(w, m)}: ${mdone}/${mi.length} done · ${mfails} failed attempt(s) · gate: ` +
+        out(`  ${versionOf(w, m) ? versionOf(w, m) + ' ' : ''}${milestoneLabel(w, m)}: ${mdone}/${mi.length} done · ${mfails} failed attempt(s) · gate: ` +
             (g && g.approved ? `approved ${g.ts.slice(0, 10)}` : (mdone === mi.length ? 'COMPLETE — awaiting human review' : 'pending')));
       }
     }
@@ -3309,6 +3549,109 @@ const commands = {
     out(`Dispatch recorded → ${agent}${opt('model') ? ` [${opt('model')}]` : ''} (${purpose})${opt('item') ? ` about ${opt('item')}` : ''} — ${w.dispatchLog.length} item-less dispatch(es) in this project.`);
   },
 
+  // -- releases (v0.18) — the version level above milestones: V0 (MVP), V1, V2 … ---
+  release() {
+    const sub = argv[1];
+    const w = loadWork();
+    ensureMilestones(w);
+    const order = w.releaseOrder;
+    const L = () => computeLabels(w);
+    if (!sub || sub === 'list') {
+      const lab = L();
+      out(`Version start: V${versionStart()} (options.versionStart)`);
+      if (!order.length) out('No releases yet: forge release add <id> --name "MVP"');
+      for (const r of order) {
+        const ms = w.milestoneOrder.filter(m => releaseOf(w, m) === r);
+        const appr = ms.filter(m => ((w.gates || {})[m] || {}).approved).length;
+        out(`  ${lab.releaseLabel[r].padEnd(5)} ${r}: ${w.releases[r].name || '(unnamed)'} — ${ms.length} milestone(s), ${appr} approved${w.releases[r].num != null ? ' · number frozen' : ''}${w.releases[r].tag ? ` · tagged ${w.releases[r].tag}` : ''}`);
+        for (const m of ms) out(`        ${lab.milestone[m].padEnd(7)} ${m}: ${milestoneName(w, m) || '(unnamed)'}`);
+      }
+      const loose = w.milestoneOrder.filter(m => !releaseOf(w, m));
+      if (order.length && loose.length) out(`  (no release) ${loose.join(', ')} — assign: forge milestone update <m> --release <R>`);
+      return;
+    }
+    if (sub === 'add') {
+      const r = argv[2];
+      if (!r || r.startsWith('--')) die('Usage: forge release add <id> --name "..." [--before|--after <R>]');
+      if (w.releases[r]) die(`Release '${r}' already exists.`);
+      const anchor = opt('before') || opt('after');
+      if (anchor && !w.releases[anchor]) die(`Unknown release '${anchor}'.`);
+      const at = opt('before') ? order.indexOf(anchor) : anchor ? order.indexOf(anchor) + 1 : order.length;
+      const lastLocked = order.reduce((acc, x, i) => w.releases[x].num != null ? i : acc, -1);
+      if (at <= lastLocked) die(`Refused: a new release cannot go before one whose number is already frozen ('${order[lastLocked]}').`);
+      w.releases[r] = { id: r, name: opt('name') || null, created: ts(), history: [] };
+      order.splice(at, 0, r);
+      saveWork(w);
+      out(`Release ${L().releaseLabel[r]} added: ${r}${opt('name') ? ` — ${opt('name')}` : ''}`);
+      return;
+    }
+    if (!w.releases[argv[2]] && sub !== 'freeze') die(`Unknown release '${argv[2] || ''}'. See: forge release list`);
+    const r = argv[2];
+    if (sub === 'update') {
+      if (opt('name') === null) die('Usage: forge release update <id> --name "..."');
+      w.releases[r].history = w.releases[r].history || [];
+      w.releases[r].history.push({ ts: ts(), change: `name: '${w.releases[r].name || ''}' → '${opt('name')}'`, reason: opt('reason') || null });
+      w.releases[r].name = opt('name');
+      saveWork(w); out(`Release ${r} renamed: ${opt('name')}`);
+    } else if (sub === 'move') {
+      const target = opt('before') || opt('after');
+      if (!target || !w.releases[target] || target === r) die('Usage: forge release move <id> --before|--after <R> --reason "..."');
+      if (!opt('reason')) die('A reorder is a product decision — record why: --reason "..."');
+      if (w.releases[r].num != null) die(`Refused: release '${r}' has started — its number is frozen.`);
+      const was = order.slice();
+      const next = order.filter(x => x !== r);
+      next.splice(opt('before') ? next.indexOf(target) : next.indexOf(target) + 1, 0, r);
+      const lastLocked = next.reduce((acc, x, i) => (x !== r && w.releases[x].num != null) ? i : acc, -1);
+      if (next.indexOf(r) <= lastLocked) die(`Refused: '${r}' would move ahead of release '${next[lastLocked]}', which has started.`);
+      const labBefore = L();
+      w.releaseOrder = next;
+      const trial = ensureMilestones(w).slice();
+      const bad = milestoneOrderViolations(w, trial);
+      if (bad.length) { w.releaseOrder = was; ensureMilestones(w);
+        die(`Refused: moving release '${r}' breaks ${bad.length} dependenc${bad.length === 1 ? 'y' : 'ies'}:\n` + bad.slice(0, 12).map(v => `  - ${v.item} (${v.itemM}) depends on ${v.dep} (${v.depM})`).join('\n')); }
+      w.releases[r].history = w.releases[r].history || [];
+      w.releases[r].history.push({ ts: ts(), change: `moved ${opt('before') ? 'before' : 'after'} ${target}`, reason: opt('reason') });
+      saveWork(w);
+      appendMd(DECISIONS_FILE, '# Decisions log (append-only, via forge CLI)',
+        `\n### ${ts()} — Release '${r}' reordered\n- Authority: human\n- Decision: moved ${opt('before') ? 'before' : 'after'} '${target}' (${labBefore.releaseLabel[r]} → ${L().releaseLabel[r]})\n- Why: ${opt('reason')}\n`);
+      out(`Release ${r}: ${labBefore.releaseLabel[r]} → ${L().releaseLabel[r]}; every unstarted milestone and task after it renumbered.`);
+    } else if (sub === 'remove') {
+      if (!opt('reason')) die('Removing a release must be explicit: --reason "..."');
+      const ms = w.milestoneOrder.filter(m => releaseOf(w, m) === r);
+      if (ms.length) die(`Refused: release '${r}' still holds milestone(s): ${ms.join(', ')}.`);
+      if (w.releases[r].num != null) die(`Refused: release '${r}' has a frozen number — it is history.`);
+      delete w.releases[r]; w.releaseOrder = order.filter(x => x !== r);
+      saveWork(w); out(`Release ${r} removed.`);
+    } else if (sub === 'freeze') {
+      // migration of an existing project: assign releases FIRST, then freeze started work
+      freezeLabels(w); saveWork(w);
+      const lab = L();
+      const frozenM = w.milestoneOrder.filter(m => w.milestones[m].label);
+      out(`Frozen: ${frozenM.length} started milestone(s) (${frozenM.map(m => `${m}=${lab.milestone[m]}`).join(', ') || 'none'}), ` +
+          `${Object.values(w.items).filter(t => t.label).length} started task(s).`);
+    } else if (sub === 'tag') {
+      const cfgT = loadConfig() || {};
+      const gc = gitCfg(cfgT);
+      const ms = milestoneSeq(w).filter(m => releaseOf(w, m) === r);
+      const pending = ms.filter(m => !((w.gates || {})[m] || {}).approved);
+      if (!ms.length || pending.length) die(`Refused: release '${r}' is not complete${pending.length ? ` — unapproved: ${pending.join(', ')}` : ' (no milestones)'}.`);
+      const num = L().release[r];
+      const tag = `v${num}.0.0`;
+      if (!perMilestone(cfgT) || !gc.base) { out(`Tag it (Forge runs no git in this project):\n  git tag -a ${tag} -m "Release V${num} — ${w.releases[r].name || r}" <commit> && git push origin ${tag}`); return; }
+      const remote = hasRemote(cfgT) ? gc.remote : null;
+      if (remote) git(['fetch', remote, gc.base]);
+      const ref = remote ? `${remote}/${gc.base}` : gc.base;
+      const unmerged = ms.filter(m => { const sh = (w.gates[m] || {}).ship; return !sh || git(['merge-base', '--is-ancestor', sh.head, ref]).code !== 0; });
+      if (unmerged.length) die(`Refused: not every milestone of '${r}' is merged into '${gc.base}': ${unmerged.join(', ')} (ship and merge their PRs first).`);
+      if (git(['rev-parse', '--verify', '--quiet', `refs/tags/${tag}`]).code === 0) die(`Refused: tag ${tag} already exists.`);
+      const tg = git(['tag', '-a', tag, ref, '-m', `Release V${num} — ${w.releases[r].name || r}`]);
+      if (tg.code !== 0) die(`Refused: git tag failed: ${tg.err}`);
+      if (remote) { const pt = git(['push', remote, tag]); if (pt.code !== 0) die(`Tag ${tag} created locally but the push failed: ${pt.err}`); }
+      w.releases[r].tag = tag; saveWork(w);
+      out(`Release V${num} tagged ${tag} on ${ref}${remote ? ' and pushed' : ''}.`);
+    } else die('Usage: forge release list | add <id> --name ".." [--before|--after <R>] | update <id> --name ".." | move <id> --before|--after <R> --reason ".." | remove <id> --reason ".." | freeze | tag <id>');
+  },
+
   // -- milestone gates (F9) -------------------------------------------------------
   milestone() {
     const sub = argv[1];
@@ -3326,7 +3669,7 @@ const commands = {
         const state = !items.length ? 'no items yet'
           : g && g.approved ? `APPROVED ${g.ts}${g.note ? ` — ${g.note}` : ''}`
           : (milestoneComplete(w, m) ? 'COMPLETE — AWAITING HUMAN APPROVAL' : milestoneStarted(w, m) ? 'in progress' : 'not started');
-        out(`  ${String(i + 1).padStart(2)}. ${m}: ${r.name ? r.name : '(UNNAMED — forge milestone update ' + m + ' --name "...")'}`);
+        out(`  ${String(computeLabels(w).milestone[m]).padEnd(7)} ${m}${r.release ? ` [${r.release}]` : ''}: ${r.name ? r.name : '(UNNAMED — forge milestone update ' + m + ' --name "...")'}`);
         out(`      ${done}/${items.length} items · ${state}${g && g.commits ? ` · commits ${g.commits.base.slice(0, 7)}..${g.commits.head.slice(0, 7)} (${g.commits.count})` : ''}`);
         if (r.demo) out(`      demo: ${r.demo}`);
       });
@@ -3339,7 +3682,8 @@ const commands = {
       if (!opt('name')) die(`Refused: a milestone needs --name — the feature it enables, in the user's terms ("Customers can reorder a past box").`);
       const anchor = opt('before') || opt('after');
       if (anchor && !w.milestones[anchor]) die(`Unknown milestone '${anchor}'. See: forge milestone list`);
-      w.milestones[m] = { id: m, name: opt('name'), demo: opt('demo') || null, created: ts(), history: [] };
+      if (opt('release') && !(w.releases || {})[opt('release')]) die(`Unknown release '${opt('release')}'. See: forge release list`);
+      w.milestones[m] = { id: m, name: opt('name'), demo: opt('demo') || null, release: opt('release') || null, created: ts(), history: [] };
       const at = opt('before') ? order.indexOf(opt('before')) : opt('after') ? order.indexOf(opt('after')) + 1 : order.length;
       if (anchor && at <= order.findLastIndex(x => milestoneStarted(w, x) || ((w.gates[x] || {}).approved)))
         die(`Refused: '${m}' would sit before a milestone that has already started or been approved. New milestones go after the work in flight.`);
@@ -3355,6 +3699,21 @@ const commands = {
       const changes = [];
       if (opt('name') !== null) { changes.push(`name: '${r.name || ''}' → '${opt('name')}'`); r.name = opt('name'); delete r.unnamed; }
       if (opt('demo') !== null) { changes.push(`demo updated`); r.demo = opt('demo'); }
+      if (opt('release') !== null) {
+        const nr = opt('release') === 'none' ? null : opt('release');
+        if (nr && !(w.releases || {})[nr]) die(`Unknown release '${nr}'. See: forge release list`);
+        if (r.label && nr !== (r.release || null)) die(`Refused: '${m}' has started and carries version ${r.label} — it stays in its release.`);
+        const was = r.release || null;
+        r.release = nr;
+        const trial = ensureMilestones(w).slice();
+        const bad = milestoneOrderViolations(w, trial);
+        if (bad.length) { r.release = was; ensureMilestones(w);
+          die(`Refused: putting '${m}' in ${nr || 'no release'} breaks ${bad.length} dependenc${bad.length === 1 ? 'y' : 'ies'}:\n` + bad.slice(0, 12).map(v => `  - ${v.item} (${v.itemM}) depends on ${v.dep} (${v.depM})`).join('\n')); }
+        const lockedIdx = trial.reduce((acc, x, i) => (x !== m && (milestoneStarted(w, x) || ((w.gates || {})[x] || {}).approved)) ? i : acc, -1);
+        if (trial.indexOf(m) < lockedIdx && !milestoneStarted(w, m)) { r.release = was; ensureMilestones(w);
+          die(`Refused: that release sits before work that has already started ('${trial[lockedIdx]}') — '${m}' would jump ahead of it.`); }
+        changes.push(`release: ${was || 'none'} → ${nr || 'none'}`);
+      }
       if (!changes.length) die('Nothing to update: forge milestone update <id> --name "..." [--demo "..."] [--reason "..."]');
       (r.history = r.history || []).push({ ts: ts(), change: changes.join('; '), reason: opt('reason') || null });
       saveWork(w);
@@ -3426,7 +3785,7 @@ const commands = {
       const mItems = w.order.map(id => w.items[id]).filter(t => t.milestone === m && t.status === 'DONE');
       const ids = new Set(mItems.map(t => t.id));
       const missing = mItems.filter(t => t.commit && t.commit.sha && git(['merge-base', '--is-ancestor', t.commit.sha, b]).code !== 0).map(t => t.id);
-      const extra = commits.filter(c => !(c.subject.startsWith(`milestone ${m}:`) || [...ids].some(id => c.subject.startsWith(`${id}: `))));
+      const extra = commits.filter(c => !(c.subject.startsWith(`milestone ${m}:`) || [...ids].some(id => c.subject.startsWith(`${id}: `) || c.subject.startsWith(`${id} (`))));
       if (missing.length) die(`Refused: item commit(s) are not on '${b}': ${missing.join(', ')}` + (mItems.some(t => t.ownBranch) ? `\n(Own-branch items are merged into '${b}' before the milestone ships.)` : ''));
       if (extra.length && !opt('reason'))
         die(`Refused: '${b}' carries commits that are not this milestone's items:\n` + extra.slice(0, 12).map(c => `  - ${c.sha.slice(0, 10)} ${c.subject}`).join('\n') +
@@ -3447,7 +3806,8 @@ const commands = {
         '', `Merge with a **merge commit** (never squash) so the per-item commits survive.`, '', `Opened by forge milestone ship.`].join('\n');
       const bodyFile = path.join(STATE, `ship-${m}.md`);
       fs.writeFileSync(bodyFile, body + '\n');
-      const pr = gh(['pr', 'create', '--base', gc.base, '--head', b, '--title', `${m}: ${milestoneName(w, m) || m}`, '--body-file', bodyFile]);
+      const mLab = computeLabels(w).milestone[m];
+      const pr = gh(['pr', 'create', '--base', gc.base, '--head', b, '--title', `${mLab} — ${milestoneName(w, m) || m} (${m})`, '--body-file', bodyFile]);
       try { fs.unlinkSync(bodyFile); } catch (_) { }
       if (pr.code !== 0) die(`Refused: gh pr create failed:\n${pr.err || pr.out}`);
       const url = pr.out.split('\n').filter(Boolean).pop();
@@ -3494,6 +3854,8 @@ const commands = {
       if (!opt('reason')) die('A reorder is a product decision — record why: --reason "..."');
       if ((w.gates[m] || {}).approved) die(`Refused: '${m}' is approved — shipped milestones are history, not plan.`);
       if (milestoneStarted(w, m)) die(`Refused: '${m}' already has work in progress or done. Finish or split it before reordering.`);
+      if ((releaseOf(w, m) || null) !== (releaseOf(w, target) || null))
+        die(`Refused: '${m}' (${releaseOf(w, m) || 'no release'}) and '${target}' (${releaseOf(w, target) || 'no release'}) are in different releases. Milestones move inside their release; change release with: forge milestone update ${m} --release <R>`);
       const next = order.filter(x => x !== m);
       const at = opt('before') ? next.indexOf(target) : next.indexOf(target) + 1;
       next.splice(at, 0, m);
@@ -3590,7 +3952,13 @@ const commands = {
       saveWork(w);
       appendMd(DECISIONS_FILE, '# Decisions log (append-only, via forge CLI)',
         `\n### ${ts()} — Milestone '${m}' approved\n- Authority: human\n- Decision: milestone gate approved after human review${secSkip ? ` (SECURITY REVIEW SKIPPED: ${secSkip})` : ''}\n- Why: ${opt('note') || '(no note recorded)'}\n`);
-      out(`Milestone '${milestoneLabel(w, m)}' approved — later milestones may now start.`);
+      freezeLabels(w); saveWork(w);
+      out(`Milestone ${computeLabels(w).milestone[m]} '${milestoneLabel(w, m)}' approved — later milestones may now start.`);
+      {
+        const rel = releaseOf(w, m);
+        if (rel && milestoneSeq(w).filter(x => releaseOf(w, x) === rel).every(x => ((w.gates || {})[x] || {}).approved))
+          out(`\n🏁 Release ${computeLabels(w).releaseLabel[rel]} (${(w.releases[rel] || {}).name || rel}) is complete. Once its milestone PRs are merged: forge release tag ${rel}`);
+      }
       if (mCommits) out(`Commit range recorded: ${mCommits.base.slice(0, 7)}..${mCommits.head.slice(0, 7)} (${mCommits.count} commit(s)) — git log ${mCommits.base}..${mCommits.head}`);
       out(`📊 forge/dashboard.html now shows this milestone closed — worth a look for the user.`);
       if (perMilestone(loadConfig() || {})) out(`\nNext (per-milestone git flow): forge milestone ship ${m}   — opens ONE PR ${milestoneBranch(loadConfig() || {}, m)} → ${gitCfg(loadConfig() || {}).base || '<baseBranch>'} with every item commit.`);
@@ -3888,6 +4256,17 @@ const commands = {
   milestone move <m> --before|--after <M> --reason ".." [--pull-deps]
   milestone remove <m> --reason ".."     only an empty milestone with no gate record
   milestone branch <m>                   v0.17: create/switch to the milestone branch (from options.baseBranch)
+  release list | add <R> --name ".." [--before|--after <R>] | update <R> --name ".."
+  release move <R> --before|--after <R> --reason ".." | remove <R> --reason ".." | freeze | tag <R>
+                                         v0.18: releases (V0 = MVP, V1, V2 …) above milestones. Every
+                                         release / milestone / task gets a VERSION LABEL (V1.2.3) computed
+                                         from position (options.versionStart) — ids never change; a label
+                                         freezes when its work starts; reordering renumbers the rest.
+                                         'freeze' labels already-started work (after assigning releases)
+  milestone add|update <m> ... --release <R|none>   put a milestone in a release
+  task next                              the next READY task in plan order (read-only)
+  task start [<id>] [--reason ..]        no id = next in plan order; out of order needs --reason
+  task move <id> --before|--after <id> [--reason ..]   reorder unstarted tasks (dependency-checked)
   milestone ship <m> [--steps-done] [--auto-merge] [--reason ..]
                                          v0.17: after the gate — commit the gate record, push, open ONE PR
                                          milestone branch → base (merge commit), record it; auto-merge only
@@ -3934,6 +4313,7 @@ const commands = {
                options.integration per-milestone|manual (v0.17 git flow; manual needs --reason) · options.baseBranch
                options.branchPattern "milestone/<id>" · options.mergeMethod merge · options.remote origin
                options.gateSteps "step one || step two"   shown at 'milestone ship', confirmed with --steps-done
+               options.versionStart 0   number of the first release (V0 = MVP; an existing product may start at 2)
                options.concurrency N     max items IN_PROGRESS at once (default 1 = serial; raise only with
                                          disjoint scopes — see OPERATING.md parallel dispatch)
                options.scopeExempt "a/,b/"  dirs exempt from the scope whitelist (default forge/,spec/,docs/; *.md always exempt)

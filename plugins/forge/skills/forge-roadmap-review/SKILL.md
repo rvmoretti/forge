@@ -64,6 +64,11 @@ Define it once as `$FORGE` and use it for EVERY state change.
      (refused if it breaks a dependency or jumps ahead of started work — show the
      user the blocking items; `--pull-deps` moves them along if they agree);
    - unnamed milestones → propose names: `$FORGE milestone update <id> --name ".."`;
+   - releases (V0 = MVP, V1 …): `$FORGE release add <R> --name ".."`, `$FORGE milestone
+     update <id> --release <R>`, `$FORGE release move <R> --before|--after <R> --reason ".."`;
+     task order inside a milestone: `$FORGE task move <id> --before|--after <id>`. Show the
+     user the version labels (`$FORGE release list`) — they renumber as the plan changes,
+     except work already started;
    - then update the affected `spec/` layer text as `[CONFIRMED]` intent, citing
      the decision.
 4. **Mockups.** Create or edit them (Claude Design / canvas / image tools). Save

@@ -1523,7 +1523,7 @@ test('git flow: done makes exactly one commit per item — its files plus Forge 
   assert.strictEqual(forge(['task', 'verify', 'A']).code, 0);
   const d = forge(['task', 'done', 'A']);
   assert.strictEqual(d.code, 0, d.out);
-  assert.strictEqual(g('log', '-1', '--format=%s').stdout.trim(), 'A: Pass tokens');
+  assert.strictEqual(g('log', '-1', '--format=%s').stdout.trim(), 'A (V0.1.1): Pass tokens');
   const files = g('show', '--name-only', '--format=', 'HEAD').stdout.trim().split('\n');
   assert.ok(files.includes('src/a.js'));
   assert.ok(files.includes('forge/state/work.json'));
@@ -1690,4 +1690,104 @@ test('usage: SDK-driven sessions from other tools are reported as external, neve
   assert.match(r.out, /External sessions in this segment \(not Forge[^)]*\): 2 calls/);
   assert.doesNotMatch(r.out, /OLDER OPUS VERSION/);           // not Forge's model choice
   assert.match(r.out, /per item: 1 calls/);                   // only the orchestrator call counts
+});
+
+// --- v0.18: releases, computed version labels, plan order -----------------------
+
+function setupReleases() {
+  forge(['release', 'add', 'mvp', '--name', 'MVP']);
+  forge(['release', 'add', 'v1', '--name', 'Stays']);
+  forge(['milestone', 'add', 'pass', '--name', 'Every booking has a pass', '--release', 'mvp']);
+  forge(['milestone', 'add', 'trip', '--name', 'Members book trips', '--release', 'mvp']);
+  forge(['milestone', 'add', 'stay', '--name', 'Members book stays', '--release', 'v1']);
+  addItem('P1', ['--milestone', 'pass']); addItem('P2', ['--milestone', 'pass']); addItem('P3', ['--milestone', 'pass']);
+  addItem('T1', ['--milestone', 'trip']); addItem('T2', ['--milestone', 'trip', '--deps', 'T1']);
+  addItem('S1', ['--milestone', 'stay']);
+}
+function labelOf(id) { const r = forge(['task', 'list']); const l = r.out.split('\n').find(x => new RegExp(`\\s${id}\\s`).test(x)); return l ? l.split(/\s+/)[1] : null; }
+
+test('labels: release / milestone / task versions are computed from position, starting at versionStart', () => {
+  setupReleases();
+  assert.strictEqual(labelOf('P1'), 'V0.1.1');
+  assert.strictEqual(labelOf('P3'), 'V0.1.3');
+  assert.strictEqual(labelOf('T2'), 'V0.2.2');
+  assert.strictEqual(labelOf('S1'), 'V1.1.1');
+  forge(['config', 'set', 'options.versionStart', '2']);
+  assert.strictEqual(labelOf('P1'), 'V2.1.1');
+  assert.strictEqual(labelOf('S1'), 'V3.1.1');
+  const rl = forge(['release', 'list']);
+  assert.match(rl.out, /V2\s+mvp: MVP/);
+  assert.match(rl.out, /V3\.1\s+stay/);
+});
+
+test('labels: reordering renumbers everything not started; started work keeps its frozen label', () => {
+  setupReleases();
+  // nothing started: moving a milestone renumbers
+  assert.strictEqual(forge(['milestone', 'move', 'trip', '--before', 'pass', '--reason', 'x']).code, 0);
+  assert.strictEqual(labelOf('T1'), 'V0.1.1');
+  assert.strictEqual(labelOf('P1'), 'V0.2.1');
+  // start the first task in plan order -> its milestone and label freeze
+  const s = forge(['task', 'start']);
+  assert.match(s.out, /T1 \(V0\.1\.1\) → IN_PROGRESS/);
+  // a milestone cannot jump ahead of started work any more
+  assert.notStrictEqual(forge(['milestone', 'move', 'pass', '--before', 'trip', '--reason', 'x']).code, 0);
+  // moving a release before a started one is refused; after it is fine and renumbers
+  assert.notStrictEqual(forge(['release', 'move', 'v1', '--before', 'mvp', '--reason', 'x']).code, 0);
+  forge(['release', 'add', 'v2', '--name', 'Agents']);
+  forge(['milestone', 'add', 'agent', '--name', 'Agents book', '--release', 'v2']);
+  addItem('A1', ['--milestone', 'agent']);
+  assert.strictEqual(labelOf('A1'), 'V2.1.1');
+  assert.strictEqual(forge(['release', 'move', 'v2', '--before', 'v1', '--reason', 'partner']).code, 0);
+  assert.strictEqual(labelOf('A1'), 'V1.1.1');
+  assert.strictEqual(labelOf('S1'), 'V2.1.1');
+  assert.strictEqual(labelOf('T1'), 'V0.1.1'); // frozen
+});
+
+test('plan order: start without an id takes the next READY task; out-of-order needs a reason; task move is dependency-checked', () => {
+  setupReleases();
+  const n = forge(['task', 'next']);
+  assert.match(n.out, /V0\.1\.1\s+P1/);
+  const ooo = forge(['task', 'start', 'P3']);
+  assert.notStrictEqual(ooo.code, 0);
+  assert.match(ooo.out, /not next in plan order — READY before it in 'pass': P1, P2/);
+  assert.notStrictEqual(forge(['task', 'move', 'T2', '--before', 'T1']).code, 0); // T2 depends on T1
+  const mv = forge(['task', 'move', 'P3', '--before', 'P1', '--reason', 'customer first']);
+  assert.strictEqual(mv.code, 0, mv.out);
+  assert.match(mv.out, /V0\.1\.3 → V0\.1\.1/);
+  const s = forge(['task', 'start']);
+  assert.match(s.out, /P3 \(V0\.1\.1\) → IN_PROGRESS/);
+  touch('p3.txt'); forge(['task', 'verify', 'P3']); assert.strictEqual(forge(['task', 'done', 'P3']).code, 0);
+  // the explicit escape: out of order (P1 is next) with a recorded reason
+  assert.notStrictEqual(forge(['task', 'start', 'P2']).code, 0);
+  assert.strictEqual(forge(['task', 'start', 'P2', '--reason', 'blocked on data for P1']).code, 0);
+  assert.strictEqual(work().items.P2.label, 'V0.1.2');
+  // started work cannot be moved or re-homed
+  assert.notStrictEqual(forge(['task', 'move', 'P3', '--after', 'P1']).code, 0);
+  assert.notStrictEqual(forge(['task', 'update', 'P3', '--milestone', 'trip']).code, 0);
+});
+
+test('releases: milestone moves stay inside their release; re-homing is dependency-checked; list is in plan order', () => {
+  setupReleases();
+  assert.notStrictEqual(forge(['milestone', 'move', 'stay', '--before', 'pass', '--reason', 'x']).code, 0);
+  assert.strictEqual(forge(['milestone', 'update', 'stay', '--release', 'mvp']).code, 0);
+  assert.strictEqual(labelOf('S1'), 'V0.3.1');
+  forge(['task', 'update', 'T1', '--deps', 'S1']);          // trip (V0.2) now needs stay (V0.3)
+  const bad = forge(['milestone', 'update', 'stay', '--release', 'v1']);
+  assert.notStrictEqual(bad.code, 0);
+  assert.match(bad.out, /T1 \(trip\) depends on S1 \(stay\)/);
+  const ids = forge(['task', 'list']).out.split('\n').filter(l => /\s(P\d|T\d|S\d)\s/.test(l)).map(l => l.split(/\s+/)[2]);
+  assert.deepStrictEqual(ids, ['P1', 'P2', 'P3', 'T1', 'T2', 'S1']);
+  assert.strictEqual(forge(['release', 'remove', 'v1', '--reason', 'empty now']).code, 0);
+});
+
+test('dashboard shows release headers, milestone and task version labels', () => {
+  setupReleases();
+  forge(['task', 'start']);
+  forge(['dashboard']);
+  const html = fs.readFileSync(path.join(dir, 'forge', 'dashboard.html'), 'utf8');
+  assert.match(html, /class="vtag rel">V0<\/span>MVP/);
+  assert.match(html, /class="vtag">V0\.1<\/span>pass/);
+  assert.match(html, /class="vlab"[^>]*>V0\.1\.1<\/b>P1/);
+  assert.match(html, /class="rsep"><span>V1<\/span><em>Stays<\/em>/);
+  assert.strictEqual((html.match(/>next up</g) || []).length, 1);
 });

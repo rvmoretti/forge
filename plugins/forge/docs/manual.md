@@ -143,7 +143,11 @@ changes how intent is gathered, never which gates apply. No special commands.
    the gate record, pushes, shows `options.gateSteps` (confirm `--steps-done`), opens ONE PR
    milestone branch → `options.baseBranch`, merged with a merge commit once CI is green (auto-merge
    only with `--auto-merge` AND required status checks on the base). Next milestone:
-   `forge milestone branch <next>`. Escape hatch (recorded human decision): `task start <id>
+   `forge milestone branch <next>`. **Versions (v0.18):** releases (`forge release add mvp --name "MVP"`,
+   `milestone update <m> --release <R>`) number everything — `V0.3.2` = release V0, 3rd milestone,
+   2nd task — from position; ids never change, labels freeze when work starts, the rest renumber on
+   any reorder. `task next` / `task start` follow the plan order; `task move` reorders unstarted work;
+   `release tag <R>` tags `v<N>.0.0` once the release is merged. Escape hatch (recorded human decision): `task start <id>
    --own-branch --reason` → `item/<id>`, merged back into the milestone branch.
 
 Session habits: resume with "continue" (session-start hook restores everything); fresh session
@@ -228,6 +232,7 @@ refused) · living spec.
 - "no acceptance criteria" → write criteria first.
 - "unfinished dependencies" → pick a ready item.
 - "already IN_PROGRESS" → resolve (done/fail/block) before re-start.
+- "not next in plan order" → `forge task start` (no id) takes the next one; reorder with `task move`, or `--reason`.
 - "needs a base branch" → `forge config set options.baseBranch <branch>` (or opt out: `options.integration manual --reason`).
 - "built on branch 'milestone/<id>'" → `forge milestone branch <id>`.
 - "outside … scope" at done → revert stray changes or widen scope with `task update --allowed --reason`.

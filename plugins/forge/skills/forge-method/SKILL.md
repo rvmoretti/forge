@@ -60,10 +60,13 @@ At **Step 7** (generate handoff artifacts), in addition to `CLAUDE.md` and
    integration risk surfaces first. For each milestone, define a demo
    criterion: the command that runs it and a short "what to try" script for
    the user. Present the cut as a proposal; the user confirms or adjusts it —
-   this is a product-owner decision. Register each confirmed milestone
-   BEFORE its items: `forge milestone add M1 --name "<feature it enables>"
-   --demo "<command + what to try>"` (in order; the CLI keeps that order and
-   gates by it).
+   this is a product-owner decision. Group the milestones into releases —
+   the MVP first (`forge release add mvp --name "MVP"`, numbered from
+   `options.versionStart`, default V0), then V1, V2 … — and register each
+   confirmed milestone with its release BEFORE its items: `forge milestone add
+   M1 --name "<feature it enables>" --release mvp --demo "<command + what to
+   try>"` (in order; the CLI keeps that order, gates by it, and labels
+   everything V0.1, V0.1.1 … from it).
    Then ask one more either/or: stop for their testing after each milestone
    (`per-milestone`, recommended default) or run straight through
    (`end-only`)? Record it: `forge config set options.gates <choice>`.

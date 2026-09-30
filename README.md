@@ -166,6 +166,34 @@ memory.
 
 ## Changelog
 
+### v0.18.0 — releases, version labels, and work in the order it is shown
+- **Releases above milestones.** `forge release add mvp --name "MVP"`, then
+  `milestone add|update <m> --release <R>`. The milestone sequence is always grouped
+  by release; `release move` reorders whole releases (dependency-checked, never ahead
+  of started work); milestones move only inside their release.
+- **Version labels, computed — never identity.** Every release, milestone and task
+  shows a label from its position: `V0` (the MVP), `V0.3` (third milestone of V0),
+  `V0.3.2` (second task of it). `options.versionStart` sets the first release number.
+  Ids (`03-checkout-2`, `reorders`) stay fixed because commits, dependencies, briefs
+  and decisions cite them. A label **freezes when its work starts** (a task at
+  `task start`, in the order work actually started; its milestone and release with
+  it), so history never renumbers; everything not yet started renumbers when the
+  plan is reordered. `release freeze` labels already-started work after an existing
+  project has assigned its releases.
+- **Plan order is the work order.** Each milestone has an explicit task order,
+  initialised dependency-first. `task list`, `status` and the dashboard show work in
+  that order; `task next` names what comes next; `task start` with no id starts it.
+  Starting another READY task out of order needs `--reason` (recorded).
+  `task move <id> --before|--after <id>` reorders unstarted tasks, refusing any order
+  that puts work before what it depends on.
+- **Git and the dashboard carry the labels.** Item commits read
+  `<id> (V0.3.2): <title>`; milestone PRs are titled `V0.3 — <name> (<id>)`; when the
+  last milestone of a release is approved, `forge release tag <R>` tags the merged
+  base branch `v<N>.0.0`. The dashboard groups milestones under release headers, shows
+  the label on every milestone and task (a trailing `·` marks a provisional label),
+  separates releases on the milestone rail, and marks only the real next task
+  "next up".
+
 ### v0.17.1 — external sessions are not Forge's cost
 - **`usage` separates sessions another program starts through the Agent SDK**
   (`entrypoint: sdk-*`) into an `[external]` lane. Field evidence: 48 SDK-driven
