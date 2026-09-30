@@ -34,9 +34,15 @@ then its items; later milestones as thin items (id, title,
 objective, `--milestone`, `--deps`; criteria and scope are added via
 `task update` when their milestone approaches). A backlog parked in a
 document instead of the graph is a spec-drift bug: invisible to every gate,
-stat, and view. Seed the component registry in the same step — every
-subsystem the spec names becomes `forge component add <id> --kind ...`
-BEFORE items are created, and every item carries `--component`.
+stat, and view. Seed the architecture and screens in the same step — every
+runtime part becomes `forge arch add <id> --kind .. --runs-on ..` (links: `forge arch
+link`), every screen `forge screen add <id> --app <part> --mock ..` — BEFORE items are
+created, and every item carries `--component` (screen, part, or plain tag). On an
+existing project, `forge arch scan` drafts the parts from the repo.
+
+**Plan standards**: when session start reports open `forge upgrade` steps, tell the
+user once, in one line, and move on. Never run a judgement step (a change script)
+without their go; automatic steps (`forge upgrade apply`) are safe between items.
 
 **Build phase**: run the loop below, item by item, milestone by milestone.
 

@@ -510,20 +510,26 @@ test('verify records existing artifacts and warns on missing ones', () => {
 
 // --- v0.10: component map --------------------------------------------------------
 
-test('components register, auto-register from --component, and render in the dashboard map', () => {
+test('component add routes screens / parts / tags; unknown --component tags auto-register as tags', () => {
   forge(['component', 'add', 'listing-detail', '--name', 'Listing detail', '--kind', 'frontend', '--route', '/anuncios/:id']);
   const dup = forge(['component', 'add', 'listing-detail']);
   assert.notStrictEqual(dup.code, 0);
+  forge(['component', 'add', 'db', '--name', 'Postgres', '--kind', 'db']);
   forge(['task', 'add', '--id', 'T1', '--title', 't', '--criterion', 'ok::node -e "process.exit(0)"', '--component', 'listing-detail']);
-  forge(['task', 'add', '--id', 'T2', '--title', 't', '--criterion', 'ok::node -e "process.exit(0)"', '--component', 'api-core']); // auto-registers
+  forge(['task', 'add', '--id', 'T2', '--title', 't', '--criterion', 'ok::node -e "process.exit(0)"', '--component', 'api-core']); // auto-registers as a tag
+  const c = JSON.parse(fs.readFileSync(path.join(dir, 'forge', 'state', 'components.json'), 'utf8'));
+  assert.strictEqual(c.schema, 2);
+  assert.ok(c.screens['listing-detail']);
+  assert.strictEqual(c.screens['listing-detail'].route, '/anuncios/:id');
+  assert.ok(c.components.db);
+  assert.ok(c.tags['api-core']);
   const list = forge(['component', 'list']);
-  assert.match(list.out, /listing-detail \(frontend · \/anuncios\/:id\) — 0\/1 items done/);
-  assert.match(list.out, /api-core \(unspecified\)/);
+  assert.match(list.out, /Screens \(1\)/);
+  assert.match(list.out, /api-core 0\/1/);
   const dash = fs.readFileSync(path.join(dir, 'forge', 'dashboard.html'), 'utf8');
-  assert.match(dash, /Project map/);
+  assert.match(dash, /data-page="architecture"/);
+  assert.match(dash, /Postgres/);
   assert.match(dash, /Listing detail/);
-  assert.match(dash, /api-core/);
-  assert.doesNotMatch(dash, /not tagged to any component/); // every item is tagged here
 });
 
 // --- v0.12: state-write lock -------------------------------------------------
@@ -702,9 +708,9 @@ test('untagged component warning on add, preflight counts untagged, verification
   const w = JSON.parse(fs.readFileSync(path.join(dir, 'forge', 'state', 'work.json'), 'utf8'));
   const v = w.items.C9.verifications.at(-1);
   assert.ok(typeof v.durationMs === 'number' && v.durationMs >= 0);
-  // dashboard is collapsible
+  // dashboard: paged (v0.19), milestone groups collapsible
   const dash = fs.readFileSync(path.join(dir, 'forge', 'dashboard.html'), 'utf8');
-  assert.match(dash, /<details class="sec"/);
+  assert.match(dash, /<section class="page"/);
   assert.match(dash, /<details class="sec sub" open/);
 });
 
@@ -743,7 +749,7 @@ test('brief --save writes forge/briefs/<id>.md and the dashboard links it in the
   assert.match(dash, /details class="icd"/);          // per-item card
   assert.match(dash, /Acceptance criteria/);
   assert.match(dash, /thin item/);                    // B2 has no criteria yet
-  assert.match(dash, /next touched: <b>M1<\/b>/);     // component box next-touch
+  assert.match(dash, /data-comp="ui"/);              // item card carries its tag for the plan filter
   assert.match(dash, /wgfilter/);                     // filter input present
 });
 
@@ -922,7 +928,7 @@ test('v0.15.1 dashboard shell: rows are cards with drawers, sections are styled,
   assert.match(dash, /class="cchip"/);                   // component chip with kind swatch
   assert.match(dash, /id="wgseg"/);                      // All / Needs me / Active / Done
   assert.match(dash, /class="mgb"/);                     // milestone body inside the group card
-  assert.match(dash, /class="mapgrid"/);                 // project map is a grid of component cards
+  assert.match(dash, /section class="page" data-page="plan"/); // v0.19: one page per menu entry
   assert.match(dash, /class="hbar"/);                    // development-time bars
   assert.match(dash, /class="jitem human"/);             // journal timeline marks human authority
   assert.match(dash, /details\.sec>summary::-webkit-details-marker\{display:none\}/); // no OS triangles
@@ -1790,4 +1796,171 @@ test('dashboard shows release headers, milestone and task version labels', () =>
   assert.match(html, /class="vlab"[^>]*>V0\.1\.1<\/b>P1/);
   assert.match(html, /class="rsep"><span>V1<\/span><em>Stays<\/em>/);
   assert.strictEqual((html.match(/>next up</g) || []).length, 1);
+});
+
+// --- v0.19: architecture, screens, upgrade, paged dashboard ------------------
+
+function writeRepo(files) {
+  for (const [rel, text] of Object.entries(files)) {
+    fs.mkdirSync(path.dirname(path.join(dir, rel)), { recursive: true });
+    fs.writeFileSync(path.join(dir, rel), text);
+  }
+}
+const SHOP = {
+  'package.json': JSON.stringify({ dependencies: { react: '18', 'react-dom': '18', '@supabase/supabase-js': '2' }, devDependencies: { vite: '5' } }),
+  'wrangler.toml': 'name="shop"\npages_build_output_dir="dist"\n',
+  'supabase/config.toml': '[auth]\nenabled = true\n',
+  'supabase/migrations/001.sql': 'select 1;',
+  'supabase/functions/stripe-webhook/index.ts': 'import Stripe from "npm:stripe@14"; Deno.env.get("STRIPE_SECRET_KEY");',
+  'supabase/functions/acme-webhook/index.ts': 'Deno.env.get("ACMEPAY_API_KEY");',
+  'src/main.tsx': 'supabase.auth.getUser()',
+  '.env.provider.example': 'RESEND_API_KEY=\n',
+};
+
+test('arch scan: finds apps, hosting, platform parts and providers from the repo; --write records drafts only', () => {
+  writeRepo(SHOP);
+  const dry = forge(['arch', 'scan']);
+  assert.strictEqual(dry.code, 0);
+  for (const re of [/web-app — Web app \(frontend\)/, /Cloudflare\n\s+frontend-hosting/, /postgres — Postgres \(db\)/, /auth — Auth \(auth\)/,
+    /edge-functions — Edge functions/, /stripe — Stripe/, /acmepay — Acmepay \(integration\) · low confidence/, /resend — Resend/,
+    /stripe → edge-functions \(webhook\)/, /web-app → postgres \(supabase-js\)/, /Nothing written/]) assert.match(dry.out, re);
+  assert.ok(!fs.existsSync(path.join(dir, 'forge', 'state', 'components.json')), 'a dry scan writes nothing');
+  assert.strictEqual(forge(['arch', 'scan', '--write']).code, 0);
+  let c = JSON.parse(fs.readFileSync(path.join(dir, 'forge', 'state', 'components.json'), 'utf8'));
+  assert.strictEqual(c.components['web-app'].confirmed, false);
+  assert.strictEqual(c.components['web-app'].source, 'scan');
+  assert.ok(c.edges.some(e => e.from === 'stripe' && e.to === 'edge-functions'));
+  // a human edit survives a re-scan
+  forge(['arch', 'update', 'web-app', '--name', 'Member app', '--confirm']);
+  forge(['arch', 'scan', '--write']);
+  c = JSON.parse(fs.readFileSync(path.join(dir, 'forge', 'state', 'components.json'), 'utf8'));
+  assert.strictEqual(c.components['web-app'].name, 'Member app');
+  assert.strictEqual(c.components['web-app'].confirmed, true);
+  assert.strictEqual(forge(['arch', 'confirm', '--all']).code, 0);
+  assert.match(forge(['arch', 'list']).out, /✓ web-app — Member app/);
+});
+
+test('screens belong to apps: work tagged to a screen rolls up to its app; removing a tagged part needs a reason', () => {
+  forge(['arch', 'add', 'member-app', '--name', 'Member app', '--kind', 'frontend', '--runs-on', 'Browser']);
+  forge(['arch', 'add', 'db', '--name', 'Postgres', '--kind', 'db', '--runs-on', 'Supabase']);
+  forge(['arch', 'link', 'member-app', 'db', '--label', 'supabase-js']);
+  forge(['screen', 'add', 'Home', '--name', 'Home']);
+  forge(['screen', 'add', 'Cart', '--name', 'Cart']);
+  forge(['screen', 'add', 'AdminFees', '--name', 'Fees']);
+  const a = forge(['screen', 'assign', 'member-app', '--match', '^(Home|Cart)$']);
+  assert.match(a.out, /2 screen\(s\) → Member app/);
+  assert.notStrictEqual(forge(['screen', 'assign', 'nope', 'Home']).code, 0);
+  addItem('S1', ['--component', 'Cart']);
+  addItem('S2', ['--component', 'member-app']);
+  assert.match(forge(['arch', 'list']).out, /member-app — Member app \(frontend\) · 0\/2 items · 2 screen\(s\)/);
+  const rm = forge(['arch', 'remove', 'member-app']);
+  assert.notStrictEqual(rm.code, 0);
+  assert.match(rm.out, /tagged 'member-app'/);
+  assert.strictEqual(forge(['arch', 'remove', 'member-app', '--reason', 'merged']).code, 0);
+  const c = JSON.parse(fs.readFileSync(path.join(dir, 'forge', 'state', 'components.json'), 'utf8'));
+  assert.ok(c.tags['member-app'], 'the tag survives as a plain tag');
+  assert.strictEqual(c.screens.Cart.app, null);
+  assert.strictEqual(c.edges.length, 0);
+});
+
+test('upgrade: automatic steps are detected, applied with a backup, and revert refuses once the plan moved on', () => {
+  // a v0.18-era registry: screens, runtime parts and tags in one table
+  fs.writeFileSync(path.join(dir, 'forge', 'state', 'components.json'), JSON.stringify({ schema: 1, components: {
+    Home: { id: 'Home', name: 'Home', kind: 'frontend', mock: 'spec/mocks/Home.png' },
+    Sheets: { id: 'Sheets', name: 'Sheets sync', kind: 'integration' },
+    Security: { id: 'Security', name: 'Security', kind: 'unspecified' } } }));
+  addItem('U1', ['--component', 'Home']);
+  const st = forge(['upgrade']);
+  assert.match(st.out, /✗ components-split/);
+  assert.match(st.out, /1 screen\(s\), 1 architecture part\(s\), 1 tag\(s\)/);
+  const ap = forge(['upgrade', 'apply']);
+  assert.strictEqual(ap.code, 0);
+  const backup = (ap.out.match(/Backup: (\S+) /) || [])[1];
+  assert.ok(backup && fs.existsSync(path.join(dir, backup, 'components.json')));
+  let c = JSON.parse(fs.readFileSync(path.join(dir, 'forge', 'state', 'components.json'), 'utf8'));
+  assert.strictEqual(c.schema, 2);
+  assert.ok(c.screens.Home && c.components.Sheets && c.tags.Security);
+  const w = JSON.parse(fs.readFileSync(path.join(dir, 'forge', 'state', 'work.json'), 'utf8'));
+  assert.strictEqual(w.items.U1.component, 'Home', 'item tags are untouched');
+  assert.match(forge(['upgrade']).out, /✓ components-split/);
+  // revert is clean while nothing else changed…
+  assert.strictEqual(forge(['upgrade', 'revert']).code, 0);
+  c = JSON.parse(fs.readFileSync(path.join(dir, 'forge', 'state', 'components.json'), 'utf8'));
+  assert.strictEqual(c.schema, 1);
+  // …and refuses once the plan moved on
+  forge(['upgrade', 'apply']);
+  addItem('U2');
+  const rv = forge(['upgrade', 'revert']);
+  assert.notStrictEqual(rv.code, 0);
+  assert.match(rv.out, /plan changed after that upgrade/);
+});
+
+test('upgrade: judgement steps report findings; a change script runs only after a matching dry-run; history changes are flagged', () => {
+  forge(['milestone', 'add', 'M1', '--name', 'V1 · Members pay online']);
+  forge(['milestone', 'add', 'M2', '--name', 'Backend foundation']);
+  addItem('A', ['--milestone', 'M1']);
+  addItem('B', ['--milestone', 'M2']);
+  const st = forge(['upgrade']);
+  assert.match(st.out, /! feature-milestones/);
+  assert.match(st.out, /M1: "V1 · Members pay online" carries a version prefix/);
+  assert.match(st.out, /M2: "Backend foundation" names a layer/);
+  assert.match(st.out, /no releases/);
+  fs.mkdirSync(path.join(dir, 'forge', 'changes'), { recursive: true });
+  const script = path.join('forge', 'changes', 'up.sh');
+  fs.writeFileSync(path.join(dir, script), '#!/usr/bin/env bash\n# forge-upgrade-step: feature-milestones\nset -euo pipefail\nforge() { node "$FORGE_JS" "$@"; }\n' +
+    'forge release add mvp --name MVP\nforge milestone update M1 --name "Members pay online" --release mvp\nforge milestone update M2 --name "Staff see the day" --release mvp\n');
+  const refused = forge(['upgrade', 'run', script]);
+  assert.notStrictEqual(refused.code, 0);
+  assert.match(refused.out, /dry-run this exact script first/);
+  const dr = forge(['upgrade', 'dry-run', script]);
+  assert.strictEqual(dr.code, 0, dr.out);
+  assert.match(dr.out, /\+ release V0 mvp "MVP"/);
+  assert.match(dr.out, /~ M1: .*"V1 · Members pay online" → "Members pay online"/);
+  let w = JSON.parse(fs.readFileSync(path.join(dir, 'forge', 'state', 'work.json'), 'utf8'));
+  assert.ok(!(w.releaseOrder || []).length, 'a dry run changes nothing');
+  // an edit after the dry-run invalidates it
+  fs.appendFileSync(path.join(dir, script), '# edited\n');
+  assert.match(forge(['upgrade', 'run', script]).out, /dry-run this exact script first/);
+  forge(['upgrade', 'dry-run', script]);
+  const run = forge(['upgrade', 'run', script]);
+  assert.strictEqual(run.code, 0, run.out);
+  assert.match(forge(['upgrade']).out, /✓ feature-milestones/);
+  w = JSON.parse(fs.readFileSync(path.join(dir, 'forge', 'state', 'work.json'), 'utf8'));
+  assert.strictEqual(w.upgrade.history.slice(-1)[0].step, 'feature-milestones');
+  assert.match(fs.readFileSync(path.join(dir, 'forge', 'decisions.md'), 'utf8'), /upgrade 'feature-milestones'/);
+  // a script that touches work history is flagged and cannot be run
+  const bad = path.join('forge', 'changes', 'bad.sh');
+  fs.writeFileSync(path.join(dir, bad), '#!/usr/bin/env bash\nforge() { node "$FORGE_JS" "$@"; }\nforge task start A\n');
+  const bdr = forge(['upgrade', 'dry-run', bad]);
+  assert.notStrictEqual(bdr.code, 0);
+  assert.match(bdr.out, /Touches work history/);
+  assert.match(forge(['upgrade', 'run', bad]).out, /failed or touched work history/);
+  // keeping a judgement step as-is needs a reason
+  assert.notStrictEqual(forge(['upgrade', 'accept', 'architecture']).code, 0);
+  assert.strictEqual(forge(['upgrade', 'accept', 'architecture', '--reason', 'no UI yet']).code, 0);
+  assert.match(forge(['upgrade']).out, /✓ architecture .* accepted as-is: no UI yet/);
+});
+
+test('dashboard v0.19: one page per menu entry, architecture drawing data, screens grouped by app, plan filter hooks', () => {
+  forge(['arch', 'add', 'member-app', '--name', 'Member app', '--kind', 'frontend', '--runs-on', 'Browser', '--summary', 'booking · cart']);
+  forge(['arch', 'add', 'db', '--name', 'Postgres', '--kind', 'db', '--runs-on', 'Supabase']);
+  forge(['arch', 'add', 'mail', '--name', 'Email provider', '--kind', 'integration', '--runs-on', 'External services']);
+  forge(['arch', 'link', 'member-app', 'db', '--label', 'supabase-js']);
+  forge(['arch', 'link', 'db', 'mail', '--label', 'confirmations', '--planned']);
+  forge(['screen', 'add', 'Cart', '--name', 'Cart', '--app', 'member-app', '--mock', 'spec/mocks/Cart.png']);
+  addItem('D1', ['--component', 'Cart', '--milestone', 'M1']);
+  const dash = fs.readFileSync(path.join(dir, 'forge', 'dashboard.html'), 'utf8');
+  for (const p of ['overview', 'plan', 'architecture', 'screens', 'usage', 'journal', 'specs', 'system'])
+    assert.match(dash, new RegExp(`<section class="page" data-page="${p}"`));
+  assert.match(dash, /href="#\/architecture" data-p="architecture">Architecture <span class="k">3 · 3 draft/);
+  const data = JSON.parse(dash.match(/<script type="application\/json" id="archdata">([\s\S]*?)<\/script>/)[1]);
+  assert.deepStrictEqual(Object.keys(data.parts).sort(), ['db', 'mail', 'member-app']);
+  assert.strictEqual(data.parts['member-app'].live, 1, 'screen work rolls up to its app');
+  assert.ok(data.edges.find(e => e.to === 'mail').planned);
+  assert.match(dash, /BROWSER[\s\S]*SUPABASE[\s\S]*EXTERNAL SERVICES/);   // lanes: browser first, external last
+  assert.match(dash, /<section class="sgroup" id="scr-member-app">/);
+  assert.match(dash, /data-comp="Cart" data-arch="member-app"/);
+  assert.match(dash, /id="wgcomp" hidden/);
+  assert.match(dash, /Plan standards/);
+  assert.doesNotMatch(dash, /Project map/);
 });

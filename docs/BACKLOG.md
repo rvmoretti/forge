@@ -249,7 +249,7 @@ security pass, a demo, an approval and (item P1.1) a session boundary. Read
 gate count per project alongside the v0.17 numbers; the gate packet (P2.2) is
 what makes small milestones cheap.
 
-# Performance programme (v0.19 candidates — v0.17 became the git-flow release, v0.18 the versioning release)
+# Performance programme (v0.20 candidates — v0.17 became the git-flow release, v0.18 the versioning release, v0.19 the upgrade/architecture release)
 
 Source: an external measured analysis of one 28-item project (session transcripts,
 `work.json`, `usage.json`, v0.16.0 source), reviewed against the repository and
@@ -400,7 +400,7 @@ a constant where the data supports a computed value. Two limits, both real:
 - **API workers / a faster worker model.** Config, not code — the lane shipped in
   v0.15 and has never been switched on. Worth a deliberate trial on a throwaway
   item before real work, and only with a provider that offers prompt caching (the
-  workload re-reads ~172k per worker call). Not a v0.19 build item.
+  workload re-reads ~172k per worker call). Not a v0.20 build item.
 
 ## P4. Definitions to fix before the next comparison
 

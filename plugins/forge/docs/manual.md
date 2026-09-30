@@ -159,8 +159,8 @@ blocked-with-reason / failed-with-diagnosis).
 - `/forge:start` — the guided entry: Forge reads state and walks the user to the next step.
 - `/forge:status` — phase, counts, blockers, what needs the human.
 - `forge/dashboard.html` — generated projection: progress, work graph, decisions/discoveries,
-  preflight, baseline, spec files, the **project map** (one box per component: kind, route,
-  progress, in-progress/blocked/fails, mock or latest screenshot), and **telemetry** —
+  preflight, baseline, spec files, the architecture and screens (v0.19; before it, a
+  project map of component boxes), and **telemetry** —
   development time live from state (per-agent trimmed medians: prep = start→dispatch,
   execution = dispatch→verify; wall-clock brackets, not agent runtime; >2h windows excluded
   as session breaks) plus tokens from the last `forge usage --write` snapshot, stamped with
@@ -204,6 +204,27 @@ blocked-with-reason / failed-with-diagnosis).
   the filter box, telemetry is charted (per-agent prep/execution bars, a delegation
   donut), the project map is a component-card grid, and the journal is a timeline that
   marks whether a decision was yours or Forge's.
+  **v0.19: paged.** The side menu switches pages — Overview, Plan (outcomes, pace and
+  development time beside the work), Architecture, Screens & mockups, Usage, Journal, Specs,
+  System — and the project map is gone: the **Architecture** page draws the runtime parts in
+  lanes by where they run (browser first, external services last) with arrows for who talks
+  to whom (labelled; dashed = planned; a dashed card = a draft not yet confirmed), a List
+  view, and a selected-part panel linking to its work (`#/plan/c:<part>`). **Screens &
+  mockups** is a gallery per app. Addresses are links (`#/plan/<task>`, `#/architecture/<part>`).
+
+## Upgrading an existing project (v0.19)
+
+`forge upgrade` lists the plan standards of the installed Forge and which this project
+meets (detected from state, never a stored level). Automatic steps — e.g. splitting the old
+component registry into parts, screens and tags — run with `forge upgrade apply` (state
+backed up to `forge/state/backups/`). Judgement steps — milestones named after features and
+grouped into releases; the architecture drafted from the repo and confirmed — are done by a
+change script in `forge/changes/` (the forge-roadmap-review skill, "Upgrade mode", writes it):
+`forge upgrade dry-run <script>` runs it on a throwaway copy and prints what would change;
+`forge upgrade run <script>` refuses a script that was not dry-run unchanged against the
+current plan; `forge upgrade revert` restores the backup while nothing else has changed;
+`forge upgrade accept <step> --reason ".."` keeps the plan as it is. Upgrades use the normal
+CLI, so every refusal (dependencies, frozen labels, started work) still applies.
 
 ## Safety nets (all enforced; every one has a regression test)
 
@@ -225,7 +246,7 @@ verification stays independent) · provider-failure taxonomy (`fail --kind provi
 burns the escalation ladder) · item-shape guard (warnings on >8 scope globs, >6 criteria,
 decision-shaped criteria — the T55 rule) · stop gate · state write-guard
 (forge/state and config.json only via CLI) · titled logs (untitled decision/discovery
-refused) · living spec.
+refused) · living spec · upgrade gates (v0.19: `upgrade run` only for a script dry-run unchanged against the current plan; a dry run that touches work history is refused; `upgrade revert` refused once the plan moved on; `arch remove` refused while items are tagged to the part)
 
 ## Refusals — meaning → action (abbreviated)
 
@@ -286,8 +307,7 @@ turns + token counts; key from env `OPENROUTER_API_KEY` or `providers.keyEnv`, n
 `fail --kind provider|worker` classifies failures — provider failures never count toward
 escalation) · `milestone list|security|approve|reopen` · `decision add "title" [--authority
 human|forge --decision --why]` · `discovery add "title" [--evidence --impact --affects]` ·
-`baseline capture|check` · `component add|update <id> [--name --kind --route --mock --doc] |
-list` · `status` · `dashboard` · `stats` (first-pass + clean-run + efficiency) · `usage [--write]` · `session status|takeover
+`baseline capture|check` · `arch scan [--write|--json] | list | add|update <id> [--name --kind --runs-on --summary --evidence --confirm] | link|unlink <a> <b> [--label --planned] | confirm | remove | lanes` · `screen add|update <id> [--app --mock --route] | assign <app> … | list` · `component add|update|list` (legacy, routed) · `upgrade [status] | apply | dry-run|run <script> | accept <step> --reason | revert` · `status` · `dashboard` · `stats` (first-pass + clean-run + efficiency) · `usage [--write]` · `session status|takeover
 [--force]` · `trace [--refusals|--hooks|--last N]` · `doctor` · `hook session-start|pretooluse|
 stop` (plugin internal).
 

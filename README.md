@@ -66,8 +66,8 @@ Beyond the gates, Forge carries the full lifecycle: a layered spec method
 for UI work, a brownfield mode that baselines before touching anything and
 grows a provenance-tagged spec as work happens, security folded into both
 verification and the milestone gate, observed token/dispatch telemetry and
-process metrics (never estimated), a zero-token generated dashboard with a
-visual project map, and a flight recorder + `doctor` self-check for when
+process metrics (never estimated), a zero-token generated dashboard with the
+architecture drawn from the repo, `forge upgrade` to keep older plans current, and a flight recorder + `doctor` self-check for when
 anything looks off. Start with `docs/manual.html` — the interactive
 companion — and `docs/architecture.html` for the diagrams.
 
@@ -157,7 +157,7 @@ forge/
 │                      (CLI-managed, hook-protected)
 ├── decisions.md       append-only, titled, human/forge authority tagged
 ├── discoveries.md     append-only, titled, consequence-tracked
-└── dashboard.html     generated projection incl. the project map — never edited
+└── dashboard.html     generated projection (overview, plan, architecture, screens…) — never edited
 ```
 
 Everything is plain JSON/markdown, git-versioned, human-inspectable. A fresh
@@ -165,6 +165,44 @@ session recovers the full picture from disk — the conversation is never the
 memory.
 
 ## Changelog
+
+### v0.19.0 — plan upgrades, the architecture from the repo, a paged dashboard
+- **`forge upgrade` brings an existing plan to the installed Forge's standards.**
+  Each standard a Forge version introduces is a detected step, never a stored level.
+  *Automatic* steps (a data shape a newer Forge expects) run with `upgrade apply`,
+  state backed up first. *Judgement* steps (milestones named after features and
+  grouped into releases; the architecture) are carried by a reviewed change script in
+  `forge/changes/`: `upgrade dry-run <script>` runs it on a throwaway copy and prints
+  what would change (and flags any touch to work history); `upgrade run` refuses any
+  script that was not dry-run, unchanged, against the current plan; `upgrade revert`
+  restores the backup while nothing else has changed; `upgrade accept <step> --reason`
+  keeps the plan as it is. Every change goes through the normal CLI, so dependencies,
+  frozen labels and started work are protected during an upgrade too. `doctor` and
+  session start report open steps; the agent mentions them, never acts unasked.
+- **Architecture, screens and tags are separate.** The component registry
+  (`components.json` schema 2) now holds runtime *parts* (kind, where they run,
+  summary, evidence, confirmed or draft), *links* between them (label, planned),
+  *screens* (mock, route, the app they belong to, or standalone) and plain *tags*.
+  Items keep one `--component` tag; work tagged to a screen rolls up to its app.
+  `forge arch …` and `forge screen …` manage them; `forge component` still works and
+  routes each entry to the right table. Existing registries migrate as an automatic
+  upgrade step.
+- **`forge arch scan` drafts the architecture from the repo — zero tokens.** It reads
+  manifests, platform config (wrangler / Vercel / Netlify / Fly / Compose / `supabase/`),
+  function folders, env var *names* and known SDK imports, and proposes parts, links
+  (webhooks included) and a confidence for each. `--write` records drafts and never
+  overwrites confirmed parts. Naming and splitting (one bundle serving three
+  audiences, say) is a single Sonnet explorer pass (forge-brownfield §8); confirmation
+  (`forge arch confirm`) is always the user's.
+- **The dashboard is paged.** The side menu switches pages instead of scrolling one
+  long document: *Overview* (what needs you, now / next, releases, the milestone rail,
+  latest decisions), *Plan* (outcomes, pace and development time beside releases →
+  milestones → tasks), *Architecture* (lanes of parts with arrows, a list view, a
+  selected-part panel with "show its work items"), *Screens & mockups* (a gallery per
+  app), *Usage*, *Journal*, *Specs* (spec files and change scripts) and *System* (plan
+  standards, preflight, baseline, settings). Addresses are links —
+  `#/plan/<task or milestone>`, `#/plan/c:<part or screen>`, `#/architecture/<part>` —
+  and old `#work`-style anchors still land. Still one self-contained file.
 
 ### v0.18.0 — releases, version labels, and work in the order it is shown
 - **Releases above milestones.** `forge release add mvp --name "MVP"`, then

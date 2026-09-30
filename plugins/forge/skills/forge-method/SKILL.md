@@ -91,10 +91,15 @@ At **Step 7** (generate handoff artifacts), in addition to `CLAUDE.md` and
    may enter THIN (id, title, objective, milestone, deps only — criteria and
    scope are added via `task update` when their milestone approaches).
    Nothing planned stays outside the graph — a backlog parked in a document
-   is invisible to every gate and view. **First seed the component
-   registry**: every subsystem the spec names becomes `forge component add
-   <id> --kind frontend|backend|db|job|integration` BEFORE items are
-   created, and every item carries `--component`. For items starting now:
+   is invisible to every gate and view. **First seed the architecture
+   and screens** (v0.19): every runtime part the spec names becomes `forge arch
+   add <id> --name ".." --kind frontend|backend|db|auth|job|storage|hosting|integration
+   --runs-on "<where it runs>"` with `forge arch link <from> <to> --label ".."` for
+   who talks to whom (`--planned` for parts not built yet); every screen becomes
+   `forge screen add <id> --app <part> --mock spec/mocks/<id>.png`. Show the user the
+   dashboard's Architecture page and confirm with them (`forge arch confirm --all`)
+   BEFORE items are created. Every item carries `--component` (a screen, a part, or
+   a plain tag such as Security). For items starting now:
    `--allowed` scope (from the planned file layout — `task start` refuses an
    unscoped item, and refine it before starting once real code exists) and
    **acceptance criteria taken from the spec**

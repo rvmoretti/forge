@@ -684,9 +684,11 @@ claude</span>
       <tr><td>A quick answer in chat</td><td><i>"where are we?"</i> or <code>/forge:status</code></td>
         <td>Phase, work counts, what's in progress or blocked, what needs you.</td></tr>
       <tr><td>The visual picture</td><td>open <code>forge/dashboard.html</code> in a browser</td>
-        <td>Progress bar, the work graph by milestone, decisions, discoveries — and the
-        <b>project map</b>: one box per component (a screen, an API, the database…) with its route,
-        progress, blockers, and its mock or latest screenshot. Plus <b>telemetry</b>: development
+        <td>One page per menu entry (v0.19): <b>Overview</b> (what needs you, now and next,
+        releases), <b>Plan</b> (the work by release and milestone, with outcomes and pace beside it),
+        <b>Architecture</b> (the runtime parts in lanes by where they run, arrows for who talks to
+        whom, each part linking to its work), <b>Screens &amp; mockups</b> (a gallery per app), then
+        Usage, Journal, Specs and System. Plus <b>telemetry</b>: development
         time per agent (live from state — median prep and execution per worker type; wall-clock,
         honestly labeled, session breaks trimmed) and token totals from the last
         <code>forge usage --write</code> snapshot, stamped with when it was taken. Regenerates on
@@ -701,10 +703,16 @@ claude</span>
     </tbody>
   </table></div>
 
-  <details><summary>How the project map gets its boxes</summary><div class="inner">
-    <p>Components live in a small registry Forge maintains (<code>forge component add/update/list</code>);
-    work items are tagged to components, and tagging an unknown component auto-registers it so the
-    map never lies by omission. Untagged items are counted visibly at the bottom. The dashboard
+  <details><summary>Where the architecture and screens come from</summary><div class="inner">
+    <p>A small registry Forge maintains holds the runtime <b>parts</b> (<code>forge arch …</code>),
+    the <b>links</b> between them, the <b>screens</b> with their mocks, each in its app
+    (<code>forge screen …</code>), and plain <b>tags</b>. On an existing codebase
+    <code>forge arch scan</code> drafts the parts from the repo at zero token cost; an agent pass
+    names and splits them; you confirm (<code>forge arch confirm --all</code>) — until then a
+    part is drawn as a draft. Work items are tagged to a screen, a part or a tag, and work on a
+    screen counts toward its app. Older projects get all this with <code>forge upgrade</code>:
+    automatic steps are applied with a backup, judgement steps arrive as a change script you
+    dry-run before it touches anything. The dashboard
     itself is a <b>generated projection</b> — a rendering of the state files, rebuilt on every
     change. Never edit it and never treat it as the source of truth: the files win.</p>
   </div></details>
@@ -967,7 +975,7 @@ claude</span>
       <tr><td><code>forge/config.json</code></td><td>Phase, verify commands, options. CLI-managed.</td></tr>
       <tr><td><code>forge/state/</code></td><td>work graph · preflight · baseline · session lock · component registry · trace log. CLI-managed, hook-protected.</td></tr>
       <tr><td><code>forge/decisions.md · discoveries.md</code></td><td>Append-only, titled logs — the project's institutional memory.</td></tr>
-      <tr><td><code>forge/dashboard.html</code></td><td>Generated projection incl. the project map. Never edit.</td></tr>
+      <tr><td><code>forge/dashboard.html</code></td><td>Generated projection — overview, plan, architecture, screens and more. Never edit.</td></tr>
       <tr><td><code>spec/</code> (or your <code>specDir</code>)</td><td>The layered spec + <code>mocks/</code> — the source of intent, kept in sync at every item close.</td></tr>
     </tbody>
   </table></div>

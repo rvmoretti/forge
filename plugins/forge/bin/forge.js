@@ -87,6 +87,8 @@ function traceEvent(fields) {
 }
 process.on('exit', (code) => traceEvent({ outcome: code === 0 ? 'ok' : 'exit', exit: code }));
 function out(msg) { process.stdout.write(msg + '\n'); }
+// v0.19: piping into head/less and quitting early is normal, not a crash
+process.stdout.on('error', e => { if (e && e.code === 'EPIPE') process.exit(0); });
 
 function loadConfig() { return readJson(CONFIG_FILE, null); }
 function loadWork() { if (MUTATING) acquireWorkLock(); return readJson(WORK_FILE, { schema: 1, items: {}, order: [] }); }
@@ -108,6 +110,9 @@ const MUTATING = (() => {
   if (c === 'dispatch') return true;
   if (c === 'release') return ['add', 'update', 'move', 'remove', 'freeze', 'tag'].includes(s);
   if (c === 'component') return ['add', 'update'].includes(s);
+  if (c === 'arch') return ['add', 'update', 'link', 'unlink', 'confirm', 'remove', 'lanes'].includes(s) || (s === 'scan' && process.argv.includes('--write'));
+  if (c === 'screen') return ['add', 'update', 'assign'].includes(s);
+  if (c === 'upgrade') return ['apply', 'accept'].includes(s);
   return false;
 })();
 function pidAlive(pid) { try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; } }
@@ -588,6 +593,491 @@ function usageAutoRefresh(cfg) {
   } catch (_) { /* telemetry must never block a state operation */ }
 }
 
+// ============================================================================
+// v0.19: architecture, screens and tags — components.json schema 2
+// ----------------------------------------------------------------------------
+// Until v0.18 one registry held everything an item could be tagged with: screens
+// (with mocks), runtime parts, and plain topic tags. Field state: 131 entries, 114
+// of them screens, none of them able to say what talks to what. Schema 2 splits it:
+//   components  — the runtime parts the system is made of (the architecture)
+//   edges       — who talks to whom, labelled, optionally planned
+//   screens     — UI screens and their mocks, each belonging to an app component
+//   tags        — everything else an item can be tagged with (Security, Harness…)
+// Items keep ONE tag field (item.component) that may point at any of the three;
+// work tagged to a screen rolls up to the screen's app in the architecture view.
+// ============================================================================
+const ARCH_KIND_RANK = { frontend: 0, hosting: 1, auth: 2, backend: 2, job: 3, queue: 3, db: 4, storage: 4, cache: 4, integration: 6 };
+const ARCH_KINDS = Object.keys(ARCH_KIND_RANK);
+const EXTERNAL_LANE = 'External services';
+function emptyComps() { return { schema: 2, components: {}, edges: [], screens: {}, tags: {}, lanes: null }; }
+// Pure: schema-1 registry → schema-2 split. Never loses an entry.
+function migrateComps(c1) {
+  const c = emptyComps();
+  const moved = { screens: [], components: [], tags: [] };
+  for (const [id, e0] of Object.entries((c1 && c1.components) || {})) {
+    const e = Object.assign({}, e0, { id });
+    const kind = String(e.kind || 'unspecified');
+    if (e.mock || e.route || kind === 'frontend' || kind === 'screen') {
+      c.screens[id] = { id, name: e.name || id, app: null, mock: e.mock || null, route: e.route || null, doc: e.doc || null,
+        created: e.created || ts(), updated: ts(), legacyKind: kind };
+      moved.screens.push(id);
+    } else if (ARCH_KINDS.includes(kind)) {
+      c.components[id] = { id, name: e.name || id, kind, runsOn: null, summary: null, evidence: [], confirmed: false,
+        source: 'legacy', doc: e.doc || null, created: e.created || ts(), updated: ts() };
+      moved.components.push(id);
+    } else {
+      c.tags[id] = { id, name: e.name || id, kind, doc: e.doc || null, created: e.created || ts() };
+      moved.tags.push(id);
+    }
+  }
+  return { comps: c, moved };
+}
+function normalizeComps(raw) {
+  let c = raw;
+  if (!c || (c.schema || 1) < 2) c = migrateComps(c || {}).comps;
+  for (const k of ['components', 'screens', 'tags']) if (!c[k] || typeof c[k] !== 'object') c[k] = {};
+  if (!Array.isArray(c.edges)) c.edges = [];
+  if (!Array.isArray(c.lanes)) c.lanes = null;
+  return c;
+}
+function loadComps() { return normalizeComps(readJson(COMPONENTS_FILE, null)); }
+function saveComps(c) { c.schema = 2; writeJson(COMPONENTS_FILE, c); }
+function compsFileSchema() { const r = readJson(COMPONENTS_FILE, null); return r ? (r.schema || 1) : 0; }
+// what an item tag points at
+function tagRef(c, id) {
+  if (!id) return null;
+  if (c.components[id]) return { type: 'component', rec: c.components[id] };
+  if (c.screens[id]) return { type: 'screen', rec: c.screens[id] };
+  if (c.tags[id]) return { type: 'tag', rec: c.tags[id] };
+  return null;
+}
+// the architecture component an item tag rolls up to (null for tags / unassigned screens)
+function archOfTag(c, id) {
+  const r = tagRef(c, id);
+  if (!r) return null;
+  if (r.type === 'component') return id;
+  if (r.type === 'screen') return r.rec.app && c.components[r.rec.app] ? r.rec.app : null;
+  return null;
+}
+function laneOrder(c) {
+  const lanes = [...new Set(Object.values(c.components).map(x => x.runsOn || 'Unplaced'))];
+  if (c.lanes && c.lanes.length) {
+    const pinned = c.lanes.filter(l => lanes.includes(l));
+    return [...pinned, ...lanes.filter(l => !pinned.includes(l))];
+  }
+  const rank = l => {
+    if (l === 'Browser') return -1;
+    if (l === EXTERNAL_LANE) return 99;
+    if (l === 'Unplaced') return 100;
+    const ks = Object.values(c.components).filter(x => (x.runsOn || 'Unplaced') === l).map(x => ARCH_KIND_RANK[x.kind] == null ? 5 : ARCH_KIND_RANK[x.kind]);
+    return Math.min(...ks);
+  };
+  return lanes.map((l, i) => ({ l, r: rank(l), i })).sort((a, b) => a.r - b.r || a.i - b.i).map(x => x.l);
+}
+function slugId(s) { return String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'x'; }
+function titleCase(s) { return String(s).toLowerCase().replace(/(^|[\s_-])([a-z])/g, (m, a, b) => (a === '_' || a === '-' ? ' ' : a) + b.toUpperCase()); }
+
+// ----------------------------------------------------------------------------
+// forge arch scan — deterministic architecture evidence from the repo. Zero
+// tokens: reads manifests, platform config, function folders, env var NAMES
+// (never values) and known SDK imports. It proposes; it never confirms. Naming
+// and splitting (e.g. three apps in one src/) is the agent's job, confirmation
+// is the human's.
+// ----------------------------------------------------------------------------
+const SCAN_SKIP = new Set(['node_modules', '.git', 'dist', 'build', 'out', '.next', '.nuxt', '.svelte-kit', 'coverage', 'forge',
+  'vendor', '.venv', 'venv', '__pycache__', 'test-results', 'playwright-report', '.turbo', '.cache', 'graphify-out', 'target', '.vercel', '.wrangler', 'tmp']);
+// [match against a dependency / import specifier, id, display name, kind]
+const SDK_TABLE = [
+  [/^(stripe|@stripe\/)/, 'stripe', 'Stripe', 'integration'],
+  [/^(@sendgrid\/)/, 'sendgrid', 'SendGrid', 'integration'],
+  [/^resend$/, 'resend', 'Resend', 'integration'],
+  [/^(postmark)$/, 'postmark', 'Postmark', 'integration'],
+  [/^(mailgun(\.js)?|mailgun-js)$/, 'mailgun', 'Mailgun', 'integration'],
+  [/^nodemailer$/, 'smtp', 'SMTP email', 'integration'],
+  [/^twilio$/, 'twilio', 'Twilio', 'integration'],
+  [/^(openai)$/, 'openai', 'OpenAI', 'integration'],
+  [/^(@anthropic-ai\/sdk|anthropic)$/, 'anthropic', 'Anthropic', 'integration'],
+  [/^(@sentry\/)/, 'sentry', 'Sentry', 'integration'],
+  [/^(posthog-js|posthog-node|posthog)$/, 'posthog', 'PostHog', 'integration'],
+  [/^(mixpanel|mixpanel-browser)$/, 'mixpanel', 'Mixpanel', 'integration'],
+  [/^(algoliasearch)$/, 'algolia', 'Algolia', 'integration'],
+  [/^(mapbox-gl|@mapbox\/)/, 'mapbox', 'Mapbox', 'integration'],
+  [/^(@googlemaps\/|@react-google-maps\/)/, 'google-maps', 'Google Maps', 'integration'],
+  [/^(googleapis|google-spreadsheet)$/, 'google-apis', 'Google APIs', 'integration'],
+  [/^(@aws-sdk\/client-s3|aws-sdk|boto3)$/, 'aws', 'AWS', 'integration'],
+  [/^(cloudinary)$/, 'cloudinary', 'Cloudinary', 'integration'],
+  [/^(pusher|pusher-js|ably)$/, 'realtime', 'Realtime service', 'integration'],
+  [/^(@clerk\/)/, 'clerk', 'Clerk', 'auth'],
+  [/^(auth0|@auth0\/)/, 'auth0', 'Auth0', 'auth'],
+  [/^(firebase|firebase-admin)$/, 'firebase', 'Firebase', 'integration'],
+  [/^(paypal-rest-sdk|@paypal\/)/, 'paypal', 'PayPal', 'integration'],
+  [/^(mollie|@mollie\/)/, 'mollie', 'Mollie', 'integration'],
+  [/^(@upstash\/)/, 'upstash', 'Upstash', 'cache'],
+];
+const FRONTEND_DEPS = /^(react|react-dom|vue|svelte|@sveltejs\/kit|next|nuxt|@angular\/core|solid-js|astro|preact|@remix-run\/react)$/;
+const SERVER_DEPS = /^(express|fastify|koa|@nestjs\/core|hono|@hapi\/hapi|restify)$/;
+const PY_SERVER = /^(fastapi|django|flask|starlette|sanic|aiohttp)$/i;
+const GENERIC_ENV_PREFIX = new Set(['SUPABASE', 'VITE', 'NEXT', 'PUBLIC', 'DATABASE', 'DB', 'APP', 'NODE', 'PORT', 'JWT', 'SITE', 'BASE', 'API', 'SERVICE',
+  'SECRET', 'PG', 'POSTGRES', 'REDIS', 'HOST', 'URL', 'LOG', 'DEBUG', 'ENV', 'CI', 'GITHUB', 'TEST', 'E2E', 'PLAYWRIGHT', 'VERCEL', 'NETLIFY', 'CF', 'CLOUDFLARE',
+  'DENO', 'EXPO', 'REACT', 'SENTRY', 'AUTH', 'SESSION', 'COOKIE', 'CORS', 'ALLOWED', 'DEFAULT', 'MAX', 'MIN', 'ENABLE', 'DISABLE', 'FEATURE', 'ADMIN', 'FRONTEND', 'BACKEND', 'WEB']);
+
+// example env files: .env.example, .env.provider.example, .env.sample, .dev.vars.example, env.example …
+const ENV_EXAMPLE_RE = /^\.?(env|dev\.vars)(\.[\w-]+)*\.(example|sample|template)$|^\.env\.example\.[\w-]+$/;
+function scanWalk(root, maxFiles = 6000) {
+  const files = [];
+  const walk = (dir, depth) => {
+    if (depth > 7 || files.length >= maxFiles) return;
+    let ents; try { ents = fs.readdirSync(dir, { withFileTypes: true }); } catch (_) { return; }
+    for (const e of ents) {
+      if (files.length >= maxFiles) return;
+      if (e.name.startsWith('.') && e.name !== '.github' && !ENV_EXAMPLE_RE.test(e.name)) continue;
+      const abs = path.join(dir, e.name);
+      if (e.isDirectory()) { if (!SCAN_SKIP.has(e.name)) walk(abs, depth + 1); }
+      else if (e.isFile()) files.push(path.relative(root, abs).split(path.sep).join('/'));
+    }
+  };
+  walk(root, 0);
+  return files;
+}
+function readSmall(root, rel, max = 256 * 1024) {
+  try { const abs = path.join(root, rel); if (fs.statSync(abs).size > max) return ''; return fs.readFileSync(abs, 'utf8'); } catch (_) { return ''; }
+}
+function archScan(root) {
+  const files = scanWalk(root);
+  const fileSet = new Set(files);
+  const comps = {};   // id → {id,name,kind,runsOn,evidence:[{path,why}],confidence}
+  const edges = [];   // {from,to,label,confidence}
+  const notes = [];
+  const envNames = new Set(); // 'NAME\u0000where' — names only, never values
+  const add = (id, name, kind, runsOn, ev, confidence = 'high') => {
+    const c = comps[id] = comps[id] || { id, name, kind, runsOn, evidence: [], confidence };
+    if (ev && !c.evidence.some(x => x.path === ev.path && x.why === ev.why)) c.evidence.push(ev);
+    if (confidence === 'high') c.confidence = 'high';
+    return c;
+  };
+  const edge = (from, to, label, confidence = 'high') => {
+    if (!from || !to || from === to) return;
+    if (!edges.some(e => e.from === from && e.to === to)) edges.push({ from, to, label, confidence });
+  };
+  const usedBy = {}; // provider id → Set(component ids using it)
+  const use = (prov, by) => { (usedBy[prov] = usedBy[prov] || new Set()).add(by); };
+
+  // -- hosting / platform config ---------------------------------------------
+  let host = null; // {lane, id}
+  const wr = files.find(f => /(^|\/)wrangler\.(toml|json|jsonc)$/.test(f));
+  if (wr) {
+    const t = readSmall(root, wr);
+    if (/pages_build_output_dir/.test(t) || !/^\s*main\s*=|"main"\s*:/m.test(t)) {
+      add('frontend-hosting', 'Frontend hosting', 'hosting', 'Cloudflare', { path: wr, why: 'Cloudflare Pages config' });
+      host = { lane: 'Cloudflare', id: 'frontend-hosting' };
+    } else {
+      add('worker', 'Worker', 'backend', 'Cloudflare', { path: wr, why: 'Cloudflare Worker (main entry)' });
+    }
+  }
+  for (const [file, lane, why] of [['vercel.json', 'Vercel', 'Vercel project config'], ['netlify.toml', 'Netlify', 'Netlify config'],
+    ['firebase.json', 'Firebase', 'Firebase hosting config'], ['amplify.yml', 'AWS Amplify', 'Amplify build config'], ['render.yaml', 'Render', 'Render blueprint']]) {
+    if (fileSet.has(file) && !host) { add('frontend-hosting', 'Frontend hosting', 'hosting', lane, { path: file, why }); host = { lane, id: 'frontend-hosting' }; }
+  }
+  const redirects = ['_redirects', 'public/_redirects', 'static/_redirects'].find(f => fileSet.has(f));
+  if (redirects && host) comps[host.id].evidence.push({ path: redirects, why: 'static-host redirects file' });
+  else if (redirects && !host) {
+    // a _redirects file is the Cloudflare Pages / Netlify convention; docs usually name which one
+    const txt = files.filter(f => ENV_EXAMPLE_RE.test(path.posix.basename(f)) || /^(README|CLAUDE|CONTRIBUTING)\.md$/i.test(f)).map(f => readSmall(root, f)).join('\n');
+    const cnt = { Cloudflare: (txt.match(/cloudflare pages|\bpages (preview|production)|wrangler/gi) || []).length, Netlify: (txt.match(/netlify/gi) || []).length };
+    const lane = cnt.Cloudflare > cnt.Netlify ? 'Cloudflare' : cnt.Netlify ? 'Netlify' : 'Static hosting';
+    add('frontend-hosting', 'Frontend hosting', 'hosting', lane, { path: redirects, why: `static-host redirects file${lane !== 'Static hosting' ? ` · docs mention ${lane} ${cnt[lane]}×` : ''}` }, lane === 'Static hosting' ? 'low' : 'medium');
+    host = { lane, id: 'frontend-hosting' };
+  }
+  // deploy steps in CI name the target even when the config file is elsewhere
+  for (const f of files.filter(x => /^\.github\/workflows\/.+\.ya?ml$/.test(x))) {
+    const t = readSmall(root, f);
+    const hit = [[/wrangler(-action)?[\s\S]{0,80}pages|pages deploy/i, 'Cloudflare'], [/vercel (deploy|--prod)|amondnet\/vercel-action/i, 'Vercel'],
+      [/netlify deploy/i, 'Netlify'], [/flyctl deploy|fly deploy/i, 'Fly.io'], [/az webapp|azure\/webapps-deploy/i, 'Azure'], [/gcloud (run|app) deploy/i, 'Google Cloud']]
+      .find(([re]) => re.test(t));
+    if (hit) {
+      if (!host) { add('frontend-hosting', 'Frontend hosting', 'hosting', hit[1], { path: f, why: 'deploy step in CI' }, 'medium'); host = { lane: hit[1], id: 'frontend-hosting' }; }
+      else if (host.lane === hit[1]) comps[host.id].evidence.push({ path: f, why: 'deploy step in CI' });
+    }
+    if (/supabase functions deploy/i.test(t)) notes.push(`${f}: deploys Supabase edge functions`);
+  }
+  if (fileSet.has('fly.toml')) add('app-server', 'App server', 'backend', 'Fly.io', { path: 'fly.toml', why: 'Fly app config' });
+
+  // -- docker compose: every service is a part --------------------------------
+  const compose = files.find(f => /^(docker-)?compose(\.[\w-]+)?\.ya?ml$/.test(f));
+  if (compose) {
+    const t = readSmall(root, compose);
+    const svc = t.split('\n');
+    let inServices = false, cur = null;
+    for (const line of svc) {
+      if (/^services:\s*$/.test(line)) { inServices = true; continue; }
+      if (inServices && /^\S/.test(line)) inServices = false;
+      if (!inServices) continue;
+      const m = line.match(/^ {2}([A-Za-z0-9_.-]+):\s*$/);
+      if (m) { cur = m[1]; add(slugId(cur), cur, 'backend', 'Docker Compose', { path: compose, why: `compose service '${cur}'` }); continue; }
+      const im = cur && line.match(/^\s+image:\s*["']?([^\s"':]+)/);
+      if (im) {
+        const img = im[1].split('/').pop();
+        const k = /postgres|mysql|mariadb|mongo/.test(img) ? 'db' : /redis|memcached|valkey/.test(img) ? 'cache' : /nginx|caddy|traefik/.test(img) ? 'hosting' : /rabbitmq|kafka|nats/.test(img) ? 'queue' : null;
+        if (k) comps[slugId(cur)].kind = k;
+      }
+    }
+  }
+
+  // -- Supabase ----------------------------------------------------------------
+  const sbCfg = fileSet.has('supabase/config.toml');
+  const sbFns = [...new Set(files.filter(f => /^supabase\/functions\/[^/_][^/]*\/index\.(ts|js|tsx)$/.test(f)).map(f => f.split('/')[2]))];
+  const sbMig = files.filter(f => /^supabase\/migrations\/.+\.sql$/.test(f)).length;
+  const srcText = (() => { // bounded sample of app source for SDK usage
+    let t = ''; let n = 0;
+    for (const f of files) {
+      if (!/^(src|app|apps|packages|lib|pages|components)\//.test(f) || !/\.(ts|tsx|js|jsx|vue|svelte|mjs)$/.test(f)) continue;
+      if (/\.(test|spec)\./.test(f)) continue;
+      t += readSmall(root, f, 64 * 1024) + '\n'; if (++n >= 400 || t.length > 4e6) break;
+    }
+    return t;
+  })();
+  if (sbCfg || sbMig || sbFns.length) {
+    const cfgT = sbCfg ? readSmall(root, 'supabase/config.toml') : '';
+    add('postgres', 'Postgres', 'db', 'Supabase', sbMig ? { path: 'supabase/migrations/', why: `${sbMig} migration(s)` } : { path: 'supabase/config.toml', why: 'Supabase project' });
+    if (/supabase\.auth\.|\.auth\.(signIn|signUp|getUser|getSession|onAuthStateChange)/.test(srcText) || /^\[auth\]/m.test(cfgT))
+      add('auth', 'Auth', 'auth', 'Supabase', { path: sbCfg ? 'supabase/config.toml' : 'src/', why: 'Supabase Auth in use' });
+    if (/\.storage\s*\.from\(/.test(srcText)) add('storage', 'Storage', 'storage', 'Supabase', { path: 'src/', why: 'supabase.storage.from(...) in app code' });
+    if (sbFns.length) add('edge-functions', 'Edge functions', 'backend', 'Supabase', { path: 'supabase/functions/', why: `${sbFns.length} function(s): ${sbFns.slice(0, 6).join(', ')}${sbFns.length > 6 ? '…' : ''}` });
+    if (sbFns.length && comps.postgres) edge('edge-functions', 'postgres', 'service role');
+    // deno imports inside functions name the providers they talk to
+    for (const fn of sbFns) {
+      const dirFiles = files.filter(f => f.startsWith(`supabase/functions/${fn}/`) && /\.(ts|js|tsx)$/.test(f));
+      const txt = dirFiles.map(f => readSmall(root, f)).join('\n');
+      for (const m of txt.matchAll(/from\s+["'](?:npm:|https:\/\/esm\.sh\/|jsr:)?(@?[\w.-]+(?:\/[\w.-]+)?)/g)) {
+        const spec = m[1].replace(/@[\d^~.x-]+$/, '');
+        for (const [re, id, name, kind] of SDK_TABLE) if (re.test(spec)) { add(id, name, kind, EXTERNAL_LANE, { path: `supabase/functions/${fn}/`, why: `imports ${spec}` }); use(id, 'edge-functions'); }
+      }
+      for (const m of txt.matchAll(/Deno\.env\.get\(\s*["']([A-Z0-9_]+)["']/g)) envNames.add(m[1] + '\u0000' + `supabase/functions/${fn}/`);
+    }
+    // webhook functions: the provider calls in
+    for (const fn of sbFns.filter(f => /webhook|callback|hook$/i.test(f))) notes.push(`webhook function: supabase/functions/${fn}`);
+  }
+
+  // -- manifests: apps, servers, SDKs --------------------------------------------
+  const pkgs = files.filter(f => /(^|\/)package\.json$/.test(f));
+  for (const p of pkgs) {
+    let j; try { j = JSON.parse(readSmall(root, p)); } catch (_) { continue; }
+    const deps = Object.assign({}, j.dependencies || {}, j.devDependencies || {});
+    const names = Object.keys(deps);
+    const dir = path.posix.dirname(p);
+    const isRoot = dir === '.';
+    const fe = names.filter(n => FRONTEND_DEPS.test(n));
+    const sv = names.filter(n => SERVER_DEPS.test(n));
+    let appId = null;
+    if (fe.length && (names.includes('react-dom') || !names.includes('react') || names.some(n => /^(vite|next|nuxt|@sveltejs\/kit|astro)$/.test(n)))) {
+      appId = isRoot ? 'web-app' : slugId(path.posix.basename(dir)) + '-app';
+      add(appId, isRoot ? 'Web app' : titleCase(path.posix.basename(dir)) + ' app', 'frontend', 'Browser', { path: p, why: `depends on ${fe.slice(0, 3).join(', ')}` });
+      if (names.includes('next') || names.includes('nuxt') || names.includes('@sveltejs/kit') || names.includes('@remix-run/react'))
+        notes.push(`${p}: a full-stack framework (${fe.join(', ')}) — part of this app also runs on the server`);
+      if (host) edge(host.id, appId, 'serves the app');
+    }
+    if (sv.length) {
+      const sid = isRoot ? 'api-server' : slugId(path.posix.basename(dir)) + '-server';
+      add(sid, isRoot ? 'API server' : titleCase(path.posix.basename(dir)) + ' server', 'backend', host && host.lane === 'Fly.io' ? 'Fly.io' : 'Server', { path: p, why: `depends on ${sv.join(', ')}` });
+      if (appId) edge(appId, sid, 'HTTP', 'medium');
+      appId = appId || sid;
+    }
+    if (names.includes('@supabase/supabase-js') && appId && comps.postgres) {
+      edge(appId, 'postgres', 'supabase-js');
+      if (comps.auth) edge(appId, 'auth', 'sign-in');
+      if (comps.storage) edge(appId, 'storage', 'files');
+      if (comps['edge-functions']) edge(appId, 'edge-functions', 'invoke', 'medium');
+    }
+    if (names.some(n => /^(@prisma\/client|prisma|pg|postgres|mysql2|mongodb|mongoose|drizzle-orm|knex|typeorm|sequelize)$/.test(n)) && !comps.postgres) {
+      const dbn = names.find(n => /^(mysql2)$/.test(n)) ? 'MySQL' : names.find(n => /^(mongodb|mongoose)$/.test(n)) ? 'MongoDB' : 'Database';
+      add('database', dbn, 'db', 'Server', { path: p, why: `depends on ${names.filter(n => /prisma|pg|postgres|mysql|mongo|drizzle|knex|typeorm|sequelize/.test(n)).join(', ')}` }, 'medium');
+      if (appId) edge(appId, 'database', 'queries');
+    }
+    if (names.some(n => /^(bullmq|bull|bee-queue|agenda|node-cron)$/.test(n))) add('jobs', 'Background jobs', 'job', 'Server', { path: p, why: 'queue / scheduler dependency' }, 'medium');
+    for (const n of names) for (const [re, id, name, kind] of SDK_TABLE) if (re.test(n)) {
+      add(id, name, kind, EXTERNAL_LANE, { path: p, why: `depends on ${n}` });
+      if (appId) use(id, appId);
+    }
+  }
+  // Python services
+  for (const f of files.filter(x => /(^|\/)(requirements[\w-]*\.txt|pyproject\.toml)$/.test(x))) {
+    const t = readSmall(root, f);
+    const deps = [...t.matchAll(/^\s*["']?([A-Za-z0-9_.-]+)/gm)].map(m => m[1].toLowerCase());
+    const dir = path.posix.dirname(f);
+    const sid = dir === '.' ? 'api-server' : slugId(path.posix.basename(dir)) + '-server';
+    const srv = deps.find(d => PY_SERVER.test(d));
+    if (srv) add(sid, dir === '.' ? 'API server' : titleCase(path.posix.basename(dir)) + ' server', 'backend', 'Server', { path: f, why: `depends on ${srv}` });
+    if (deps.includes('celery') || deps.includes('rq')) add('jobs', 'Background jobs', 'job', 'Server', { path: f, why: 'celery / rq' });
+    if (deps.some(d => /^(psycopg2?|psycopg2-binary|asyncpg|sqlalchemy)$/.test(d)) && !comps.postgres && !comps.database) {
+      add('database', 'Postgres', 'db', 'Server', { path: f, why: 'Postgres driver / SQLAlchemy' }, 'medium');
+      if (srv) edge(sid, 'database', 'queries');
+    }
+    for (const d of deps) for (const [re, id, name, kind] of SDK_TABLE) if (re.test(d)) { add(id, name, kind, EXTERNAL_LANE, { path: f, why: `depends on ${d}` }); if (srv) use(id, sid); }
+  }
+  // -- env var NAMES: known providers, and unknown ones as low-confidence hints -
+  for (const f of files.filter(x => ENV_EXAMPLE_RE.test(path.posix.basename(x)))) {
+    for (const m of readSmall(root, f).matchAll(/^\s*(?:export\s+)?([A-Z][A-Z0-9_]+)\s*=/gm)) envNames.add(m[1] + '\u0000' + f);
+  }
+  for (const m of srcText.matchAll(/(?:import\.meta\.env|process\.env)\.([A-Z][A-Z0-9_]+)/g)) envNames.add(m[1] + '\u0000src/');
+  const envByPrefix = {};
+  for (const e of envNames) {
+    const [name, where] = e.split('\u0000');
+    const bare = name.replace(/^(VITE_|NEXT_PUBLIC_|PUBLIC_|REACT_APP_|EXPO_PUBLIC_|NUXT_PUBLIC_)/, '');
+    const prefix = bare.split('_')[0];
+    if (!prefix || prefix.length < 3) continue;
+    (envByPrefix[prefix] = envByPrefix[prefix] || { names: new Set(), where: new Set() }).names.add(name);
+    envByPrefix[prefix].where.add(where);
+  }
+  for (const [prefix, v] of Object.entries(envByPrefix)) {
+    const known = SDK_TABLE.find(([re, id]) => id.toUpperCase().replace(/-/g, '_') === prefix || id.toUpperCase() === prefix);
+    const names = [...v.names];
+    if (known) { const c = comps[known[1]]; if (c) c.evidence.push({ path: [...v.where][0], why: `env ${names.slice(0, 3).join(', ')}` }); else add(known[1], known[2], known[3], EXTERNAL_LANE, { path: [...v.where][0], why: `env ${names.slice(0, 3).join(', ')}` }, 'medium'); continue; }
+    if (GENERIC_ENV_PREFIX.has(prefix)) continue;
+    if (!names.some(n => /(KEY|SECRET|TOKEN|API|WEBHOOK|CLIENT_ID|MERCHANT)/.test(n))) continue;
+    const id = slugId(prefix);
+    if (comps[id]) { comps[id].evidence.push({ path: [...v.where][0], why: `env ${names.slice(0, 3).join(', ')}` }); continue; }
+    add(id, titleCase(prefix), 'integration', EXTERNAL_LANE, { path: [...v.where][0], why: `credentials in env: ${names.slice(0, 3).join(', ')}` }, 'low');
+    for (const w2 of v.where) if (String(w2).startsWith('supabase/functions/')) use(id, 'edge-functions');
+  }
+  // webhooks: provider → the function that receives it
+  for (const fn of sbFns.filter(f => /webhook|callback/i.test(f))) {
+    const prov = Object.keys(comps).find(id => comps[id].runsOn === EXTERNAL_LANE && fn.toLowerCase().includes(id.replace(/-/g, '')));
+    if (prov) edge(prov, 'edge-functions', 'webhook');
+  }
+  // provider usage edges (caller → provider), unless the provider only calls in
+  for (const [prov, by] of Object.entries(usedBy)) for (const b of by) if (comps[b] && comps[prov] && !edges.some(e => e.from === prov && e.to === b)) edge(b, prov, 'API', 'medium');
+  return { components: Object.values(comps), edges, notes, scanned: files.length };
+}
+
+// ============================================================================
+// v0.19: forge upgrade — bring an existing plan to the installed Forge's standards
+// ----------------------------------------------------------------------------
+// Two kinds of step. AUTOMATIC steps are mechanical and deterministic (a data
+// shape a newer Forge expects); 'upgrade apply' runs them with a backup first.
+// JUDGEMENT steps (milestones named after features, releases, the architecture)
+// cannot be scripted generically: an agent writes a reviewable change script in
+// forge/changes/, 'upgrade dry-run' runs it on a throwaway copy and shows the
+// before/after, and 'upgrade run' applies it with a backup ('upgrade revert'
+// restores). Every change goes through the normal CLI, so the plan's own rules —
+// dependencies, frozen labels, started work — hold during an upgrade too.
+// Steps are DETECTED from state, never trusted from a stored level.
+// ============================================================================
+const UPGRADE_FILE = path.join(STATE, 'upgrade.json');     // dry-run records (generated)
+const BACKUP_DIR = path.join(STATE, 'backups');
+const VERSION_PREFIX_RE = /^V\d+(\.\d+)*\s*[·:\-–—|]\s*/;
+function sha(s) { return crypto.createHash('sha256').update(s).digest('hex').slice(0, 16); }
+function fileSha(f) { try { return sha(fs.readFileSync(f)); } catch (_) { return 'absent'; } }
+// the plan's content hash — the upgrade bookkeeping itself is excluded, so recording an upgrade does not change it
+function stateSha() { const w = readJson(WORK_FILE, null); if (w) delete w.upgrade; return sha(JSON.stringify(w) + '|' + fileSha(COMPONENTS_FILE)); }
+function normalizeWorkForShape(w) { ensureMilestones(w); return w; }
+const UPGRADE_STEPS = [
+  { id: 'milestone-records', since: '0.16.2', kind: 'auto', title: 'Milestones have their own records (name, demo) and an explicit order',
+    check(ctx) { const w = ctx.raw; return { done: !!w.milestones && Array.isArray(w.milestoneOrder) && (w.order || []).every(id => !w.items[id].milestone || w.milestones[w.items[id].milestone]), findings: [] }; },
+    apply(ctx) { ensureMilestones(ctx.w); } },
+  { id: 'plan-order', since: '0.18.0', kind: 'auto', title: 'Releases above milestones and an explicit task order inside each milestone',
+    check(ctx) { const w = ctx.raw; const ms = Object.values(w.milestones || {}); return { done: !!w.releases && Array.isArray(w.releaseOrder) && ms.every(m => Array.isArray(m.taskOrder)), findings: [] }; },
+    apply(ctx) { ensureMilestones(ctx.w); } },
+  { id: 'components-split', since: '0.19.0', kind: 'auto', title: 'The component registry is split into architecture parts, screens and tags',
+    check() {
+      const s = compsFileSchema();
+      if (s !== 1) return { done: true, findings: [] };
+      const m = migrateComps(readJson(COMPONENTS_FILE, {})).moved;
+      return { done: false, findings: [`${m.screens.length} screen(s), ${m.components.length} architecture part(s), ${m.tags.length} tag(s) — item tags are unchanged`] };
+    },
+    apply() { if (compsFileSchema() === 1) saveComps(migrateComps(readJson(COMPONENTS_FILE, {})).comps); } },
+  { id: 'feature-milestones', since: '0.18.0', kind: 'review', title: 'Milestones are named after the feature they enable and grouped into releases',
+    how: 'forge-roadmap-review skill, upgrade mode: re-name/re-cut unstarted milestones, create releases and assign every milestone',
+    check(ctx) {
+      const w = ctx.raw, f = [];
+      const seq = w.milestoneOrder || Object.keys(w.milestones || {});
+      const open = m => (w.order || []).some(id => w.items[id].milestone === m && !['DONE', 'CANCELLED'].includes(w.items[id].status));
+      for (const m of seq) {
+        const r = (w.milestones || {})[m] || {};
+        if (!r.name && open(m)) f.push(`${m}: unnamed — name it after the feature it enables`);
+        else if (r.name && LAYER_NAME_RE.test(String(r.name).trim()) && open(m)) f.push(`${m}: "${r.name}" names a layer, not a feature`);
+        if (r.name && VERSION_PREFIX_RE.test(r.name)) f.push(`${m}: "${r.name}" carries a version prefix — the release carries that now`);
+      }
+      const rels = w.releaseOrder || [];
+      if (!rels.length && seq.length > 1) f.push(`no releases — group the ${seq.length} milestones into releases (MVP, V1, …)`);
+      else { const loose = seq.filter(m => !((w.milestones || {})[m] || {}).release); if (rels.length && loose.length) f.push(`${loose.length} milestone(s) in no release: ${loose.slice(0, 6).join(', ')}${loose.length > 6 ? '…' : ''}`); }
+      return { done: !f.length, findings: f };
+    } },
+  { id: 'architecture', since: '0.19.0', kind: 'review', title: 'The architecture is drafted from the repo, screens belong to their app, and you confirmed it',
+    how: 'forge-brownfield skill, "Architecture draft": forge arch scan --write, a forge-explorer pass to name/split/link parts and assign screens, then your confirmation',
+    check() {
+      const c = loadComps(), f = [];
+      const parts = Object.values(c.components);
+      if (!parts.length) f.push('no architecture recorded — forge arch scan');
+      const draft = parts.filter(x => !x.confirmed).length + c.edges.filter(e => !e.confirmed).length;
+      if (draft) f.push(`${draft} draft part(s)/link(s) not confirmed yet`);
+      const unplaced = parts.filter(x => !x.runsOn).length;
+      if (unplaced) f.push(`${unplaced} part(s) with no 'runs on'`);
+      const loose = Object.values(c.screens).filter(s => !s.app && !s.standalone).length;
+      if (parts.length && loose) f.push(`${loose} screen(s) not assigned to an app (forge screen assign <app> …, or 'none' for standalone pages)`);
+      return { done: !f.length, findings: f };
+    } },
+];
+function upgradeStatus() {
+  const raw = readJson(WORK_FILE, { items: {}, order: [] });
+  const accepted = (raw.upgrade || {}).accepted || {};
+  return UPGRADE_STEPS.map(s => {
+    const r = s.check({ raw });
+    const acc = accepted[s.id];
+    return { id: s.id, since: s.since, kind: s.kind, title: s.title, how: s.how || null,
+      done: r.done || !!acc, accepted: acc || null, findings: r.done ? [] : r.findings };
+  });
+}
+function backupState(label) {
+  const d = path.join(BACKUP_DIR, `${ts().replace(/[:.]/g, '-')}-${slugId(label)}`);
+  fs.mkdirSync(d, { recursive: true });
+  for (const f of [WORK_FILE, COMPONENTS_FILE, CONFIG_FILE]) if (fs.existsSync(f)) fs.copyFileSync(f, path.join(d, path.basename(f)));
+  return path.relative(PROJECT, d).split(path.sep).join('/');
+}
+// the plan as a comparable shape: labels, names, releases, statuses
+function planShape(w, c) {
+  const L = computeLabels(w);
+  const ms = {}; for (const m of (w.milestoneOrder || [])) ms[m] = { label: L.milestone[m] || null, name: ((w.milestones || {})[m] || {}).name || null, release: ((w.milestones || {})[m] || {}).release || null };
+  const it = {}; for (const id of w.order) { const t = w.items[id]; it[id] = { label: L.item[id] || null, status: t.status, milestone: t.milestone || null, attempts: (t.attempts || []).length, title: t.title }; }
+  const rel = {}; for (const r of (w.releaseOrder || [])) rel[r] = { label: L.releaseLabel[r], name: (w.releases[r] || {}).name };
+  return { ms, it, rel, arch: c ? Object.keys(c.components).length : 0, edges: c ? c.edges.length : 0, screensAssigned: c ? Object.values(c.screens).filter(s => s.app).length : 0 };
+}
+function diffShape(a, b) {
+  const lines = [], danger = [];
+  for (const r of Object.keys(b.rel)) if (!a.rel[r]) lines.push(`+ release ${b.rel[r].label} ${r} "${b.rel[r].name}"`);
+  for (const r of Object.keys(a.rel)) if (!b.rel[r]) lines.push(`- release ${r}`);
+  for (const m of new Set([...Object.keys(a.ms), ...Object.keys(b.ms)])) {
+    const x = a.ms[m], y = b.ms[m];
+    if (!x) { lines.push(`+ milestone ${y.label || ''} ${m} "${y.name || ''}"`); continue; }
+    if (!y) { lines.push(`- milestone ${m}`); continue; }
+    const ch = [];
+    if (x.label !== y.label) ch.push(`${x.label || '—'} → ${y.label || '—'}`);
+    if (x.name !== y.name) ch.push(`"${x.name || ''}" → "${y.name || ''}"`);
+    if (x.release !== y.release) ch.push(`release ${x.release || 'none'} → ${y.release || 'none'}`);
+    if (ch.length) lines.push(`~ ${m}: ${ch.join(' · ')}`);
+  }
+  let relabel = 0; const moved = [];
+  for (const id of Object.keys(a.it)) {
+    const x = a.it[id], y = b.it[id];
+    if (!y) { danger.push(`${id} disappeared`); continue; }
+    if (x.status !== y.status && !(x.status === 'TODO' && y.status === 'CANCELLED')) danger.push(`${id} status ${x.status} → ${y.status}`);
+    if (x.attempts !== y.attempts) danger.push(`${id} attempt history changed`);
+    if (x.label !== y.label) relabel++;
+    if (x.milestone !== y.milestone) moved.push(`${id} ${x.milestone || '—'} → ${y.milestone || '—'}`);
+  }
+  const added = Object.keys(b.it).filter(id => !a.it[id]);
+  if (added.length) lines.push(`+ ${added.length} task(s): ${added.slice(0, 8).join(', ')}${added.length > 8 ? '…' : ''}`);
+  if (moved.length) lines.push(`~ ${moved.length} task(s) re-homed: ${moved.slice(0, 6).join(' · ')}${moved.length > 6 ? '…' : ''}`);
+  if (relabel) lines.push(`~ ${relabel} task label(s) change`);
+  if (a.arch !== b.arch || a.edges !== b.edges) lines.push(`~ architecture: ${a.arch} → ${b.arch} part(s), ${a.edges} → ${b.edges} link(s)`);
+  if (a.screensAssigned !== b.screensAssigned) lines.push(`~ screens assigned to an app: ${a.screensAssigned} → ${b.screensAssigned}`);
+  return { lines, danger };
+}
+function runChangeScript(script, cwd) {
+  const r = spawnSync('bash', [script], { cwd, encoding: 'utf8', timeout: 10 * 60 * 1000,
+    env: Object.assign({}, process.env, { FORGE_JS: __filename, CLAUDE_PROJECT_DIR: cwd, FORGE_UPGRADE: '1', FORGE_SCAN_ROOT: PROJECT }) });
+  return { code: r.status, out: ((r.stdout || '') + (r.stderr || '')).trim() };
+}
+
 function regenDashboard() {
   try { usageAutoRefresh(readJson(CONFIG_FILE, null)); } catch (_) { /* never block state ops */ }
   try { generateDashboard(); } catch (_) { /* dashboard is best-effort; never block state ops */ }
@@ -620,11 +1110,16 @@ function generateDashboard() {
   const chip = (label, color) =>
     `<span class="pill" style="border:1px solid ${color}33;color:${color};background:${color}12">${esc(label)}</span>`;
   // v0.13.1: components loaded early — milestone sections show which components they touch
-  const comps = readJson(COMPONENTS_FILE, { schema: 1, components: {} }).components;
-  const kindColor = { frontend: '#3b3f8f', backend: '#0f766e', db: '#b45309', job: '#57606f', integration: '#7c3aed' };
+  // v0.19: the registry is split — architecture parts, screens (belonging to an app), plain tags
+  const C = loadComps();
+  const kindColor = { frontend: '#3b3f8f', backend: '#0f766e', db: '#b45309', job: '#0f766e', integration: '#7c3aed',
+    auth: '#0f766e', hosting: '#3b3f8f', storage: '#b45309', cache: '#b45309', queue: '#0f766e' };
+  const tagKind = id => { const r = tagRef(C, id); return !r ? null : r.type === 'component' ? r.rec.kind : r.type === 'screen' ? 'frontend' : null; };
+  const comps = { length: Object.keys(C.components).length }; // retained name for the rail's kind dots below
+  for (const [id] of [...Object.entries(C.tags), ...Object.entries(C.screens), ...Object.entries(C.components)]) comps[id] = { kind: tagKind(id) };
   // v0.15.1: component chips carry a kind swatch instead of being coloured pills —
   // quieter beside a status pill, and the colour still says which kind it is.
-  const compChip = (cid) => `<span class="cchip"><i style="background:${kindColor[(comps[cid] || {}).kind] || '#57606f'}"></i>${esc(cid)}</span>`;
+  const compChip = (cid) => `<span class="cchip" title="${esc((tagRef(C, cid) || { type: 'tag' }).type)}"><i style="background:${kindColor[tagKind(cid)] || '#9aa0ad'}"></i>${esc(cid)}</span>`;
   const fmtD = ms2 => ms2 == null ? '\u2014' : (ms2 < 90000 ? Math.round(ms2 / 1000) + 's' : (ms2 < 5400000 ? Math.round(ms2 / 60000) + 'm' : (ms2 / 3600000).toFixed(1) + 'h'));
 
   // v0.15.3: readable documents — briefs and spec files are embedded so the
@@ -708,7 +1203,7 @@ function generateDashboard() {
       // v0.14: design strip — the approved mock beside the latest build capture (intent vs built)
       let designStrip = '';
       {
-        let mockP = t.mock || ((comps[t.component] || {}).mock) || null;
+        let mockP = t.mock || ((C.screens[t.component] || {}).mock) || null;
         if (!mockP) { const mm = t.criteria.map(c => (c.desc || '') + ' ' + (c.check || '')).join(' ').match(/spec\/mocks\/[\w./-]+/); if (mm) mockP = mm[0]; }
         let capP = null;
         for (const v of (t.verifications || [])) for (const a of (v.artifacts || [])) if (/\.(png|jpe?g|webp|gif|svg)$/i.test(a)) capP = a;
@@ -770,7 +1265,7 @@ function generateDashboard() {
       const subline = t.status === 'BLOCKED' ? `<span class="sub">⛔ ${esc(t.blockReason || '')}</span>`
         : t.status === 'CANCELLED' ? `<span class="sub">✕ ${esc(t.cancelReason || '')}</span>`
         : noScope ? `<span class="warnv">⚠ no file scope — start will refuse (task update --allowed)</span>` : '';
-      return `<details class="icd" data-s="${stat}" data-act="${m === actM || m === '(no milestone)' ? '1' : '0'}"><summary class="irow">
+      return `<details class="icd" id="it-${esc(t.id)}" data-id="${esc(t.id)}" data-comp="${esc(t.component || '')}" data-arch="${esc(archOfTag(C, t.component) || '')}" data-s="${stat}" data-act="${m === actM || m === '(no milestone)' ? '1' : '0'}"><summary class="irow">
         <span class="stripe" style="background:${sVar}"></span>
         <span class="iid">${VL.item[t.id] ? `<b class="vlab" title="version label — ${t.label ? 'frozen when work started' : 'provisional: renumbers if the plan is reordered'}">${esc(VL.item[t.id])}${t.label ? '' : '<i>·</i>'}</b>` : ''}${esc(t.id || '')}</span>
         <span class="itt">${stat === 'IN_PROGRESS' ? '<span class="dot-open"></span>' : ''}${esc(t.title)}${t.component ? compChip(t.component) : ''}${designStrip ? '<span class="cchip">🎨 mock</span>' : ''}${hasBrief ? `<button type="button" class="cchip docopen" data-doc="${esc(briefKey)}" title="Read the brief">📄 brief</button>` : ''}${subline}</span>
@@ -793,44 +1288,132 @@ function generateDashboard() {
       <div class="mgb">${rows}</div></details>`;
   })()).join('');
 
-  // v0.10: project map — one box per registered component
-  let mapBlock = '';
-  if (Object.keys(comps).length) {
-    const boxes = Object.values(comps).map(c => {
-      const items = w.order.map(id => w.items[id]).filter(t => t.component === c.id);
-      // v0.13.1: when is this component touched next?
-      let nextM = null;
-      for (const m2 of milestoneSeq(w)) {
-        if (w.order.some(id => { const t2 = w.items[id]; return t2.component === c.id && t2.milestone === m2 && !['DONE', 'CANCELLED'].includes(t2.status); })) { nextM = m2; break; }
+  // ---- v0.19: architecture — lanes of parts, arrows for who talks to whom ----------
+  // Layout is decided here (deterministic, zero tokens): lanes in order, parts in
+  // columns chosen by a barycenter sweep so most arrows run straight. The browser
+  // only measures the cards and draws the arrows between them.
+  const itemsOfArch = id => w.order.map(x => w.items[x]).filter(t => archOfTag(C, t.component) === id);
+  const itemsOfTag = id => w.order.map(x => w.items[x]).filter(t => t.component === id);
+  const progressOf = its => {
+    const done = its.filter(t => t.status === 'DONE').length;
+    const live = its.filter(t => !['CANCELLED'].includes(t.status)).length;
+    const run = its.filter(t => t.status === 'IN_PROGRESS').length;
+    const next = its.find(t => t.id === NEXT_ID) || its.find(t => t.status === 'TODO' && t.deps.every(d => !w.items[d] || w.items[d].status === 'DONE') && t.criteria.length) || null;
+    return { done, live, run, next: next ? next.id : null };
+  };
+  let archBlock = '', archCount = Object.keys(C.components).length, archDraft = 0;
+  {
+    const parts = Object.values(C.components);
+    archDraft = parts.filter(x => !x.confirmed).length;
+    if (!parts.length) {
+      archBlock = `<div class="empty"><h3>No architecture recorded yet</h3>
+        <p>Forge can draft it from the repo: <code>forge arch scan</code> reads the manifests, platform config, function folders and env var names (zero tokens) and proposes the parts and who talks to whom. <code>forge arch scan --write</code> records them as drafts; an agent pass names and splits them; you confirm.</p>
+        <p class="mut">Existing projects: <code>forge upgrade</code> lists this as the <b>architecture</b> step.</p></div>`;
+    } else {
+      const lanes = laneOrder(C);
+      const laneOf = x => x.runsOn || 'Unplaced';
+      const rows = lanes.map(l => parts.filter(x => laneOf(x) === l).map(x => x.id));
+      const nb = {}; for (const e of C.edges) { (nb[e.from] = nb[e.from] || []).push(e.to); (nb[e.to] = nb[e.to] || []).push(e.from); }
+      const pos = () => { const p = {}; rows.forEach(r => r.forEach((id, i) => { p[id] = (i + 0.5) / r.length; })); return p; };
+      for (let sweep = 0; sweep < 6; sweep++) {
+        const order = sweep % 2 ? [...rows.keys()].reverse() : [...rows.keys()];
+        for (const li of order) {
+          const p = pos();
+          const bc = id => { const ns = (nb[id] || []).filter(n => p[n] != null && !rows[li].includes(n)); return ns.length ? ns.reduce((a, n) => a + p[n], 0) / ns.length : p[id]; };
+          rows[li] = rows[li].map((id, i) => ({ id, b: bc(id), i })).sort((a, b) => a.b - b.b || a.i - b.i).map(x => x.id);
+        }
       }
-      const done = items.filter(t => t.status === 'DONE').length;
-      const inProg = items.filter(t => t.status === 'IN_PROGRESS');
-      const blocked = items.filter(t => t.status === 'BLOCKED');
-      const fails = items.reduce((a, t) => a + t.attempts.filter(x => x.outcome === 'failed').length, 0);
-      // latest image evidence: the component's mock, else the newest screenshot artifact
-      let img = c.mock || null;
-      for (const t of items) for (const v of t.verifications) for (const a of (v.artifacts || []))
-        if (/\.(png|jpe?g|webp|gif)$/i.test(a)) img = a;
-      const imgTag = img && fs.existsSync(path.join(PROJECT, img))
-        ? `<a href="../${esc(img)}"><img src="../${esc(img)}" alt="${esc(c.name)}"></a>` : '';
-      const pctC = items.length ? Math.round(100 * done / items.length) : 0;
-      const kc = kindColor[c.kind] || '#57606f';
-      return `<div class="comp">
-        <div class="ch"><b>${esc(c.name)}</b><span class="kind" style="color:${kc};background:${kc}14">${esc(c.kind)}</span></div>
-        ${c.route ? `<div class="mut"><code>${esc(c.route)}</code></div>` : ''}
-        <div class="pbar"><i style="width:${pctC}%"></i></div>
-        <div class="cfoot">
-          <span>${done}/${items.length} done${inProg.length ? ` · <b style="color:var(--progc)">${inProg.map(t => esc(t.id)).join(',')} running</b>` : ''}${blocked.length ? ` · <b style="color:var(--blockc)">${blocked.length} blocked</b>` : ''}${fails ? ` · ${fails} failed` : ''}</span>
-          <span>${nextM ? `next touched: <b>${esc(nextM)}</b>` : (items.length ? 'no open work' : '')}</span>
-        </div>
-        ${c.doc ? `<div class="mut">📄 <code>${esc(c.doc)}</code></div>` : ''}
-        ${imgTag}
-      </div>`;
-    }).join('');
-    const untagged = w.order.filter(id => !w.items[id].component).length;
-    mapBlock = `<details class="sec" open><summary>Project map <span class="mut">(components — forge component add/update · items tagged via --component)</span></summary>
-      <div class="mapgrid">${boxes}</div>
-      ${untagged ? `<p class="mut">${untagged} work item(s) not tagged to any component.</p>` : ''}</details>`;
+      // columns: enough for the widest lane up to 5; a busier lane (often external services) wraps
+      const K = Math.min(6, Math.max(3, ...rows.map(r => r.length)));
+      // a lane that wraps keeps its connected parts in the first row, so arrows never cross a card
+      rows.forEach((r, i) => { if (r.length > K) rows[i] = [...r.filter(id => nb[id]), ...r.filter(id => !nb[id])]; });
+      const p = pos();
+      const col = {};
+      for (const r of rows) {
+        if (r.length > K) continue; // wraps: auto-placed in barycenter order
+        let prev = -1;
+        r.forEach((id, i) => {
+          let c = Math.round(p[id] * K - 0.5);
+          const nbs = (nb[id] || []).filter(n => p[n] != null);
+          if (nbs.length) c = Math.round(nbs.reduce((a, n) => a + p[n], 0) / nbs.length * K - 0.5);
+          c = Math.max(prev + 1, Math.min(c, K - (r.length - i)));
+          col[id] = c; prev = c;
+        });
+      }
+      const laneNote = l => {
+        const xs = parts.filter(x => laneOf(x) === l);
+        const src = [...new Set(xs.flatMap(x => (x.evidence || []).map(e => String(e.path).split('/')[0] + (String(e.path).includes('/') ? '/' : ''))))].slice(0, 2);
+        const conf = xs.every(x => x.confirmed);
+        return `${src.length ? `from ${src.map(esc).join(', ')} · ` : ''}${conf ? '✓ confirmed' : `${xs.filter(x => !x.confirmed).length} draft`}`;
+      };
+      const card = x => {
+        const pr = progressOf(itemsOfArch(x.id));
+        const scr = Object.values(C.screens).filter(s => s.app === x.id).length;
+        const sub = x.summary || (x.evidence && x.evidence[0] && x.evidence[0].why) || '';
+        const kc = kindColor[x.kind] || '#57606f';
+        return `<button type="button" class="acard${x.confirmed ? '' : ' draft'}" data-c="${esc(x.id)}" style="--kc:${kc}${col[x.id] != null ? `;grid-column:${col[x.id] + 1}` : ''}">
+          <b>${esc(x.name)}</b>${sub ? `<span class="as">${esc(sub)}</span>` : ''}
+          <span class="ap">${pr.live ? `${pr.done}/${pr.live} done` : 'no items'}${pr.run ? ` · <em>${pr.run} running</em>` : ''}${scr ? ` · ${scr} screen${scr > 1 ? 's' : ''}` : ''}${x.confirmed ? '' : ' · <i>draft</i>'}</span></button>`;
+      };
+      // every arrow gets its own horizontal track in the gap it leaves its lane by; size the gaps to fit
+      const laneIdx = {}; lanes.forEach((l, i) => parts.filter(x => laneOf(x) === l).forEach(x => { laneIdx[x.id] = i; }));
+      const gapOf = e => { const a = laneIdx[e.from], b = laneIdx[e.to]; return a == null || b == null || a === b ? null : a < b ? a : a - 1; };
+      const gapN = {}; for (const e of C.edges) { const g = gapOf(e); if (g != null) gapN[g] = (gapN[g] || 0) + 1; }
+      const sameLane = new Set(C.edges.filter(e => laneIdx[e.from] != null && laneIdx[e.from] === laneIdx[e.to]).map(e => laneIdx[e.from]));
+      const laneStyle = li => { const st = []; if (li && gapN[li - 1]) st.push(`margin-top:${Math.max(0, 13 * gapN[li - 1] + 22 - 34)}px`); if (sameLane.has(li)) st.push('padding-bottom:34px'); return st.length ? ` style="${st.join(';')}"` : ''; };
+      const laneHtml = lanes.map((l, li) => `<div class="lane${l === EXTERNAL_LANE ? ' ext' : ''}" data-li="${li}"${laneStyle(li)}>
+          <div class="lanehead"><b>${esc(l.toUpperCase())}</b><span>${laneNote(l)}</span></div>
+          <div class="lanebody" style="grid-template-columns:repeat(${K},minmax(0,1fr))">${rows[li].map(id => card(C.components[id])).join('')}</div></div>`).join('');
+      const listRows = lanes.map(l => parts.filter(x => laneOf(x) === l).map(x => {
+        const pr = progressOf(itemsOfArch(x.id));
+        const outE = C.edges.filter(e => e.from === x.id).map(e => `${esc((C.components[e.to] || {}).name || e.to)}${e.label ? ` <span class="mut">(${esc(e.label)})</span>` : ''}${e.planned ? ' <span class="mut">· planned</span>' : ''}`);
+        return `<tr><td><button type="button" class="alink" data-c="${esc(x.id)}"><i style="background:${kindColor[x.kind] || '#57606f'}"></i>${esc(x.name)}</button><div class="mut"><code>${esc(x.id)}</code></div></td><td>${esc(x.kind)}</td><td>${esc(l)}</td><td>${outE.join('<br>') || '<span class="mut">—</span>'}</td><td class="num">${pr.done}/${pr.live}</td><td>${x.confirmed ? '<span class="ok">✓ confirmed</span>' : '<span class="warn">draft</span>'}</td></tr>`;
+      }).join('')).join('');
+      const data = { parts: Object.fromEntries(parts.map(x => {
+        const pr = progressOf(itemsOfArch(x.id));
+        return [x.id, { name: x.name, kind: x.kind, runsOn: laneOf(x), summary: x.summary || null, confirmed: !!x.confirmed, doc: x.doc || null,
+          evidence: (x.evidence || []).slice(0, 6), done: pr.done, live: pr.live, run: pr.run, next: pr.next,
+          screens: Object.values(C.screens).filter(s => s.app === x.id).length }];
+      })), edges: C.edges.map(e => ({ from: e.from, to: e.to, label: e.label || '', planned: !!e.planned, confirmed: !!e.confirmed, g: gapOf(e) })) };
+      const kinds = [...new Set(parts.map(x => x.kind))];
+      archBlock = `${archDraft ? `<div class="draftnote">✎ ${archDraft} of ${parts.length} part(s) are drafts${parts.some(x => x.source === 'scan') ? ' from <code>forge arch scan</code>' : ''} — check the drawing against reality, then <code>forge arch confirm --all</code> (or fix with <code>forge arch update / link / remove</code>).</div>` : ''}
+      <div class="archwrap" id="archdiagram"><div class="archcard" id="archbox"><svg class="archsvg" id="archsvg" aria-hidden="true"></svg>${laneHtml}</div></div>
+      <div class="tblwrap" id="archlist" hidden><table><thead><tr><th>Part</th><th>Kind</th><th>Runs on</th><th>Talks to</th><th>Items</th><th></th></tr></thead><tbody>${listRows}</tbody></table></div>
+      <div class="archfoot">
+        <div class="panel"><h4>Legend</h4><div class="alegend">${kinds.map(k => `<span><i style="background:${kindColor[k] || '#57606f'}"></i>${esc(k)}</span>`).join('')}</div>
+          <p class="footnote">Colour is the part's kind. Lanes are where it runs — one per distinct "runs on", browser first, external services last${C.lanes ? ' (order pinned with forge arch lanes)' : ''}. Dashed arrows are planned; a dashed card is a draft you have not confirmed.</p></div>
+        <div class="panel" id="archsel"><h4>Selected</h4><p class="mut">Click a part.</p></div>
+        <div class="panel"><h4>Screens</h4><p>${Object.keys(C.screens).length} screen(s) and their mocks live on their own page — <a href="#/screens">Screens &amp; mockups</a>. Each app here links to its screens.</p>
+          ${Object.values(C.screens).filter(s => !s.app && !s.standalone).length ? `<p class="mut">${Object.values(C.screens).filter(s => !s.app && !s.standalone).length} not assigned to an app yet (<code>forge screen assign &lt;app&gt; …</code>).</p>` : ''}</div>
+      </div>
+      <script type="application/json" id="archdata">${JSON.stringify(data).replace(/</g, '\\u003c')}</script>`;
+    }
+  }
+
+  // ---- v0.19: screens & mockups — their own page, grouped by the app they belong to --
+  let screensBlock = '';
+  const screenCount = Object.keys(C.screens).length;
+  {
+    const all = Object.values(C.screens);
+    if (!all.length) screensBlock = `<div class="empty"><h3>No screens registered</h3><p>Register a screen with its mock: <code>forge screen add &lt;id&gt; --mock spec/mocks/x.png --app &lt;app&gt;</code>. Items tagged with it (<code>--component &lt;id&gt;</code>) show intended-vs-built on their card.</p></div>`;
+    else {
+      const groups = {};
+      for (const s of all) { const k = s.app || (s.standalone ? '~standalone' : ''); (groups[k] = groups[k] || []).push(s); }
+      const order = [...Object.keys(groups).filter(a => a && a !== '~standalone').sort((a, b) => (C.components[a] ? 0 : 1) - (C.components[b] ? 0 : 1)), ...(groups['~standalone'] ? ['~standalone'] : []), ...(groups[''] ? [''] : [])];
+      const cardS = s => {
+        const its = itemsOfTag(s.id);
+        const pr = progressOf(its);
+        const ok = s.mock && fs.existsSync(path.join(PROJECT, s.mock));
+        return `<div class="scard" data-q="${esc((s.id + ' ' + (s.name || '') + ' ' + (s.route || '')).toLowerCase())}">
+          ${ok ? `<a class="sthumb" href="../${esc(s.mock)}" target="_blank" rel="noopener"><img loading="lazy" src="../${esc(s.mock)}" alt="${esc(s.name || s.id)} mock"></a>` : `<div class="sthumb none">${s.mock ? 'mock file missing' : 'no mock'}</div>`}
+          <div class="sb"><b>${esc(s.name || s.id)}</b><span class="mut"><code>${esc(s.id)}</code>${s.route ? ` · ${esc(s.route)}` : ''}</span>
+          <span class="sp">${its.length ? `<a href="#/plan/c:${encodeURIComponent(s.id)}">${pr.done}/${pr.live} items done${pr.run ? ` · ${pr.run} running` : ''}</a>` : '<span class="mut">no items tagged</span>'}</span></div></div>`;
+      };
+      screensBlock = `<div class="workbar"><input class="filter" id="scrfilter" type="search" placeholder="Filter screens… (name, id, route)" aria-label="Filter screens">
+        <span class="mut">${all.length} screen(s) · ${all.filter(s => s.mock).length} with a mock${groups[''] ? ` · ${groups[''].length} not assigned to an app yet` : ''}</span></div>` +
+        order.map(a => `<section class="sgroup" id="scr-${esc(a === '~standalone' ? 'standalone' : a || 'none')}"><h3>${a === '~standalone' ? 'Standalone pages <span class="mut">— maps, journeys and other pages that belong to no app</span>' : a ? `<i style="background:${kindColor[(C.components[a] || {}).kind] || '#57606f'}"></i>${esc((C.components[a] || {}).name || a)} <a class="mut" href="#/architecture/${encodeURIComponent(a)}">in the architecture →</a>` : 'Not assigned to an app'} <span class="mut">${groups[a].length}</span></h3>
+          <div class="sgrid">${groups[a].map(cardS).join('')}</div></section>`).join('');
+    }
   }
 
   // v0.12.1: telemetry — development time LIVE from state timestamps; tokens
@@ -838,6 +1421,7 @@ function generateDashboard() {
   // parsing on every regen would slow every state operation).
   const pace = {}; // v0.14: pace & forecast data escapes the telemetry block
   let telemetryBlock = '';
+  let timePanelOut = '', usagePanelOut = ''; // v0.19: time goes to Plan, tokens to Usage
   {
     const med = arr => { if (!arr.length) return null; const s2 = [...arr].sort((a, b) => a - b); return s2[Math.floor(s2.length / 2)]; };
     const quant = (arr, q) => { if (!arr.length) return null; const s2 = [...arr].sort((a, b) => a - b); return s2[Math.min(s2.length - 1, Math.floor(s2.length * q))]; };
@@ -954,6 +1538,7 @@ function generateDashboard() {
         </div>`;
       }
     }
+    timePanelOut = timePanel; usagePanelOut = `<div class="telgrid one">${tokenPanel}</div>${effPanel}`;
     telemetryBlock = `<details class="sec" open><summary>Telemetry <span class="mut">(time live from state · tokens re-read from session logs on every change)</span></summary><div class="telgrid">${timePanel}${tokenPanel}</div>${effPanel}</details>`;
   }
 
@@ -1039,10 +1624,10 @@ function generateDashboard() {
         const sym = g2 && g2.approved ? '✓' : complete ? '!' : String((VLr.milestone[m] || '').split('.')[1] || (i + 1));
         const label = cls === 'awaitg' ? 'your review' : cls === 'done' ? `${doneN}/${ids.length} · gate ✓` : `${doneN}/${ids.length} items`;
         const mc = [...new Set(ids.map(id => w.items[id].component).filter(Boolean))].slice(0, 4);
-        return `<a class="mnode ${cls}" href="#work"><span class="mdot">${sym}</span><span class="mv">${esc(VLr.milestone[m] || '')}</span><span class="mn">${esc(m)}</span>${milestoneName(w, m) ? `<span class="mi">${esc(milestoneName(w, m))}</span>` : ''}<span class="mi">${label}</span>${mc.length ? `<span class="cdots">${mc.map(c => `<i style="background:${kindColor[(comps[c] || {}).kind] || '#57606f'}"></i>`).join('')}</span>` : ''}</a>`;
+        return `<a class="mnode ${cls}" href="#/plan/${encodeURIComponent(m)}"><span class="mdot">${sym}</span><span class="mv">${esc(VLr.milestone[m] || '')}</span><span class="mn">${esc(m)}</span>${milestoneName(w, m) ? `<span class="mi">${esc(milestoneName(w, m))}</span>` : ''}<span class="mi">${label}</span>${mc.length ? `<span class="cdots">${mc.map(c => `<i style="background:${kindColor[(comps[c] || {}).kind] || '#57606f'}"></i>`).join('')}</span>` : ''}</a>`;
         })();
       }).join('');
-      railBlock = `<details class="sec" open id="milestones"><summary>Milestones <span class="mut">(the whole journey — every planned milestone, not a side document)</span></summary>
+      railBlock = `<details class="sec" open id="milestones"><summary>Milestones <span class="mut">(the whole journey — click one to open it in the plan)</span></summary>
         <div class="railcard"><div class="railwrap"><div class="rail">${nodes}</div></div></div></details>`;
     }
   }
@@ -1071,6 +1656,88 @@ function generateDashboard() {
   const baseBlock = base
     ? base.results.map(r => `<div class="sysrow"><span class="bdg ${r.exit === 0 ? 'ok' : 'warn'}">${r.exit === 0 ? 'GREEN' : 'RED'}</span><span class="n">${esc(r.kind)}</span><span class="d">${r.exit === 0 ? '' : 'pre-existing failure — recorded, not blamed on new work · '}<code>${esc(r.cmd)}</code></span></div>`).join('')
     : '<div class="sysrow"><span class="bdg warn">—</span><span class="n">Baseline</span><span class="d">not captured (greenfield, or run <code>forge baseline capture</code>)</span></div>';
+
+  // ---- v0.19: blocks for the paged dashboard -------------------------------------
+  // Plan: outcomes beside the work they describe
+  let outcomesBlock = '';
+  {
+    const dn = w.order.map(id => w.items[id]).filter(t => t.status === 'DONE');
+    if (dn.length) {
+      const failsOf = t => t.attempts.filter(a => a.outcome === 'failed').length;
+      const fp = dn.filter(t => failsOf(t) === 0).length;
+      const cr = dn.filter(t => t.attempts.filter(a => a.outcome === 'started').length === 1 && failsOf(t) === 0 && !(t.verifications || []).some(v => v.passed === false)).length;
+      const tf = dn.reduce((a, t) => a + failsOf(t), 0);
+      outcomesBlock = `<div class="pacestrip">
+        <div><div class="pk">FIRST-PASS</div><div class="pv">${Math.round(100 * fp / dn.length)}% <small>${fp}/${dn.length} done with no failed attempt</small></div></div>
+        <div class="pdiv"></div>
+        <div><div class="pk">CLEAN RUN</div><div class="pv">${Math.round(100 * cr / dn.length)}% <small>one start, nothing failed</small></div></div>
+        <div class="pdiv"></div>
+        <div><div class="pk">REWORK ABSORBED</div><div class="pv">${tf} <small>failed attempt(s) · ${(tf / dn.length).toFixed(2)} per item</small></div></div>
+        ${pace.itemSpans && pace.itemSpans.length ? `<div class="pdiv"></div><div><div class="pk">MEDIAN ITEM</div><div class="pv">${pace.fmtDur(pace.med(pace.itemSpans))} <small>start → done</small></div></div>` : ''}
+        <div class="pnote">The gap between first-pass and clean-run is rework the plan did not show. <code>forge stats</code> prints the per-milestone table.</div>
+      </div>`;
+    }
+  }
+  // Overview: releases as progress bars, and what is happening right now
+  let releaseBlock = '';
+  {
+    const VLo = computeLabels(w);
+    const rels = w.releaseOrder || [];
+    const rowsR = (rels.length ? rels : [null]).map(r => {
+      const ms = milestoneSeq(w).filter(m => (releaseOf(w, m) || null) === r);
+      if (!ms.length) return '';
+      const ids = w.order.filter(id => ms.includes(w.items[id].milestone));
+      const d = ids.filter(id => w.items[id].status === 'DONE').length, live = ids.filter(id => w.items[id].status !== 'CANCELLED').length;
+      const appr = ms.filter(m => (((w.gates || {})[m]) || {}).approved).length;
+      const pctR = live ? Math.round(100 * d / live) : 0;
+      return `<a class="relrow" href="#/plan/${encodeURIComponent(ms.find(m => !(((w.gates || {})[m]) || {}).approved) || ms[0])}">
+        <span class="vtag rel">${esc(r ? VLo.releaseLabel[r] : '—')}</span><span class="rn">${esc(r ? ((w.releases[r] || {}).name || r) : 'All milestones')}</span>
+        <span class="pbar"><i style="width:${pctR}%"></i></span><span class="rm">${appr}/${ms.length} milestones · ${d}/${live} items${r && (w.releases[r] || {}).tag ? ` · ${esc(w.releases[r].tag)}` : ''}</span></a>`;
+    }).join('');
+    if (rowsR) releaseBlock = `<div class="panel"><h3>Releases</h3><div class="rels">${rowsR}</div></div>`;
+  }
+  let nowBlock = '';
+  {
+    const VLn = computeLabels(w);
+    const inP = w.order.filter(id => w.items[id].status === 'IN_PROGRESS');
+    const blk = w.order.filter(id => w.items[id].status === 'BLOCKED');
+    const li = id => `<li><a href="#/plan/${encodeURIComponent(id)}"><b class="vlab">${esc(VLn.item[id] || '')}</b>${esc(id)}</a> <span>${esc(w.items[id].title)}</span></li>`;
+    const mIds = actM ? w.order.filter(id => w.items[id].milestone === actM) : [];
+    const mDone = mIds.filter(id => w.items[id].status === 'DONE').length;
+    nowBlock = `<div class="panel"><h3>Now${actM ? ` <span class="mut">— <span class="vtag">${esc(VLn.milestone[actM] || '')}</span>${esc(milestoneName(w, actM) || actM)}</span>` : ''}</h3>
+      ${actM ? `<div class="nowbar"><span class="pbar"><i style="width:${mIds.length ? Math.round(100 * mDone / mIds.length) : 0}%"></i></span><span class="mut">${mDone}/${mIds.length} items in this milestone</span></div>` : ''}
+      ${inP.length ? `<h4>In progress</h4><ul class="nowl">${inP.map(li).join('')}</ul>` : ''}
+      ${blk.length ? `<h4>Blocked — needs you</h4><ul class="nowl">${blk.map(li).join('')}</ul>` : ''}
+      ${NEXT_ID ? `<h4>Next up</h4><ul class="nowl">${li(NEXT_ID)}</ul>` : ''}
+      ${!inP.length && !blk.length && !NEXT_ID ? '<p class="mut">Nothing in flight.</p>' : ''}</div>`;
+  }
+  const recentBlock = decisions.length || discoveries.length
+    ? `<div class="panel"><h3>Latest in the journal <a class="mut" href="#/journal">all →</a></h3>${logBlock([...decisions.slice(0, 2), ...discoveries.slice(0, 1)], '')}</div>` : '';
+  // System: plan standards (forge upgrade) and the git/verify settings in force
+  let standardsBlock = '', standardsMet = 0, standardsAll = 0;
+  try {
+    const st = upgradeStatus();
+    standardsAll = st.length; standardsMet = st.filter(x => x.done).length;
+    standardsBlock = st.map(x => `<div class="sysrow"><span class="bdg ${x.done ? 'ok' : x.kind === 'auto' ? 'bad' : 'warn'}">${x.done ? 'MET' : x.kind === 'auto' ? 'AUTO' : 'REVIEW'}</span><span class="n">${esc(x.id)} <span class="mut">${esc(x.since)}</span></span><span class="d">${esc(x.title)}${x.accepted ? ` · kept as-is: ${esc(x.accepted.reason)}` : ''}${x.findings.length ? `<br>${x.findings.slice(0, 3).map(esc).join('<br>')}` : ''}</span></div>`).join('');
+  } catch (_) { /* never block the dashboard */ }
+  const gcD = (() => { try { return gitCfg(cfg); } catch (_) { return null; } })();
+  const configBlock = [
+    ['Verify', Object.keys(cfg.verify || {}).length ? Object.entries(cfg.verify).map(([k, v]) => `${esc(k)}: <code>${esc(String(v))}</code>`).join('<br>') : 'not set'],
+    ['Git flow', gcD ? (gcD.integration === 'per-milestone' ? `per-milestone · base <code>${esc(gcD.base || '?')}</code> · branch <code>${esc(gcD.pattern || '')}</code>` : 'manual (recorded opt-out)') : '—'],
+    ['Versions', `labels start at V${versionStart()} (<code>options.versionStart</code>)`],
+    ['Graphify', esc((cfg.options || {}).graphify || 'unset')],
+  ].map(([k, v]) => `<div class="sysrow"><span class="n">${k}</span><span class="d">${v}</span></div>`).join('');
+  // Specs: the spec folder plus the change scripts (upgrades, re-cuts) with their explanations
+  let changeRows = '';
+  try {
+    const cd = path.join(FORGE, 'changes');
+    if (fs.existsSync(cd)) changeRows = fs.readdirSync(cd).filter(f => !f.startsWith('.')).sort().reverse().slice(0, 40).map(f => {
+      const abs = path.join(cd, f); const st = fs.statSync(abs); const key = 'change:' + f;
+      const readable = /\.(md|sh)$/i.test(f) && addDoc(key, abs, `forge/changes/${f}`, f, 'change');
+      return `<tr><td>${readable ? `<a href="#" class="docopen" data-doc="${esc(key)}"><code>${esc(f)}</code></a>` : `<code>${esc(f)}</code>`}</td><td class="mut">${st.size} B</td><td class="mut">${new Date(st.mtimeMs).toISOString().slice(0, 16).replace('T', ' ')}</td></tr>`;
+    }).join('');
+  } catch (_) { }
+  const specCount = (specRows.match(/<tr>/g) || []).length;
 
   const html = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -1146,7 +1813,7 @@ details.sec.sub>summary .mut{font-variant-numeric:tabular-nums}
 /* ---- item rows + drawer ---- */
 details.icd{border-bottom:1px solid var(--line2)}
 details.icd:last-child{border-bottom:0}
-summary.irow{display:grid;grid-template-columns:4px 84px minmax(0,1fr) auto;gap:0 14px;align-items:center;padding-right:18px;cursor:pointer;user-select:none;list-style:none;font-size:13px}
+summary.irow{display:grid;grid-template-columns:4px 168px minmax(0,1fr) auto;gap:0 14px;align-items:center;padding-right:18px;cursor:pointer;user-select:none;list-style:none;font-size:13px}
 summary.irow::-webkit-details-marker{display:none}
 summary.irow:hover{background:#faf9f5}
 details.icd[open]>summary.irow{background:#faf9f5}
@@ -1259,17 +1926,79 @@ button.cchip:hover{background:var(--accsoft);color:var(--accent)}
 .vlab{font-weight:700;color:var(--accent);margin-right:6px;font-variant-numeric:tabular-nums}
 .vlab i{font-style:normal;color:var(--ink3);margin-left:1px}
 .cdots{display:flex;gap:3px} .cdots i{width:6px;height:6px;border-radius:50%;display:block}
-/* ---- project map ---- */
-.mapgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(238px,1fr));gap:12px;align-items:start}
-.comp{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);box-shadow:var(--shadow);padding:15px 16px;display:flex;flex-direction:column;gap:9px}
-.comp .ch{display:flex;justify-content:space-between;align-items:center;gap:8px}
-.comp .ch b{font-size:14px;letter-spacing:-.01em}
-.kind{font-size:9px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;border-radius:6px;padding:2px 7px;white-space:nowrap}
-.pbar{height:6px;border-radius:99px;background:var(--line2);overflow:hidden}
+/* ---- v0.19 pages ---- */
+.pbar{height:6px;border-radius:99px;background:var(--line2);overflow:hidden;display:block}
 .pbar i{display:block;height:100%;border-radius:99px;background:var(--done)}
-.cfoot{display:flex;justify-content:space-between;flex-wrap:wrap;gap:3px 10px;font-size:11.5px;color:var(--ink3);font-variant-numeric:tabular-nums}
-.cfoot>span:last-child{white-space:nowrap;margin-left:auto}
-.comp img{width:100%;max-height:96px;object-fit:cover;object-position:top;border-radius:8px;border:1px solid var(--line);display:block}
+section.page[hidden]{display:none}
+.phead{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin:2px 0 16px}
+.phead h2{font-size:22px;letter-spacing:-.02em}
+.h3s{margin:4px 0 9px}
+.warnk{color:#e9b98a!important}
+.ovgrid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px;align-items:start}
+.ovgrid .panel h4,.archfoot h4{font-size:10.5px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--ink3);margin:4px 0 -4px}
+.nowl{list-style:none;display:flex;flex-direction:column;gap:6px;font-size:12.5px}
+.nowl li{display:flex;gap:8px;align-items:baseline;min-width:0}
+.nowl li>span{color:var(--ink2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.nowl a{font-family:var(--mono);font-size:11.5px;white-space:nowrap}
+.nowbar{display:flex;align-items:center;gap:12px} .nowbar .pbar{flex:1}
+.rels{display:flex;flex-direction:column;gap:10px}
+.relrow{display:grid;grid-template-columns:auto minmax(0,1fr);grid-template-areas:"t n" "b b" "m m";gap:4px 8px;color:inherit;align-items:center}
+.relrow:hover{text-decoration:none} .relrow:hover .rn{color:var(--accent)}
+.relrow .vtag{grid-area:t;margin:0} .relrow .rn{grid-area:n;font-weight:600;font-size:13px}
+.relrow .pbar{grid-area:b} .relrow .rm{grid-area:m;font-size:11.5px;color:var(--ink3);font-variant-numeric:tabular-nums}
+.telgrid.one{grid-template-columns:1fr}
+.compfilter[hidden]{display:none}
+.compfilter{display:inline-flex;align-items:center;gap:6px;font-size:12px;background:var(--accsoft);color:var(--accent);border-radius:9px;padding:6px 6px 6px 11px}
+.compfilter button{border:0;background:none;color:inherit;cursor:pointer;font-size:12px;padding:0 5px}
+details.icd.flash>summary,details.sec.sub.flash>summary{animation:flash 1.6s ease}
+@keyframes flash{0%,40%{background:#d4551a22}100%{background:transparent}}
+.empty{background:var(--surface);border:1px dashed var(--line);border-radius:var(--r);padding:22px 24px;max-width:760px}
+.empty h3{margin-bottom:8px} .empty p{font-size:13px;color:var(--ink2);margin-top:6px}
+/* ---- v0.19 architecture ---- */
+.draftnote{font-size:12.5px;color:#7a4a0c;background:#b3660a12;border:1px solid #b3660a33;border-radius:10px;padding:9px 14px;margin-bottom:12px}
+.archwrap{overflow-x:auto;border-radius:var(--r)}
+.archcard{position:relative;background:var(--surface);border:1px solid var(--line);border-radius:var(--r);box-shadow:var(--shadow);padding:18px;display:flex;flex-direction:column;gap:34px;min-width:760px}
+.archsvg{position:absolute;left:0;top:0;pointer-events:none;z-index:2;overflow:visible}
+.lane{display:grid;grid-template-columns:118px minmax(0,1fr);gap:14px;align-items:center;background:#f7f6f2;border:1px solid var(--line2);border-radius:12px;padding:16px 14px}
+.lane.ext{background:#f4f3fb}
+.lanehead b{display:block;font-size:10.5px;letter-spacing:.09em;color:var(--ink2)}
+.lanehead span{display:block;font-size:10.5px;color:var(--ink3);line-height:1.4;margin-top:3px}
+.lanebody{display:grid;gap:18px 22px;align-items:stretch}
+.acard{position:relative;z-index:3;text-align:left;font:inherit;background:var(--surface);border:1px solid var(--line);border-left:4px solid var(--kc);border-radius:10px;padding:10px 13px;display:flex;flex-direction:column;gap:3px;cursor:pointer;box-shadow:0 1px 2px rgba(27,29,36,.06);width:100%;max-width:240px;justify-self:center;min-width:0}
+.acard:hover{border-color:var(--ink3);border-left-color:var(--kc)}
+.acard.sel{box-shadow:0 0 0 3px var(--accsoft);border-color:var(--accent);border-left-color:var(--kc)}
+.acard.draft{border-style:dashed;border-left-style:solid}
+.acard b{font-size:13px;letter-spacing:-.01em;color:var(--ink)}
+.acard .as{font-size:11.5px;color:var(--ink2);line-height:1.35;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;overflow-wrap:anywhere}
+.acard .ap{font-size:11px;color:var(--ink3);font-variant-numeric:tabular-nums}
+.acard .ap em{font-style:normal;color:var(--progc);font-weight:600} .acard .ap i{font-style:normal;color:var(--awaitc)}
+.aedge path{stroke:#6b7080;stroke-width:1.4}
+.aedge.planned path{stroke-dasharray:5 4}
+.aedge.draft path{stroke:#a5a9b5}
+.aedge.hl path{stroke:var(--accent);stroke-width:2}
+.aedge text{font-size:10.5px;fill:#565b68;font-family:inherit}
+.aedge.hl text{fill:var(--accent);font-weight:600}
+.aedge .lbg{fill:#fff;opacity:.92}
+.archfoot{display:grid;grid-template-columns:1fr 1.25fr 1fr;gap:12px;margin-top:12px;align-items:start}
+.archfoot p{font-size:12.5px;color:var(--ink2)}
+.alegend{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:12px;color:var(--ink2)}
+.alegend i,.alink i,.sgroup h3 i{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:6px;vertical-align:-1px}
+.alink{font:inherit;font-weight:600;border:0;background:none;cursor:pointer;color:var(--ink);padding:0;text-align:left}
+.alink:hover{color:var(--accent)}
+.selbtn{display:inline-block;margin-top:12px}
+/* ---- v0.19 screens ---- */
+.sgroup{margin-top:20px}
+.sgroup h3{display:flex;align-items:center;gap:8px;margin-bottom:10px;font-size:15px}
+.sgroup h3 a{font-weight:400;font-size:12px}
+.sgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(196px,1fr));gap:12px}
+.scard{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);box-shadow:var(--shadow);overflow:hidden;display:flex;flex-direction:column}
+.sthumb{display:block;height:150px;background:#f1efe9;border-bottom:1px solid var(--line2);overflow:hidden}
+.sthumb img{width:100%;height:100%;object-fit:cover;object-position:top;display:block}
+.sthumb.none{display:grid;place-items:center;font-size:11px;color:var(--ink3);background:repeating-linear-gradient(45deg,#f1efe9 0 8px,#eceae3 8px 16px)}
+.sb{padding:10px 12px 12px;display:flex;flex-direction:column;gap:2px;min-width:0}
+.sb b{font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sb .mut{font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sp{font-size:11.5px;margin-top:3px}
 /* ---- telemetry ---- */
 .telgrid{display:grid;grid-template-columns:1.15fr 1fr;gap:12px;align-items:start}
 .panel{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);box-shadow:var(--shadow);padding:18px 20px;display:flex;flex-direction:column;gap:13px}
@@ -1327,7 +2056,8 @@ tbody tr:hover{background:#faf9f5}
   #snav{flex-direction:row;flex-wrap:wrap;padding:0;overflow:visible} #snav a .k{display:none}
   .sidefoot{display:none}
   .kpis{grid-template-columns:1fr 1fr} .kpi.hero{grid-column:1/-1}
-  .telgrid,.jgrid,.dgrid,.dpair{grid-template-columns:1fr}
+  .telgrid,.jgrid,.dgrid,.dpair,.ovgrid,.archfoot{grid-template-columns:1fr}
+  .lane{grid-template-columns:1fr}
   summary.irow{grid-template-columns:4px minmax(0,1fr) auto} .iid{display:none}
   .icdb{padding-left:22px}
   .pnote{margin-left:0}
@@ -1342,58 +2072,88 @@ tbody tr:hover{background:#faf9f5}
     ${actM ? `<span class="phase">${esc(actM)} active</span>` : ''}
   </div>
   <nav id="snav">
-    <a href="#overview" class="on">Overview</a>
-    <a href="#milestones">Milestones <span class="k">${milestoneSeq(w).filter(m => (((w.gates || {})[m]) || {}).approved).length}/${milestoneSeq(w).length}</span></a>
-    <a href="#work">Work <span class="k">${counts.DONE}/${total}</span></a>
-    <a href="#map">Project map <span class="k">${Object.keys(comps).length}</span></a>
-    <a href="#telemetry">Telemetry</a>
-    <a href="#journal">Journal <span class="k">${decisions.length + discoveries.length}</span></a>
-    <a href="#system">System</a>
+    <a href="#/overview" data-p="overview">Overview</a>
+    <a href="#/plan" data-p="plan">Plan <span class="k">${counts.DONE}/${total}</span></a>
+    <a href="#/architecture" data-p="architecture">Architecture <span class="k">${archCount ? (archDraft ? `${archCount} · ${archDraft} draft` : archCount) : '—'}</span></a>
+    <a href="#/screens" data-p="screens">Screens &amp; mockups <span class="k">${screenCount || '—'}</span></a>
+    <a href="#/usage" data-p="usage">Usage</a>
+    <a href="#/journal" data-p="journal">Journal <span class="k">${decisions.length + discoveries.length}</span></a>
+    <a href="#/specs" data-p="specs">Specs <span class="k">${specCount || ''}</span></a>
+    <a href="#/system" data-p="system">System${standardsAll && standardsMet < standardsAll ? ` <span class="k warnk">upgrade ${standardsMet}/${standardsAll}</span>` : ''}</a>
   </nav>
   <div class="sidefoot"><b>Generated projection.</b><br>State wins — never edit this file.<br>regenerated <span data-since="${new Date().toISOString()}" data-post=" ago">just now</span> · ${new Date().toISOString().slice(0, 16).replace('T', ' ')} UTC</div>
 </aside>
 <main><div class="wrap">
 
-<section id="overview" style="scroll-margin-top:14px">
+<section class="page" data-page="overview" id="overview">
   <div class="tophead">
     <h1>${esc(cfg.project)} — where things stand</h1>
     <div class="stamp">auto-updates on every change · refresh: <code>forge dashboard</code><br>Verify: ${Object.keys(cfg.verify || {}).length ? Object.keys(cfg.verify).map(esc).join(', ') : 'not set'} · Graphify: ${esc((cfg.options || {}).graphify || 'unset')}</div>
   </div>
   ${bannerBlock}
   ${kpiBlock}
-  ${paceBlock}
+  <div class="ovgrid">${nowBlock}${releaseBlock}</div>
+  ${railBlock}
+  ${recentBlock}
 </section>
 
-${railBlock}
+<section class="page" data-page="plan" id="plan" hidden>
+  <div class="phead"><h2>Plan</h2><span class="mut">releases → milestones → tasks, in the order they are built · click any task for its full story</span></div>
+  ${outcomesBlock}
+  ${paceBlock}
+  <div class="telgrid one" style="margin-top:12px">${timePanelOut}</div>
+  <div class="workbar" style="margin-top:22px">
+  <input class="filter" id="wgfilter" type="search" placeholder="Filter items… (id, title, component, status)" aria-label="Filter work items">
+  <div class="seg" id="wgseg" role="group" aria-label="Quick filters"><button class="on" data-f="all">All<span class="n"></span></button><button data-f="needs">Needs me<span class="n"></span></button><button data-f="active">Active<span class="n"></span></button><button data-f="done">Done<span class="n"></span></button></div>
+  <span class="compfilter" id="wgcomp" hidden>Showing work for <b></b> <button type="button" aria-label="Clear">✕</button></span>
+  </div>
+  <p class="noresult" id="wgnone" hidden></p>
+  <div id="work">${milestoneBlocks || '<p class="mut">No work items yet.</p>'}</div>
+</section>
 
-<details class="sec" open id="work"><summary>Work <span class="mut">(click any item for its full story — criteria, scope, dispatches, evidence, design, the brief)</span></summary>
-<div class="workbar">
-<input class="filter" id="wgfilter" type="search" placeholder="Filter items… (id, title, component, status)" aria-label="Filter work items">
-<div class="seg" id="wgseg" role="group" aria-label="Quick filters"><button class="on" data-f="all">All<span class="n"></span></button><button data-f="needs">Needs me<span class="n"></span></button><button data-f="active">Active<span class="n"></span></button><button data-f="done">Done<span class="n"></span></button></div>
-</div>
-<p class="noresult" id="wgnone" hidden></p>
-${milestoneBlocks || '<p class="mut">No work items yet.</p>'}</details>
+<section class="page" data-page="architecture" id="architecture" hidden>
+  <div class="phead"><h2>Architecture</h2><span class="mut">what the system is made of, where each part runs, who talks to whom</span>
+    ${archCount ? `<div class="seg" id="archseg" style="margin-left:auto"><button class="on" data-v="diagram">Diagram</button><button data-v="list">List</button></div>` : ''}</div>
+  ${archBlock}
+</section>
 
-${mapBlock ? mapBlock.replace('<details class="sec" open>', '<details class="sec" open id="map">') : ''}
+<section class="page" data-page="screens" id="screens" hidden>
+  <div class="phead"><h2>Screens &amp; mockups</h2><span class="mut">the screens of each app and their approved mocks — tasks tagged with a screen show intended vs built</span></div>
+  ${screensBlock}
+</section>
 
-${telemetryBlock.replace('<details class="sec" open>', '<details class="sec" open id="telemetry">')}
+<section class="page" data-page="usage" id="usage" hidden>
+  <div class="phead"><h2>Usage</h2><span class="mut">tokens and model calls, observed from session logs — never estimated</span></div>
+  ${usagePanelOut}
+</section>
 
-<details class="sec" open id="journal"><summary>Journal <span class="mut">(decisions bind the product · discoveries change the plan — latest first)</span></summary>
-<div class="jgrid">
-<div class="jcol"><h3>Decisions</h3>${logBlock(decisions, 'None recorded yet.')}</div>
-<div class="jcol"><h3>Discoveries</h3>${logBlock(discoveries, 'None recorded yet.')}</div>
-</div></details>
+<section class="page" data-page="journal" id="journal" hidden>
+  <div class="phead"><h2>Journal</h2><span class="mut">decisions bind the product · discoveries change the plan — latest first</span></div>
+  <div class="jgrid">
+  <div class="jcol"><h3>Decisions</h3>${logBlock(decisions, 'None recorded yet.')}</div>
+  <div class="jcol"><h3>Discoveries</h3>${logBlock(discoveries, 'None recorded yet.')}</div>
+  </div>
+</section>
 
-<details class="sec" id="system"><summary>System <span class="mut">(preflight · baseline · spec — the plumbing, collapsed until you need it)</span></summary>
-<div class="jgrid">
-<div><h3 style="margin-bottom:9px">Preflight ${pf ? `<span class="mut">${esc(pf.ts.slice(0, 16).replace('T', ' '))} · <span data-since="${esc(pf.ts)}" data-post=" ago"></span> — rerun with <code>forge preflight</code></span>` : ''}</h3>
-<div class="syscard">${pfBlock}</div></div>
-<div><h3 style="margin-bottom:9px">Baseline ${base ? `<span class="mut">${esc(base.ts.slice(0, 16).replace('T', ' '))} · a recorded moment, not a live check</span>` : ''}</h3>
-<div class="syscard">${baseBlock}</div></div>
-</div>
-${specRows ? `<h3 style="margin:18px 0 9px">Specification <span class="mut">(${esc(cfg.specDir)}/ — the source of intent)</span></h3>
-<div class="tblwrap"><table><thead><tr><th>File</th><th>Size</th><th>Modified</th></tr></thead><tbody>${specRows}</tbody></table></div>` : ''}
-</details>
+<section class="page" data-page="specs" id="specs" hidden>
+  <div class="phead"><h2>Specs</h2><span class="mut">the source of intent, and the change scripts that reshaped the plan</span></div>
+  ${specRows ? `<h3 class="h3s">Specification <span class="mut">(${esc(cfg.specDir)}/)</span></h3>
+  <div class="tblwrap"><table><thead><tr><th>File</th><th>Size</th><th>Modified</th></tr></thead><tbody>${specRows}</tbody></table></div>` : `<p class="mut">No spec folder configured${cfg.specDir ? ` (${esc(cfg.specDir)}/ not found)` : ''}.</p>`}
+  ${changeRows ? `<h3 class="h3s">Change scripts <span class="mut">(forge/changes/ — re-cuts and upgrades, newest first)</span></h3>
+  <div class="tblwrap"><table><thead><tr><th>File</th><th>Size</th><th>Modified</th></tr></thead><tbody>${changeRows}</tbody></table></div>` : ''}
+</section>
+
+<section class="page" data-page="system" id="system" hidden>
+  <div class="phead"><h2>System</h2><span class="mut">plan standards · preflight · baseline · settings — the plumbing</span></div>
+  ${standardsBlock ? `<h3 class="h3s">Plan standards <span class="mut">— ${standardsMet}/${standardsAll} met for Forge v${VERSION}${standardsMet < standardsAll ? ' · <code>forge upgrade</code> shows how to close the rest' : ''}</span></h3><div class="syscard">${standardsBlock}</div>` : ''}
+  <div class="jgrid" style="margin-top:18px">
+  <div><h3 class="h3s">Preflight ${pf ? `<span class="mut">${esc(pf.ts.slice(0, 16).replace('T', ' '))} · <span data-since="${esc(pf.ts)}" data-post=" ago"></span> — rerun with <code>forge preflight</code></span>` : ''}</h3>
+  <div class="syscard">${pfBlock}</div></div>
+  <div><h3 class="h3s">Baseline ${base ? `<span class="mut">${esc(base.ts.slice(0, 16).replace('T', ' '))} · a recorded moment, not a live check</span>` : ''}</h3>
+  <div class="syscard">${baseBlock}</div></div>
+  </div>
+  <h3 class="h3s" style="margin-top:18px">Settings</h3><div class="syscard">${configBlock}</div>
+</section>
 
 </div></main>
 </div>
@@ -1436,7 +2196,7 @@ ${specRows ? `<h3 style="margin:18px 0 9px">Specification <span class="mut">(${e
   var i=document.getElementById('wgfilter'), seg=document.getElementById('wgseg'),
       none=document.getElementById('wgnone');
   if(!i) return;
-  var mode='all';
+  var mode='all', comp=null, chip=document.getElementById('wgcomp');
   var groups=[].slice.call(document.querySelectorAll('details.sec.sub'));
   /* "Needs me" is the human's queue: an item blocked on your answer, and every
      item of a milestone whose gate is waiting for your review — the gate IS the
@@ -1458,11 +2218,12 @@ ${specRows ? `<h3 style="margin:18px 0 9px">Specification <span class="mut">(${e
     all:'No work items yet.'
   };
   function apply(){
-    var q=i.value.toLowerCase(), narrowed=!!q||mode!=='all', total=0;
+    var q=i.value.toLowerCase(), narrowed=!!q||mode!=='all'||!!comp, total=0;
     groups.forEach(function(d){
       var gate=d.getAttribute('data-gate')||'', n=0;
       d.querySelectorAll('details.icd').forEach(function(r){
-        var hit=matches(r,gate)&&(!q||r.textContent.toLowerCase().indexOf(q)>=0);
+        var hit=matches(r,gate)&&(!q||r.textContent.toLowerCase().indexOf(q)>=0)&&
+          (!comp||r.getAttribute('data-comp')===comp||r.getAttribute('data-arch')===comp);
         r.style.display=hit?'':'none'; if(hit)n++;
       });
       total+=n;
@@ -1474,9 +2235,17 @@ ${specRows ? `<h3 style="margin:18px 0 9px">Specification <span class="mut">(${e
     if(none){
       var show=narrowed&&!total;
       none.hidden=!show;
-      none.textContent=show?(q?('Nothing matches “'+i.value+'”.'):EMPTY[mode]):'';
+      none.textContent=show?(q?('Nothing matches “'+i.value+'”.'):comp?('No work is tagged to '+comp+'.'):EMPTY[mode]):'';
     }
   }
+  /* v0.19: #/plan/c:<id> narrows the plan to one architecture part (its screens' work
+     included) or one screen/tag */
+  window.forgePlan={setComp:function(id){
+    comp=id||null;
+    if(chip){ chip.hidden=!comp; var b=chip.querySelector('b'); if(b) b.textContent=comp||''; }
+    apply();
+  }};
+  if(chip) chip.querySelector('button').addEventListener('click',function(){ location.hash='#/plan'; });
   /* counts use the same predicate the filter uses, so a button can never promise
      items the filter would not show */
   function counts(){
@@ -1581,15 +2350,162 @@ ${specRows ? `<h3 style="margin:18px 0 9px">Specification <span class="mut">(${e
   scrim.addEventListener('click',closeDoc);
   document.addEventListener('keydown',function(e){ if(e.key==='Escape'&&panel.classList.contains('on')) closeDoc(); });
 })();
+/* v0.19: one page at a time. The side menu switches pages; the hash is the address
+   (#/plan/<item or milestone>, #/plan/c:<part or screen>, #/architecture/<part>),
+   so links, the back button and bookmarks work. Old #anchors still land. */
 (function(){
+  var LEGACY={overview:'overview',milestones:'overview',work:'plan',map:'architecture',telemetry:'usage',journal:'journal',system:'system'};
+  var pages=[].slice.call(document.querySelectorAll('section.page'));
   var links=[].slice.call(document.querySelectorAll('#snav a'));
-  var secs=links.map(function(a){return document.querySelector(a.getAttribute('href'));});
-  function spy(){
-    var y=window.scrollY+130, on=0;
-    secs.forEach(function(s,i){ if(s && s.offsetTop<=y) on=i; });
-    links.forEach(function(a,i){ a.classList.toggle('on', i===on); });
+  function show(name){
+    var hit=false;
+    pages.forEach(function(p){ var on=p.getAttribute('data-page')===name; p.hidden=!on; if(on)hit=true; });
+    if(!hit){ name='overview'; pages.forEach(function(p){ p.hidden=p.getAttribute('data-page')!=='overview'; }); }
+    links.forEach(function(a){ a.classList.toggle('on', a.getAttribute('data-p')===name); });
+    return name;
   }
-  window.addEventListener('scroll', spy, {passive:true}); spy();
+  function focusEl(el){
+    if(!el) return;
+    var d=el; while(d){ if(d.tagName==='DETAILS') d.open=true; d=d.parentElement; }
+    el.classList.remove('flash'); void el.offsetWidth; el.classList.add('flash');
+    setTimeout(function(){ el.scrollIntoView({block:'start'}); window.scrollBy(0,-12); }, 30);
+  }
+  function route(){
+    var h=location.hash||'';
+    var m=h.match(/^#\\/([\\w-]+)(?:\\/(.*))?$/);
+    var page, arg=null;
+    if(m){ page=m[1]; arg=m[2]?decodeURIComponent(m[2]):null; }
+    else { page=LEGACY[h.replace(/^#/,'')]||'overview'; }
+    page=show(page);
+    if(page==='plan'){
+      if(window.forgePlan) window.forgePlan.setComp(arg&&arg.indexOf('c:')===0?arg.slice(2):null);
+      if(arg&&arg.indexOf('c:')!==0){
+        var el=document.getElementById('it-'+arg)||document.querySelector('details.sec.sub[data-m="'+(window.CSS&&CSS.escape?CSS.escape(arg):arg)+'"]');
+        focusEl(el); return;
+      }
+    }
+    if(page==='architecture'&&window.forgeArch){ window.forgeArch.draw(); if(arg) window.forgeArch.select(arg); }
+    window.scrollTo(0,0);
+  }
+  window.addEventListener('hashchange',route);
+  /* run after every script on the page has defined its hooks */
+  if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',route); else setTimeout(route,0);
+  window.addEventListener('load',function(){ if(window.forgeArch) window.forgeArch.draw(); });
+})();
+
+/* v0.19: the architecture drawing — cards are laid out by the generator; here we only
+   measure them and draw orthogonal arrows between them. */
+(function(){
+  var el=document.getElementById('archdata'); if(!el) return;
+  var D={}; try{ D=JSON.parse(el.textContent||'{}'); }catch(e){ return; }
+  var wrapEl=document.getElementById('archdiagram'), box=document.getElementById('archbox'), svg=document.getElementById('archsvg'), sel=document.getElementById('archsel');
+  var list=document.getElementById('archlist'), seg=document.getElementById('archseg');
+  var NS='http://www.w3.org/2000/svg';
+  function card(id){ return box.querySelector('.acard[data-c="'+id+'"]'); }
+  function esc(t){ return String(t==null?'':t).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+  function mk(tag,attrs){ var n=document.createElementNS(NS,tag); for(var k in attrs) n.setAttribute(k,attrs[k]); return n; }
+  function draw(){
+    if(!box||box.offsetParent===null) return;
+    var B=box.getBoundingClientRect();
+    svg.setAttribute('width',B.width); svg.setAttribute('height',B.height);
+    svg.innerHTML='';
+    var defs=mk('defs',{});
+    defs.appendChild((function(){ var m=mk('marker',{id:'ah',viewBox:'0 0 10 10',refX:'9',refY:'5',markerWidth:'7',markerHeight:'7',orient:'auto-start-reverse'}); m.appendChild(mk('path',{d:'M0,0 L10,5 L0,10 z',fill:'#6b7080'})); return m; })());
+    svg.appendChild(defs);
+    var R={}; [].forEach.call(box.querySelectorAll('.acard'),function(c){ var r=c.getBoundingClientRect(); R[c.getAttribute('data-c')]={x:r.left-B.left,y:r.top-B.top,w:r.width,h:r.height}; });
+    // spread arrow ports along each side so parallel arrows do not overlap
+    var ports={};
+    (D.edges||[]).forEach(function(e,i){
+      var a=R[e.from], b=R[e.to]; if(!a||!b) return;
+      var down=b.y>a.y+a.h/2, up=b.y+b.h<a.y+a.h/2;
+      e._sa=down?'b':up?'t':'b'; e._sb=down?'t':up?'b':'b'; e._same=!down&&!up;
+      (ports[e.from+e._sa]=ports[e.from+e._sa]||[]).push({e:e,end:'a',o:b});
+      (ports[e.to+e._sb]=ports[e.to+e._sb]||[]).push({e:e,end:'b',o:a});
+    });
+    Object.keys(ports).forEach(function(k){
+      var ps=ports[k]; ps.sort(function(p,q){ return (p.o.x+p.o.w/2)-(q.o.x+q.o.w/2) || (p.o.y-q.o.y); });
+      ps.forEach(function(p,i){ p.e['_f'+p.end]=(i+1)/(ps.length+1); });
+    });
+    // lane rects give each gap's top and bottom; arrows in a gap get evenly spaced tracks
+    var L={}; [].forEach.call(box.querySelectorAll('.lane'),function(l){ var r=l.getBoundingClientRect(); L[l.getAttribute('data-li')]={top:r.top-B.top,bottom:r.bottom-B.top}; });
+    function pt(r,side,f){ f=f==null?.5:(.3+.4*f);
+      if(side==='b') return [r.x+r.w*f, r.y+r.h]; if(side==='t') return [r.x+r.w*f, r.y];
+      if(side==='r') return [r.x+r.w, r.y+r.h*f]; return [r.x, r.y+r.h*f]; }
+    var byGap={};
+    (D.edges||[]).forEach(function(e){ var a=R[e.from], b=R[e.to]; if(!a||!b) return; e._s=pt(a,e._sa,e._fa); e._t=pt(b,e._sb,e._fb); if(e.g!=null)(byGap[e.g]=byGap[e.g]||[]).push(e); });
+    Object.keys(byGap).forEach(function(g){
+      var es=byGap[g], top=(L[g]||{}).bottom, bot=(L[+g+1]||{}).top; if(top==null||bot==null) return;
+      es.sort(function(p,q){ return Math.min(p._s[0],p._t[0])-Math.min(q._s[0],q._t[0]); });
+      var step=es.length>1?(bot-top-20)/(es.length-1):0;
+      es.forEach(function(e,i){ e._y=es.length>1?top+10+i*step:(top+bot)/2; });
+    });
+    var seen={};
+    (D.edges||[]).forEach(function(e){
+      if(!e._s) return;
+      var s=e._s, t=e._t, d, lx, ly, anchor='middle';
+      if(e._y!=null){
+        if(Math.abs(s[0]-t[0])<3){ d='M'+s[0]+','+s[1]+' L'+t[0]+','+t[1]; lx=s[0]+5; ly=e._y+4; anchor='start'; }
+        else { d='M'+s[0]+','+s[1]+' L'+s[0]+','+e._y+' L'+t[0]+','+e._y+' L'+t[0]+','+t[1]; lx=(s[0]+t[0])/2; ly=e._y-3; }
+      } else { /* same lane: under the cards, in the lane's bottom padding */ var yy=Math.max(s[1],t[1])+16; d='M'+s[0]+','+s[1]+' L'+s[0]+','+yy+' L'+t[0]+','+yy+' L'+t[0]+','+t[1]; lx=(s[0]+t[0])/2; ly=yy-3; }
+      var g=mk('g',{'class':'aedge'+(e.planned?' planned':'')+(e.confirmed?'':' draft'),'data-from':e.from,'data-to':e.to});
+      g.appendChild(mk('path',{d:d,fill:'none','marker-end':'url(#ah)'}));
+      /* one label per meaning: the same label into the same part, or out of the same part, is said once */
+      var k1=e.to+'|'+e.label, k2=e.from+'|'+e.label;
+      if(e.label&&!seen[k1]&&!seen[k2]){
+        seen[k1]=seen[k2]=1;
+        var tx=mk('text',{x:lx,y:ly,'text-anchor':anchor}); tx.textContent=e.label;
+        g.appendChild(tx);
+      }
+      svg.appendChild(g);
+    });
+    // label halos after layout so text stays readable over lines
+    [].forEach.call(svg.querySelectorAll('text'),function(tx){ try{ var bb=tx.getBBox(); var r=mk('rect',{x:bb.x-4,y:bb.y-1,width:bb.width+8,height:bb.height+2,rx:4,'class':'lbg'}); tx.parentNode.insertBefore(r,tx); }catch(e){} });
+  }
+  function select(id){
+    var p=D.parts[id]; if(!p) return;
+    [].forEach.call(box.querySelectorAll('.acard'),function(c){ c.classList.toggle('sel',c.getAttribute('data-c')===id); });
+    [].forEach.call(svg.querySelectorAll('.aedge'),function(g){ var on=g.getAttribute('data-from')===id||g.getAttribute('data-to')===id; g.classList.toggle('hl',on); });
+    var outs=(D.edges||[]).filter(function(e){return e.from===id;}).map(function(e){ return esc((D.parts[e.to]||{}).name||e.to)+(e.label?' <span class="mut">('+esc(e.label)+')</span>':'')+(e.planned?' <span class="mut">· planned</span>':''); });
+    var ins=(D.edges||[]).filter(function(e){return e.to===id;}).map(function(e){ return esc((D.parts[e.from]||{}).name||e.from)+(e.label?' <span class="mut">('+esc(e.label)+')</span>':''); });
+    var ev=(p.evidence||[]).map(function(v){ return '<code>'+esc(v.path)+'</code>'+(v.why?' <span class="mut">'+esc(v.why)+'</span>':''); });
+    sel.innerHTML='<h4>Selected · '+esc(p.name)+(p.confirmed?'':' <span class="warn">draft</span>')+'</h4>'+
+      '<div class="kv">'+
+      '<div class="row"><span class="k">Runs on</span><span class="vl">'+esc(p.runsOn)+' · '+esc(p.kind)+'</span></div>'+
+      (p.summary?'<div class="row"><span class="k">What</span><span class="vl">'+esc(p.summary)+'</span></div>':'')+
+      '<div class="row"><span class="k">Talks to</span><span class="vl">'+(outs.join(', ')||'<span class="mut">—</span>')+'</span></div>'+
+      '<div class="row"><span class="k">Called by</span><span class="vl">'+(ins.join(', ')||'<span class="mut">—</span>')+'</span></div>'+
+      '<div class="row"><span class="k">Items</span><span class="vl">'+p.done+'/'+p.live+' done'+(p.run?' · '+p.run+' running':'')+'</span></div>'+
+      (p.next?'<div class="row"><span class="k">Next</span><span class="vl"><a href="#/plan/'+encodeURIComponent(p.next)+'">'+esc(p.next)+'</a></span></div>':'')+
+      (p.screens?'<div class="row"><span class="k">Screens</span><span class="vl"><a href="#/screens" data-scr="'+esc(id)+'">'+p.screens+' screen(s)</a></span></div>':'')+
+      (ev.length?'<div class="row"><span class="k">Evidence</span><span class="vl">'+ev.join('<br>')+'</span></div>':'')+
+      '</div>'+(p.live?'<a class="docbtn selbtn" href="#/plan/c:'+encodeURIComponent(id)+'">Show its work items</a>':'');
+  }
+  document.addEventListener('click',function(e){
+    var c=e.target&&e.target.closest?e.target.closest('.acard,.alink'):null;
+    if(c){ var id=c.getAttribute('data-c'); if(location.hash!=='#/architecture/'+id) history.replaceState(null,'','#/architecture/'+encodeURIComponent(id)); select(id); return; }
+    var s=e.target&&e.target.closest?e.target.closest('a[data-scr]'):null;
+    if(s){ e.preventDefault(); location.hash='#/screens'; setTimeout(function(){ var g=document.getElementById('scr-'+s.getAttribute('data-scr')); if(g) g.scrollIntoView({block:'start'}); },40); }
+  });
+  if(seg) seg.addEventListener('click',function(e){
+    var b=e.target&&e.target.closest?e.target.closest('button'):null; if(!b) return;
+    var v=b.getAttribute('data-v');
+    [].forEach.call(seg.children,function(x){ x.classList.toggle('on',x===b); });
+    wrapEl.hidden=v!=='diagram'; list.hidden=v!=='list'; if(v==='diagram') draw();
+  });
+  var t=null; window.addEventListener('resize',function(){ clearTimeout(t); t=setTimeout(draw,120); });
+  window.forgeArch={draw:draw,select:select};
+  var fc=box.querySelector('.acard'); if(fc) select(fc.getAttribute('data-c'));
+})();
+
+(function(){
+  var f=document.getElementById('scrfilter'); if(!f) return;
+  f.addEventListener('input',function(){
+    var q=f.value.toLowerCase();
+    [].forEach.call(document.querySelectorAll('.sgroup'),function(g){
+      var n=0; [].forEach.call(g.querySelectorAll('.scard'),function(c){ var hit=!q||c.getAttribute('data-q').indexOf(q)>=0; c.style.display=hit?'':'none'; if(hit)n++; });
+      g.style.display=n?'':'none';
+    });
+  });
 })();
 </script>
 </body></html>`;
@@ -2041,7 +2957,8 @@ const FORGE_AUTHORITATIVE = ['forge/config.json', 'forge/state/work.json', 'forg
   'forge/state/trace.jsonl', 'forge/state/baseline.json', 'forge/state/usage-baseline.json',
   'forge/decisions.md', 'forge/discoveries.md', 'forge/briefs/', 'forge/changes/', 'forge/evidence/'];
 const FORGE_GENERATED = ['forge/dashboard.html', 'forge/state/usage.json', 'forge/state/usage-cache.json',
-  'forge/state/preflight.json', 'forge/state/session.json', 'forge/state/work.lock', 'forge/state/trace.jsonl.old'];
+  'forge/state/preflight.json', 'forge/state/session.json', 'forge/state/work.lock', 'forge/state/trace.jsonl.old',
+  'forge/state/upgrade.json', 'forge/state/backups/'];
 function isAuthoritative(rel) { return FORGE_AUTHORITATIVE.some(p => p.endsWith('/') ? rel.startsWith(p) : rel === p); }
 function isForgePath(rel) { return rel === 'forge' || rel.startsWith('forge/'); }
 // Append-only files must start with exactly what HEAD holds. Field incident: a working
@@ -2222,13 +3139,13 @@ const commands = {
             check(`verify.${k} runs`, r.exit === 0, r.exit === 0 ? 'green' : `exit ${r.exit} — record as pre-existing failure or fix before relying on this gate`, 'warning');
           }
         }
-        // v0.13: the project map is only honest when items are tagged
+        // v0.13: the architecture / screens views are only honest when items are tagged
         {
           const wPf = readJson(WORK_FILE, { items: {}, order: [] });
           const untaggedPf = wPf.order.filter(id => !wPf.items[id].component && wPf.items[id].status !== 'CANCELLED').length;
           if (wPf.order.length)
             check('component map', untaggedPf === 0,
-              untaggedPf ? `${untaggedPf} work item(s) not tagged to a component — the project map is incomplete (forge task update <id> --component <c>)` : 'all items tagged', 'warning');
+              untaggedPf ? `${untaggedPf} work item(s) not tagged to a screen, architecture part or tag — the dashboard cannot place them (forge task update <id> --component <c>)` : 'all items tagged', 'warning');
         }
         // v0.16.2: a milestone is named after the feature it enables
         {
@@ -2324,11 +3241,12 @@ const commands = {
       w.order.push(item.id);
       saveWork(w);
       // v0.10: auto-register unknown components so the map never lies by omission
+      // v0.19: an unknown tag becomes a plain tag — screens and architecture parts are declared on purpose
       if (w.items[item.id].component) {
-        const comps = readJson(COMPONENTS_FILE, { schema: 1, components: {} });
-        if (!comps.components[w.items[item.id].component]) {
-          comps.components[w.items[item.id].component] = { id: w.items[item.id].component, name: w.items[item.id].component, kind: 'unspecified', created: ts() };
-          writeJson(COMPONENTS_FILE, comps);
+        const comps = loadComps();
+        if (!tagRef(comps, w.items[item.id].component)) {
+          comps.tags[w.items[item.id].component] = { id: w.items[item.id].component, name: w.items[item.id].component, kind: 'unspecified', created: ts() };
+          saveComps(comps);
           regenDashboard();
         }
       }
@@ -2342,7 +3260,7 @@ const commands = {
           out(`MILESTONE-ORDER WARNING: '${item.id}' (${v.itemM}) depends on '${v.dep}', which sits in a LATER milestone (${v.depM}) — it cannot start until that gate. Move one of them.`);
       }
       if (!w.items[item.id].component)
-        out(`WARNING: '${item.id}' has no --component tag — the dashboard project map cannot place it. Tag it: forge task update ${item.id} --component <id>`);
+        out(`WARNING: '${item.id}' has no --component tag — the dashboard cannot place it on a screen or architecture part. Tag it: forge task update ${item.id} --component <id>`);
       for (const wmsg of itemShapeWarnings(w.items[item.id])) out(`ITEM-SHAPE WARNING: ${wmsg}`);
 
     } else if (sub === 'list') {
@@ -3081,35 +3999,335 @@ const commands = {
     out('Discovery recorded. If it invalidates planned work, update the work graph now (block/cancel/add items) — a logged discovery with unhandled consequences is a failure.');
   },
 
-  // -- components (v0.10) — the registry behind the dashboard's project map -----
+  // -- components (v0.10; v0.19 routes into architecture / screens / tags) --------
   component() {
     const sub = argv[1];
-    const comps = readJson(COMPONENTS_FILE, { schema: 1, components: {} });
+    const c = loadComps();
     if (sub === 'add' || sub === 'update') {
       const id = argv[2];
-      if (!id || id.startsWith('--')) die('Usage: forge component add|update <id> [--name "..."] [--kind frontend|backend|db|job|integration|...] [--route /path] [--mock spec/mocks/x.png] [--doc spec/02-experience.md#...]');
-      if (sub === 'add' && comps.components[id]) die(`Component '${id}' exists — use: forge component update ${id}`);
-      if (sub === 'update' && !comps.components[id]) die(`Unknown component '${id}'. See: forge component list`);
-      const c = comps.components[id] = Object.assign({ id, name: id, kind: 'unspecified', created: ts() }, comps.components[id]);
-      for (const k of ['name', 'kind', 'route', 'mock', 'doc']) if (opt(k) !== null) c[k] = opt(k);
-      c.updated = ts();
-      writeJson(COMPONENTS_FILE, comps);
+      if (!id || id.startsWith('--')) die('Usage: forge component add|update <id> [--name "..."] [--kind ...] [--route /path] [--mock spec/mocks/x.png] [--doc ...]\n(v0.19: prefer forge arch … for runtime parts and forge screen … for screens)');
+      const cur = tagRef(c, id);
+      if (sub === 'add' && cur) die(`'${id}' exists (${cur.type}) — use: forge component update ${id}`);
+      if (sub === 'update' && !cur) die(`Unknown '${id}'. See: forge arch list · forge screen list`);
+      const kind = opt('kind');
+      // where does it belong? an existing entry stays where it is; a new one is routed by what it describes
+      const type = cur ? cur.type
+        : (opt('mock') || opt('route') || kind === 'frontend' || kind === 'screen') ? 'screen'
+        : (kind && ARCH_KINDS.includes(kind)) ? 'component' : 'tag';
+      const table = type === 'screen' ? c.screens : type === 'component' ? c.components : c.tags;
+      const base = type === 'screen' ? { id, name: id, app: null, mock: null, route: null, doc: null, created: ts() }
+        : type === 'component' ? { id, name: id, kind: kind || 'backend', runsOn: null, summary: null, evidence: [], confirmed: false, source: 'human', created: ts() }
+        : { id, name: id, kind: kind || 'unspecified', created: ts() };
+      const r = table[id] = Object.assign(base, table[id]);
+      for (const k of ['name', 'route', 'mock', 'doc']) if (opt(k) !== null && (type === 'screen' || k === 'name' || k === 'doc')) r[k] = opt(k);
+      if (kind !== null && type !== 'screen') r.kind = kind;
+      r.updated = ts();
+      saveComps(c);
       regenDashboard();
-      out(`Component '${id}' ${sub === 'add' ? 'registered' : 'updated'} (${c.kind}${c.route ? ` · ${c.route}` : ''}). Tag work: forge task add ... --component ${id}`);
+      out(`'${id}' ${sub === 'add' ? 'registered' : 'updated'} as ${type === 'component' ? 'an architecture part' : type === 'screen' ? 'a screen' : 'a tag'}. Tag work: forge task add ... --component ${id}` +
+        (type === 'screen' && !r.app ? `\nAssign it to its app: forge screen update ${id} --app <architecture part>` : ''));
     } else if (sub === 'list') {
-      const ids = Object.keys(comps.components);
-      if (!ids.length) { out('No components registered. forge component add <id> --kind ... — or tag items with --component (auto-registers).'); return; }
       const w = loadWork();
-      for (const id of ids) {
-        const c = comps.components[id];
-        const items = w.order.filter(i => w.items[i].component === id);
-        const done = items.filter(i => w.items[i].status === 'DONE').length;
-        out(`  ${id} (${c.kind}${c.route ? ` · ${c.route}` : ''}) — ${done}/${items.length} items done${c.mock ? ' · mock ✓' : ''}`);
-      }
-    } else die('Usage: forge component add|update <id> [flags] | list');
+      const cnt = id => { const its = w.order.filter(i => w.items[i].component === id); return `${its.filter(i => w.items[i].status === 'DONE').length}/${its.length}`; };
+      out(`Architecture parts (${Object.keys(c.components).length}) — forge arch list for detail`);
+      for (const x of Object.values(c.components)) out(`  ${x.id} (${x.kind}${x.runsOn ? ` · ${x.runsOn}` : ''})${x.confirmed ? '' : ' · draft'} — ${cnt(x.id)} items`);
+      out(`Screens (${Object.keys(c.screens).length}) — forge screen list for detail`);
+      out(`Tags (${Object.keys(c.tags).length}): ${Object.values(c.tags).map(x => `${x.id} ${cnt(x.id)}`).join(' · ') || '—'}`);
+    } else die('Usage: forge component add|update <id> [flags] | list   (v0.19: forge arch … · forge screen …)');
   },
 
-  // -- session lock (v0.5) ------------------------------------------------------
+  // -- architecture (v0.19) — runtime parts, where they run, who talks to whom ----
+  arch() {
+    const sub = argv[1];
+    const c = loadComps();
+    const need = id => { if (!c.components[id]) die(`Unknown architecture part '${id}'. See: forge arch list`); return c.components[id]; };
+    const setFields = (x) => {
+      for (const [flagName, key] of [['name', 'name'], ['kind', 'kind'], ['runs-on', 'runsOn'], ['summary', 'summary'], ['doc', 'doc']])
+        if (opt(flagName) !== null) x[key] = opt(flagName) || null;
+      for (const e of optAll('evidence')) {
+        const [p, ...why] = String(e).split('::');
+        if (!x.evidence.some(v => v.path === p)) x.evidence.push({ path: p, why: why.join('::') || null });
+      }
+      if (flag('confirm')) { x.confirmed = true; x.confirmedTs = ts(); }
+      x.updated = ts();
+    };
+    if (sub === 'add' || sub === 'update') {
+      const id = argv[2];
+      if (!id || id.startsWith('--')) die('Usage: forge arch add|update <id> --name "Member app" --kind frontend|backend|db|auth|job|storage|hosting|integration --runs-on "Browser" [--summary "..."] [--evidence path::why]... [--confirm]');
+      if (sub === 'add' && tagRef(c, id)) die(`'${id}' already exists (${tagRef(c, id).type}). Use: forge arch update ${id}`);
+      if (sub === 'update') need(id);
+      const x = c.components[id] = c.components[id] || { id, name: id, kind: 'backend', runsOn: null, summary: null, evidence: [], confirmed: false, source: process.env.FORGE_UPGRADE ? 'agent' : 'human', created: ts() };
+      setFields(x);
+      if (x.kind && !ARCH_KINDS.includes(x.kind)) out(`Note: kind '${x.kind}' is not one of ${ARCH_KINDS.join(', ')} — it is drawn in the neutral colour.`);
+      saveComps(c); regenDashboard();
+      out(`Architecture part '${id}' ${sub === 'add' ? 'added' : 'updated'} — ${x.name} (${x.kind}${x.runsOn ? ` · runs on ${x.runsOn}` : ' · runs on: not set'})${x.confirmed ? ' · confirmed' : ' · draft'}`);
+    } else if (sub === 'link' || sub === 'unlink') {
+      const from = argv[2], to = argv[3];
+      if (!from || !to || from.startsWith('--') || to.startsWith('--')) die(`Usage: forge arch ${sub} <from> <to>${sub === 'link' ? ' --label "supabase-js · sign-in" [--planned] [--confirm]' : ''}`);
+      need(from); need(to);
+      const i = c.edges.findIndex(e => e.from === from && e.to === to);
+      if (sub === 'unlink') { if (i < 0) die(`No link ${from} → ${to}.`); c.edges.splice(i, 1); saveComps(c); regenDashboard(); out(`Unlinked ${from} → ${to}.`); return; }
+      const e = i >= 0 ? c.edges[i] : { from, to, label: null, planned: false, confirmed: false, source: process.env.FORGE_UPGRADE ? 'agent' : 'human', created: ts() };
+      if (opt('label') !== null) e.label = opt('label') || null;
+      if (flag('planned')) e.planned = true;
+      if (flag('built')) e.planned = false;
+      if (flag('confirm')) e.confirmed = true;
+      if (i < 0) c.edges.push(e);
+      saveComps(c); regenDashboard();
+      out(`${i < 0 ? 'Linked' : 'Updated'} ${from} → ${to}${e.label ? ` (${e.label})` : ''}${e.planned ? ' · planned' : ''}.`);
+    } else if (sub === 'confirm') {
+      const ids = flag('all') ? Object.keys(c.components) : argv.slice(2).filter(a => !a.startsWith('--'));
+      if (!ids.length) die('Usage: forge arch confirm <id>... | --all   (records that YOU checked the drawing against reality)');
+      for (const id of ids) { const x = need(id); x.confirmed = true; x.confirmedTs = ts(); }
+      for (const e of c.edges) if (ids.includes(e.from) && ids.includes(e.to)) e.confirmed = true;
+      saveComps(c); regenDashboard();
+      out(`Confirmed ${ids.length} part(s)${flag('all') ? ' and every link between them' : ' and the links among them'}.`);
+    } else if (sub === 'remove') {
+      const id = argv[2]; need(id);
+      const w = loadWork();
+      const tagged = w.order.filter(i => w.items[i].component === id);
+      if (tagged.length && !opt('reason')) die(`Refused: ${tagged.length} item(s) are tagged '${id}' (${tagged.slice(0, 4).join(', ')}…). Re-tag them first, or pass --reason to keep the tags as plain tags.`);
+      if (tagged.length) c.tags[id] = { id, name: c.components[id].name, kind: c.components[id].kind, created: ts() };
+      delete c.components[id];
+      c.edges = c.edges.filter(e => e.from !== id && e.to !== id);
+      for (const s of Object.values(c.screens)) if (s.app === id) s.app = null;
+      saveComps(c); regenDashboard();
+      out(`Removed architecture part '${id}' and its links.${tagged.length ? ' Its items keep the tag (now a plain tag).' : ''}`);
+    } else if (sub === 'lanes') {
+      const v = argv[2];
+      if (!v || v.startsWith('--')) { out(`Lane order: ${laneOrder(c).join(' → ') || '—'}${c.lanes ? ' (pinned)' : ' (derived: Browser first, external services last)'}`); return; }
+      c.lanes = v === 'auto' ? null : v.split(',').map(s => s.trim()).filter(Boolean);
+      saveComps(c); regenDashboard();
+      out(`Lane order ${c.lanes ? 'pinned' : 'derived'}: ${laneOrder(c).join(' → ')}`);
+    } else if (sub === 'scan') {
+      // in a dry run the state is a throwaway copy but the code to read is the real repo (read-only)
+      const res = archScan(process.env.FORGE_SCAN_ROOT || PROJECT);
+      if (flag('json')) { out(JSON.stringify(res, null, 2)); return; }
+      out(`# Architecture scan — evidence from the repo (${res.scanned} files read, zero tokens)`);
+      out(`A proposal, not a finding: names and splits are for the agent pass; confirmation is yours.\n`);
+      const byLane = {};
+      for (const x of res.components) (byLane[x.runsOn] = byLane[x.runsOn] || []).push(x);
+      const tmp = emptyComps(); for (const x of res.components) tmp.components[x.id] = x;
+      for (const lane of laneOrder(tmp)) {
+        out(`${lane}`);
+        for (const x of byLane[lane] || []) out(`  ${x.id} — ${x.name} (${x.kind})${x.confidence !== 'high' ? ` · ${x.confidence} confidence` : ''}\n      ${x.evidence.slice(0, 3).map(e => `${e.path}${e.why ? ` — ${e.why}` : ''}`).join('\n      ')}`);
+      }
+      if (res.edges.length) { out('\nLinks'); for (const e of res.edges) out(`  ${e.from} → ${e.to}${e.label ? ` (${e.label})` : ''}${e.confidence !== 'high' ? ` · ${e.confidence}` : ''}`); }
+      if (res.notes.length) { out('\nNotes'); for (const n of res.notes) out(`  ${n}`); }
+      if (!flag('write')) { out(`\nNothing written. Record as drafts: forge arch scan --write`); return; }
+      let added = 0, merged = 0;
+      for (const x of res.components) {
+        const ex = c.components[x.id];
+        if (ex) { for (const ev of x.evidence) if (!ex.evidence.some(v => v.path === ev.path && v.why === ev.why)) { ex.evidence.push(ev); merged++; } if (!ex.runsOn) ex.runsOn = x.runsOn; continue; }
+        if (c.screens[x.id] || c.tags[x.id]) continue; // never shadow an existing screen/tag id
+        c.components[x.id] = { id: x.id, name: x.name, kind: x.kind, runsOn: x.runsOn, summary: null, evidence: x.evidence, confirmed: false, source: 'scan', confidence: x.confidence, created: ts(), updated: ts() };
+        added++;
+      }
+      let linked = 0;
+      for (const e of res.edges) if (c.components[e.from] && c.components[e.to] && !c.edges.some(y => y.from === e.from && y.to === e.to)) { c.edges.push({ from: e.from, to: e.to, label: e.label, planned: false, confirmed: false, source: 'scan', created: ts() }); linked++; }
+      saveComps(c); regenDashboard();
+      out(`\nWritten as drafts: ${added} new part(s), ${linked} link(s), ${merged} evidence line(s) merged into existing parts. Confirmed parts were not changed.` +
+        `\nNext: name, split and link them (forge arch update/link), assign screens (forge screen assign <app> …), then: forge arch confirm --all`);
+    } else if (sub === 'list' || !sub) {
+      const w = loadWork();
+      if (flag('json')) { out(JSON.stringify(c, null, 2)); return; }
+      const parts = Object.values(c.components);
+      if (!parts.length) { out('No architecture recorded. Draft it from the repo: forge arch scan (then --write).'); return; }
+      const cnt = id => { const its = w.order.filter(i => archOfTag(c, w.items[i].component) === id); return `${its.filter(i => w.items[i].status === 'DONE').length}/${its.length}`; };
+      for (const lane of laneOrder(c)) {
+        out(lane);
+        for (const x of parts.filter(p => (p.runsOn || 'Unplaced') === lane)) {
+          const outE = c.edges.filter(e => e.from === x.id).map(e => `${e.to}${e.label ? ` (${e.label})` : ''}${e.planned ? ' planned' : ''}`);
+          const scr = Object.values(c.screens).filter(s => s.app === x.id).length;
+          out(`  ${x.confirmed ? '✓' : '·'} ${x.id} — ${x.name} (${x.kind}) · ${cnt(x.id)} items${scr ? ` · ${scr} screen(s)` : ''}${outE.length ? `\n      → ${outE.join(', ')}` : ''}`);
+        }
+      }
+      out(`\n✓ confirmed · draft. ${parts.filter(x => !x.confirmed).length} draft part(s).`);
+    } else die('Usage: forge arch scan [--write|--json] | list [--json] | add|update <id> [flags] | link|unlink <from> <to> | confirm <id>…|--all | remove <id> | lanes [a,b,…|auto]');
+  },
+
+  // -- screens (v0.19) — UI screens and their mocks, each belonging to an app -----
+  screen() {
+    const sub = argv[1];
+    const c = loadComps();
+    if (sub === 'add' || sub === 'update') {
+      const id = argv[2];
+      if (!id || id.startsWith('--')) die('Usage: forge screen add|update <id> [--name "..."] [--app <architecture part>] [--mock spec/mocks/x.png] [--route /path] [--doc ...]');
+      if (sub === 'add' && tagRef(c, id)) die(`'${id}' already exists (${tagRef(c, id).type}). Use: forge screen update ${id}`);
+      if (sub === 'update' && !c.screens[id]) die(`Unknown screen '${id}'. See: forge screen list`);
+      const s = c.screens[id] = c.screens[id] || { id, name: id, app: null, mock: null, route: null, doc: null, created: ts() };
+      for (const k of ['name', 'mock', 'route', 'doc']) if (opt(k) !== null) s[k] = opt(k) || null;
+      if (opt('app') !== null) {
+        const a = opt('app') === 'none' ? null : (opt('app') || null);
+        if (a && !c.components[a]) die(`Unknown app '${a}' — screens belong to an architecture part (or --app none for a standalone page such as a journey map). See: forge arch list`);
+        s.app = a; s.standalone = opt('app') === 'none';
+      }
+      s.updated = ts();
+      saveComps(c); regenDashboard();
+      out(`Screen '${id}' ${sub === 'add' ? 'added' : 'updated'}${s.app ? ` — in ${c.components[s.app].name}` : ' — not assigned to an app yet'}.`);
+    } else if (sub === 'assign') {
+      const app = argv[2];
+      if (!app || app.startsWith('--')) die('Usage: forge screen assign <app> <screen>... | --match "<regex on id or name>"');
+      if (app !== 'none' && !c.components[app]) die(`Unknown app '${app}'. See: forge arch list`);
+      let ids = argv.slice(3).filter(a => !a.startsWith('--') && a !== opt('match'));
+      if (opt('match')) { let re; try { re = new RegExp(opt('match'), 'i'); } catch (e) { die(`Bad --match: ${e.message}`); } ids = ids.concat(Object.values(c.screens).filter(s => re.test(s.id) || re.test(s.name || '')).map(s => s.id)); }
+      ids = [...new Set(ids)];
+      const unknown = ids.filter(i => !c.screens[i]);
+      if (unknown.length) die(`Unknown screen(s): ${unknown.join(', ')} — nothing assigned.`);
+      if (!ids.length) die('No screens matched — nothing assigned.');
+      for (const i of ids) { c.screens[i].app = app === 'none' ? null : app; c.screens[i].standalone = app === 'none'; c.screens[i].updated = ts(); }
+      saveComps(c); regenDashboard();
+      out(`${ids.length} screen(s) → ${app === 'none' ? 'standalone (in no app, on purpose)' : c.components[app].name}: ${ids.slice(0, 10).join(', ')}${ids.length > 10 ? '…' : ''}`);
+    } else if (sub === 'list' || !sub) {
+      const w = loadWork();
+      const all = Object.values(c.screens);
+      if (!all.length) { out('No screens registered.'); return; }
+      const groups = {};
+      for (const s of all) (groups[s.app || ''] = groups[s.app || ''] || []).push(s);
+      for (const [app, ss] of Object.entries(groups).sort((a, b) => (a[0] ? 0 : 1) - (b[0] ? 0 : 1))) {
+        out(`${app ? `${c.components[app] ? c.components[app].name : app} (${app})` : 'Not assigned to an app'} — ${ss.length}`);
+        for (const s of ss) { const its = w.order.filter(i => w.items[i].component === s.id); out(`  ${s.id}${s.name && s.name !== s.id ? ` — ${s.name}` : ''}${s.route ? ` · ${s.route}` : ''}${s.mock ? ' · mock' : ''} · ${its.filter(i => w.items[i].status === 'DONE').length}/${its.length} items`); }
+      }
+    } else die('Usage: forge screen add|update <id> [flags] | assign <app> <id>…|--match re | list');
+  },
+
+  // -- upgrade (v0.19) — bring this plan to the installed Forge's standards --------
+  upgrade() {
+    const sub = argv[1] && !argv[1].startsWith('--') ? argv[1] : 'status';
+    const scriptArg = () => {
+      const s = argv[2];
+      if (!s || s.startsWith('--')) die(`Usage: forge upgrade ${sub} forge/changes/<date>-upgrade-<step>.sh`);
+      const abs = path.resolve(PROJECT, s);
+      if (!fs.existsSync(abs)) die(`No such script: ${s}`);
+      return { abs, rel: path.relative(PROJECT, abs).split(path.sep).join('/'), text: fs.readFileSync(abs, 'utf8') };
+    };
+    if (sub === 'status') {
+      const st = upgradeStatus();
+      if (flag('json')) { out(JSON.stringify({ forge: VERSION, steps: st }, null, 2)); return; }
+      const met = st.filter(s => s.done).length;
+      out(`# Forge upgrade — plan standards of Forge v${VERSION}: ${met}/${st.length} met`);
+      for (const s of st) {
+        out(`  ${s.done ? '✓' : s.kind === 'auto' ? '✗' : '!'} ${s.id} (since ${s.since}, ${s.kind === 'auto' ? 'automatic' : 'needs judgement'}) — ${s.title}${s.accepted ? ` · accepted as-is: ${s.accepted.reason}` : ''}`);
+        for (const f of s.findings) out(`      - ${f}`);
+      }
+      const autoLeft = st.filter(s => !s.done && s.kind === 'auto');
+      const revLeft = st.filter(s => !s.done && s.kind === 'review');
+      if (!autoLeft.length && !revLeft.length) { out('\nThis plan meets every standard of the installed Forge.'); return; }
+      out('\nNext:');
+      if (autoLeft.length) out(`  forge upgrade apply   — ${autoLeft.length} automatic step(s); state is backed up first`);
+      for (const s of revLeft) out(`  ${s.id}: ${s.how}\n     → the agent writes forge/changes/<date>-upgrade-${s.id}.sh; you review it with: forge upgrade dry-run <script>; then: forge upgrade run <script>\n     → or keep the plan as it is: forge upgrade accept ${s.id} --reason "..."`);
+      return;
+    }
+    if (sub === 'apply') {
+      const st = upgradeStatus().filter(s => !s.done && s.kind === 'auto');
+      if (!st.length) { out('No automatic steps pending. forge upgrade shows what is left.'); return; }
+      const backup = backupState('apply');
+      const w = loadWork();
+      for (const s of st) UPGRADE_STEPS.find(x => x.id === s.id).apply({ w });
+      (w.upgrade = w.upgrade || { history: [], accepted: {} }).history = (w.upgrade.history || []).concat([{ ts: ts(), kind: 'apply', steps: st.map(s => s.id), backup, forge: VERSION }]);
+      saveWork(w);
+      w.upgrade.history[w.upgrade.history.length - 1].postState = stateSha();
+      writeJson(WORK_FILE, w);
+      traceEvent({ outcome: 'upgrade-apply', steps: st.map(s => s.id), backup });
+      out(`Applied ${st.length} automatic step(s): ${st.map(s => s.id).join(', ')}. Backup: ${backup} (forge upgrade revert restores it).`);
+      const left = upgradeStatus().filter(s => !s.done);
+      if (left.length) out(`Still open (needs judgement): ${left.map(s => s.id).join(', ')} — forge upgrade shows how.`);
+      return;
+    }
+    if (sub === 'accept') {
+      const id = argv[2]; const s = UPGRADE_STEPS.find(x => x.id === id);
+      if (!s) die(`Unknown step '${id}'. Steps: ${UPGRADE_STEPS.map(x => x.id).join(', ')}`);
+      if (s.kind === 'auto') die(`'${id}' is automatic — apply it (forge upgrade apply); there is nothing to judge.`);
+      if (!opt('reason')) die('Refused: accepting a step as-is needs --reason "..." — it is recorded as your decision.');
+      const w = loadWork();
+      w.upgrade = w.upgrade || { history: [], accepted: {} };
+      w.upgrade.accepted = Object.assign({}, w.upgrade.accepted, { [id]: { ts: ts(), reason: opt('reason'), forge: VERSION } });
+      saveWork(w);
+      appendMd(DECISIONS_FILE, '# Decisions log (append-only, via forge CLI)', `\n### ${ts()} — upgrade: keep '${id}' as it is\n- Authority: human\n- Decision: the plan stays as it is for the '${id}' standard\n- Why: ${opt('reason')}\n`);
+      out(`Recorded: '${id}' accepted as-is.`);
+      return;
+    }
+    if (sub === 'dry-run') {
+      const s = scriptArg();
+      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-upgrade-'));
+      try {
+        fs.mkdirSync(path.join(tmp, 'forge', 'state'), { recursive: true });
+        for (const f of [CONFIG_FILE, WORK_FILE, COMPONENTS_FILE, DECISIONS_FILE, DISCOVERIES_FILE])
+          if (fs.existsSync(f)) fs.copyFileSync(f, path.join(tmp, path.relative(PROJECT, f)));
+        const before = planShape(normalizeWorkForShape(readJson(WORK_FILE, { items: {}, order: [] })), loadComps());
+        const r = runChangeScript(s.abs, tmp);
+        const wAfter = readJson(path.join(tmp, 'forge', 'state', 'work.json'), { items: {}, order: [] });
+        const cAfter = normalizeComps(readJson(path.join(tmp, 'forge', 'state', 'components.json'), null));
+        const after = planShape(normalizeWorkForShape(wAfter), cAfter);
+        const d = diffShape(before, after);
+        out(`# Dry run of ${s.rel} on a throwaway copy of this project's state`);
+        out(`Script exit: ${r.code}${r.code === 0 ? ' (ok)' : ' — FAILED'}`);
+        if (r.out) out('\n--- script output ---\n' + r.out.split('\n').slice(-60).join('\n') + '\n---------------------');
+        out('\nWhat would change:');
+        out(d.lines.length ? d.lines.map(l => '  ' + l).join('\n') : '  nothing');
+        if (d.danger.length) out('\n⚠ Touches work history (never expected from an upgrade):\n' + d.danger.map(l => '  ' + l).join('\n'));
+        const ok = r.code === 0 && !d.danger.length;
+        const rec = readJson(UPGRADE_FILE, { dryRuns: [] });
+        rec.dryRuns = (rec.dryRuns || []).filter(x => x.script !== s.rel).concat([{ script: s.rel, scriptSha: sha(s.text), stateSha: stateSha(), ok, ts: ts() }]).slice(-20);
+        writeJson(UPGRADE_FILE, rec);
+        out(ok ? `\nLooks safe. Apply it for real: forge upgrade run ${s.rel}` : `\nNot applicable as it stands — fix the script and dry-run again.`);
+        if (!ok) process.exitCode = 1;
+      } finally { try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (_) { } }
+      return;
+    }
+    if (sub === 'run') {
+      const s = scriptArg();
+      const rec = readJson(UPGRADE_FILE, { dryRuns: [] });
+      const dr = (rec.dryRuns || []).find(x => x.script === s.rel);
+      if (!dr || dr.scriptSha !== sha(s.text)) die(`Refused: dry-run this exact script first — forge upgrade dry-run ${s.rel}`);
+      if (!dr.ok) die(`Refused: the last dry-run of this script failed or touched work history. Fix it and dry-run again.`);
+      if (dr.stateSha !== stateSha() && !flag('force')) die(`Refused: the plan changed since the dry-run (${dr.ts}). Dry-run again so what you reviewed is what runs.`);
+      const backup = backupState(path.basename(s.rel, '.sh'));
+      const r = runChangeScript(s.abs, PROJECT);
+      out(r.out);
+      acquireWorkLock();
+      const w = readJson(WORK_FILE, { items: {}, order: [] });
+      const step = (s.text.match(/^#\s*forge-upgrade-step:\s*([\w-]+)/m) || [])[1] || null;
+      w.upgrade = w.upgrade || { history: [], accepted: {} };
+      w.upgrade.history = (w.upgrade.history || []).concat([{ ts: ts(), kind: 'run', script: s.rel, step, ok: r.code === 0, backup, forge: VERSION }]);
+      writeJson(WORK_FILE, w);
+      w.upgrade.history[w.upgrade.history.length - 1].postState = stateSha();
+      writeJson(WORK_FILE, w);
+      regenDashboard();
+      traceEvent({ outcome: r.code === 0 ? 'upgrade-run' : 'upgrade-run-failed', script: s.rel, step, backup });
+      appendMd(DECISIONS_FILE, '# Decisions log (append-only, via forge CLI)', `\n### ${ts()} — upgrade${step ? ` '${step}'` : ''}: ${s.rel}\n- Authority: human\n- Decision: applied the reviewed change script ${s.rel}${r.code === 0 ? '' : ' (it FAILED part-way)'}\n- Why: bring the plan to the standards of Forge v${VERSION}; backup ${backup}\n`);
+      if (r.code !== 0) die(`\nThe script failed part-way (exit ${r.code}). State is partly changed. Restore it: forge upgrade revert`);
+      out(`\nApplied. Backup: ${backup} — forge upgrade revert restores it while nothing else has changed.`);
+      const left = upgradeStatus().filter(x => !x.done);
+      out(left.length ? `Still open: ${left.map(x => x.id).join(', ')} — forge upgrade` : 'This plan now meets every standard of the installed Forge.');
+      return;
+    }
+    if (sub === 'revert') {
+      const w = readJson(WORK_FILE, { items: {}, order: [] });
+      const hist = ((w.upgrade || {}).history || []).filter(h => h.backup && h.kind !== 'revert');
+      const last = hist[hist.length - 1];
+      if (!last) die('Nothing to revert — no upgrade with a backup is recorded.');
+      if (last.postState && last.postState !== stateSha() && !flag('force'))
+        die(`Refused: the plan changed after that upgrade (${last.ts}); reverting would silently drop those changes too.\nInspect with forge upgrade, or pass --force to restore ${last.backup} anyway.`);
+      acquireWorkLock();
+      const bdir = path.join(PROJECT, last.backup);
+      for (const f of [WORK_FILE, COMPONENTS_FILE, CONFIG_FILE]) {
+        const b = path.join(bdir, path.basename(f));
+        if (fs.existsSync(b)) fs.copyFileSync(b, f);
+        else if (f === COMPONENTS_FILE && fs.existsSync(f)) fs.unlinkSync(f); // it did not exist before
+      }
+      const w2 = readJson(WORK_FILE, { items: {}, order: [] });
+      w2.upgrade = w2.upgrade || { history: [], accepted: {} };
+      w2.upgrade.history = (w2.upgrade.history || []).concat([{ ts: ts(), kind: 'revert', of: last.script || last.steps, backup: last.backup, forge: VERSION }]);
+      writeJson(WORK_FILE, w2);
+      regenDashboard();
+      traceEvent({ outcome: 'upgrade-revert', backup: last.backup });
+      out(`Restored ${last.backup} (the state before ${last.script || 'upgrade apply'}).`);
+      return;
+    }
+    die('Usage: forge upgrade [status] [--json] | apply | accept <step> --reason "..." | dry-run <script> | run <script> | revert [--force]');
+  },
+
   session() {
     const sub = argv[1];
     const l = loadLock();
@@ -3274,6 +4492,9 @@ const commands = {
           const st2 = staleStateProblems();
           if (st2.length) check('append-only history', false, st2.join(' | '), true);
         } catch (_) { }
+        // v0.19: plan standards of this Forge version
+        try { const us = upgradeStatus(); const open = us.filter(x => !x.done);
+          check('plan standards', !open.length, open.length ? `${us.length - open.length}/${us.length} met — open: ${open.map(x => x.id).join(', ')} (forge upgrade)` : `${us.length}/${us.length} met`, true); } catch (_) { }
         const l = loadLock();
         if (inProg.length && (!l || l.released || !lockFresh(l)))
           check('orphaned work', false, `${inProg.join(', ')} IN_PROGRESS but no active orchestrator lock — a session likely died mid-item; audit before dispatching`, true);
@@ -4038,6 +5259,9 @@ const commands = {
           } else {
             ns = 'The work graph is empty or nothing is startable. Review the spec/plan with the user and create or unblock work items (forge task add / update).';
           }
+          // v0.19: a plan behind the installed Forge's standards is mentioned once — never acted on unasked
+          try { const openU = upgradeStatus().filter(x => !x.done);
+            if (openU.length) ns += `\n\nPlan standards: ${openU.length} open for Forge v${VERSION} (${openU.map(x => x.id).join(', ')}). Mention it to the user in one line after the next step ("forge upgrade shows what a newer Forge would reshape"); automatic steps are safe to apply between items, judgement steps only with their go.`; } catch (_) { }
           parts.push('## YOUR NEXT STEP (tell the user this in plain language, first thing)\n' + ns +
             '\n\n📊 Remind the user when useful: `forge/dashboard.html` (open in a browser) is the visual picture of the whole project — progress, milestones, components, telemetry. It updates itself.');
         } catch (_) { /* guidance is best-effort; never break session start */ }
@@ -4301,7 +5525,21 @@ const commands = {
                                          The dashboard's token panel refreshes ITSELF on every state
                                          change (incremental: only new transcript bytes are read), so
                                          running this is optional. --rescan rebuilds from scratch.
-  component add|update <id> ... | list   project-map registry (kind/route/mock/doc); items tag via task --component
+  arch scan [--write|--json]             v0.19: draft the architecture from the repo — manifests, platform config,
+                                         function folders, env var NAMES, SDK imports (zero tokens; proposes only)
+  arch add|update <id> --name .. --kind frontend|backend|db|auth|job|storage|hosting|integration
+       --runs-on "<lane>" [--summary ..] [--evidence path::why] [--confirm]
+  arch link|unlink <from> <to> [--label ..] [--planned]  ·  arch confirm <id>…|--all  ·  arch remove <id>
+  arch list [--json] | lanes [a,b,…|auto]  lanes: Browser first, external services last unless pinned
+  screen add|update <id> [--name ..] [--app <part>] [--mock ..] [--route ..]  ·  screen assign <app> <id>…|--match re
+  screen list                            screens and mocks, grouped by the app they belong to
+  component add|update <id> ... | list   legacy entry point — routed to a screen, a part or a plain tag;
+                                         items tag via task --component (screen, part or tag)
+  upgrade [--json]                       v0.19: which plan standards of this Forge the project meets
+  upgrade apply                          run the automatic steps (state backed up first)
+  upgrade dry-run <script> | run <script>  judgement steps: a reviewed change script in forge/changes/,
+                                         dry-run on a throwaway copy first; run refuses anything else
+  upgrade accept <step> --reason ..  ·  upgrade revert [--force]
   trace [--refusals|--hooks|--last N]    flight recorder: every CLI call and hook decision (FORGE_DEBUG=1 = verbose)
   doctor                                 install/state self-check: versions, cache, hooks, lock, orphaned work
   stats                                  process metrics from the work graph: first-pass rate, retries,

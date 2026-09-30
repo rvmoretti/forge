@@ -82,3 +82,36 @@ Define it once as `$FORGE` and use it for EVERY state change.
    added/changed/cancelled, mocks approved/replaced, decisions recorded — and the
    note that the next build session picks all of this up automatically at session
    start.
+
+## Upgrade mode — bring an older plan to the installed Forge's standards
+
+Use when the user asks to upgrade / refactor / modernise the plan, or `$FORGE upgrade`
+shows open steps. Same safety gates as above (between build sessions).
+
+1. `$FORGE upgrade` (or `--json`). Run the automatic steps first:
+   `$FORGE upgrade apply` — state is backed up, nothing needs judgement.
+2. For each open **judgement** step write ONE change script,
+   `forge/changes/<YYYY-MM-DD>-upgrade-<step>.sh`, plus a sibling `.md` that says in
+   plain words what changes, why, and what deliberately stays. Exact header:
+   ```bash
+   #!/usr/bin/env bash
+   # forge-upgrade-step: <step>
+   set -euo pipefail
+   forge() { node "${FORGE_JS:?run through: forge upgrade dry-run|run <this file>}" "$@"; }
+   ```
+   Rules: forge commands only (no git, no file edits); re-cut, reorder and re-home
+   only UNSTARTED work — started milestones may be renamed or given a release, never
+   re-cut; no `task start/done/verify/fail` (the dry run flags any history change);
+   record each material choice inside the script with `forge decision add .. --authority forge`.
+   - `feature-milestones`: milestone names say what a user can do; no layer names,
+     no version prefixes (the release carries the version); releases MVP / V1 / V2 …
+     with every milestone in one; task order dependency-first (`task move`).
+   - `architecture`: the commands from forge-brownfield §8 step 2 (scan, split,
+     name, link, assign screens) — confirmation stays a separate step after the run.
+3. `$FORGE upgrade dry-run <script>` runs it on a throwaway copy. Show the user the
+   "What would change" block verbatim, with the `.md`. Fix and dry-run again until it
+   is clean and they agree.
+4. On their go: `$FORGE upgrade run <script>` (refused unless this exact script was
+   dry-run against the current plan). To keep the plan as it is for a step:
+   `$FORGE upgrade accept <step> --reason ".."`.
+5. `$FORGE upgrade revert` restores the backup while nothing else has changed since.

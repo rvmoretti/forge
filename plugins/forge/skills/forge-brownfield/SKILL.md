@@ -179,8 +179,9 @@ arrives from the code; the plan is the gap between them.
    the graph at cut time** — later-milestone items as thin items (id,
    title, objective, milestone, deps; criteria and scope via `task update`
    when their milestone approaches). A backlog parked in a document is a
-   spec-drift bug. Seed the component registry first (`forge component add`
-   per subsystem the goals touch) so every item can be tagged. No
+   spec-drift bug. Draft the architecture first (§8) and register the
+   screens the goals touch (`forge screen add <id> --app <part> --mock ..`) so
+   every item can be tagged. No
    "foundation" milestone: groundwork goes inside the first feature that
    needs it. Two defaults to propose:
    the walking skeleton among the MISSING features first (integration risk
@@ -195,3 +196,37 @@ arrives from the code; the plan is the gap between them.
 
 The fork is about intake, not rigor: Mode B changes how intent is gathered,
 never which gates apply.
+
+## 8. Architecture draft (new brownfield projects, and the `forge upgrade` step `architecture`)
+
+The dashboard's Architecture page draws what `forge/state/components.json` says:
+the runtime parts, where each runs (lanes), and who talks to whom. Draft it from
+the repo in three passes — evidence, naming, confirmation — and never skip the last.
+
+1. **Evidence (zero tokens).** `forge arch scan` reads manifests, platform config
+   (wrangler/vercel/netlify/fly/compose, `supabase/`), function folders, env var
+   NAMES and known SDK imports, and prints proposed parts, links and confidence.
+   `forge arch scan --write` records them as drafts (never over confirmed parts).
+2. **Naming and splitting (one `forge-explorer` dispatch, Sonnet).** Brief it with
+   the scan output, `forge arch list --json`, `forge screen list`, and the route /
+   role-gate files. It returns ONLY forge commands, no edits:
+   - split an app that serves several audiences from one bundle into one part per
+     audience (member / staff / admin …), with `--evidence <route dir>::why`;
+   - names are what the part is to a person (`Member app`, `Postgres · RLS · RPCs`),
+     `--summary` in a few words of what it holds;
+   - `--runs-on` is the lane: `Browser`, the hosting provider, the platform
+     (`Supabase`, `Docker Compose` …), `External services`;
+   - links carry a short label of what flows (`supabase-js`, `webhook`,
+     `service role`); integrations the plan names but the code does not have yet
+     are `--planned`;
+   - low-confidence hits that are not runtime parts are removed with `--reason`;
+   - every screen is placed: `forge screen assign <app> --match '<regex>'`.
+3. **Confirmation (the user's, never yours).** Show the Architecture page; fix what
+   they correct (`forge arch update / link / unlink / remove`); then
+   `forge arch confirm --all`. A draft part is drawn dashed until then.
+
+In an upgrade the commands from step 2 go into the change script
+(`forge/changes/<date>-upgrade-architecture.sh`, see forge-roadmap-review "Upgrade
+mode") so the user sees a dry run before anything changes; confirmation stays a
+separate, explicit step after the run.
+
