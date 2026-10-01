@@ -113,6 +113,7 @@ const MUTATING = (() => {
   if (c === 'arch') return ['add', 'update', 'link', 'unlink', 'confirm', 'remove', 'lanes'].includes(s) || (s === 'scan' && process.argv.includes('--write'));
   if (c === 'screen') return ['add', 'update', 'assign'].includes(s);
   if (c === 'upgrade') return ['apply', 'accept'].includes(s);
+  if (c === 'autopilot') return ['on', 'off'].includes(s);
   return false;
 })();
 function pidAlive(pid) { try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; } }
@@ -1094,6 +1095,76 @@ function runChangeScript(script, cwd) {
   return { code: r.status, out: ((r.stdout || '') + (r.stderr || '')).trim() };
 }
 
+// ============================================================================
+// v0.20: autopilot — keep building between tasks of a milestone, stop only for a human
+// ----------------------------------------------------------------------------
+// A session cannot clear its own context (no hook or model action triggers /clear),
+// and it does not need to: every task already runs in fresh worker contexts, the
+// orchestrator's thread is compacted by Claude Code when it fills, and Forge's state
+// lives on disk. What stops the loop today is the turn ending after each task. With
+// autopilot on, the Stop hook refuses that ending while the next task of the SAME
+// milestone is ready, and lets the turn end only for a human: the milestone is ready
+// for testing, a task is blocked on a question, a task needs escalation, nothing is
+// startable, a run limit is reached, or no progress was made since the last nudge.
+// ============================================================================
+const AUTOPILOT_FILE = path.join(STATE, 'autopilot.json'); // run state (generated, not committed)
+function autopilotCfg(cfg) {
+  const o = ((cfg || {}).options) || {};
+  return { on: o.autopilot === 'on', maxItems: parseInt(o.autopilotMaxItems, 10) || 0, maxHours: parseFloat(o.autopilotMaxHours) || 0 };
+}
+function progressKey(w) {
+  return sha(w.order.map(id => { const t = w.items[id]; return `${id}:${t.status}:${(t.attempts || []).length}:${(t.verifications || []).length}`; }).join('|'));
+}
+function doneCount(w) { return w.order.filter(id => w.items[id].status === 'DONE').length; }
+// what autopilot does now: { go:true, next } or { go:false, kind, reason, ask }
+function autopilotDecision(w, cfg, run) {
+  const ap = autopilotCfg(cfg);
+  const L = (() => { try { return computeLabels(w); } catch (_) { return { item: {}, milestone: {} }; } })();
+  const lab = id => `${L.item[id] ? L.item[id] + ' ' : ''}${id}`;
+  const blocked = w.order.filter(id => w.items[id].status === 'BLOCKED');
+  if (blocked.length) {
+    const t = w.items[blocked[0]];
+    return { go: false, kind: 'question', reason: `${lab(t.id)} is blocked: ${t.blockReason || 'no reason recorded'}`,
+      ask: `Ask the user the exact question behind ${t.id} (one question, the options you see, your recommendation). When they answer: forge task unblock / update, then continue.` };
+  }
+  const esc = w.order.filter(id => { const t = w.items[id]; return t.status === 'TODO' && (t.attempts || []).filter(a => a.outcome === 'failed').length >= 2; });
+  if (esc.length) return { go: false, kind: 'escalation', reason: `${lab(esc[0])} failed twice — a third attempt needs an escalation decision`,
+    ask: `Tell the user what failed twice and the escalation you propose (stronger model, split the item, change the approach); wait for their go.` };
+  // a finished milestone whose gate is not approved yet is where the human comes in — check it before looking ahead
+  for (const m of milestoneSeq(w)) {
+    if ((((w.gates || {})[m]) || {}).approved) continue;
+    if (milestoneComplete(w, m)) return { go: false, kind: 'gate', reason: `milestone ${L.milestone[m] ? L.milestone[m] + ' ' : ''}${m} is complete and waiting for your testing`,
+      ask: `Tell the user the milestone is ready to test: how to run or see it, what to try, and what you need back (approve / change requests). Do not start the next milestone.` };
+    break;
+  }
+  const actM = activeMilestone(w);
+  if (!actM) return { go: false, kind: 'done', reason: 'every planned milestone is complete', ask: 'Tell the user all planned work is done and offer the next step (a bounded change or a new destination).' };
+  if (milestoneComplete(w, actM)) {
+    return { go: false, kind: 'gate', reason: `milestone ${L.milestone[actM] ? L.milestone[actM] + ' ' : ''}${actM} is complete and waiting for your testing`,
+      ask: `Tell the user the milestone is ready to test: how to run or see it, what to try, and what you need back (approve / change requests). Do not start the next milestone.` };
+  }
+  if (run && run.since) {
+    const did = doneCount(w) - (run.startDone || 0);
+    if (ap.maxItems && did >= ap.maxItems) return { go: false, kind: 'limit', reason: `run limit reached: ${did} task(s) done this run (max ${ap.maxItems})`, ask: 'Report what this run finished and what is next; the user restarts autopilot when they are ready.' };
+    if (ap.maxHours && Date.now() - Date.parse(run.since) >= ap.maxHours * 3600000) return { go: false, kind: 'limit', reason: `run limit reached: ${ap.maxHours}h since autopilot started`, ask: 'Report what this run finished and what is next; the user restarts autopilot when they are ready.' };
+  }
+  const nx = nextReady(w, cfg);
+  // a thin task (no criteria or file scope yet) whose dependencies are done is the next piece of
+  // work, not a dead end: the orchestrator fleshes it out from the spec, then starts it
+  if (!nx) {
+    const thin = milestoneDisplayOrder(w, actM).map(id => w.items[id]).find(t => t && t.status === 'TODO' &&
+      (t.deps || []).every(d => !w.items[d] || w.items[d].status === 'DONE') &&
+      (!(t.criteria || []).length || !((t.scope || {}).allowed || []).length));
+    if (thin) return { go: true, next: thin, label: lab(thin.id), prepare: true };
+    const waiting = w.order.filter(id => w.items[id].status === 'IN_PROGRESS');
+    if (waiting.length) return { go: false, kind: 'waiting', reason: `the rest of ${actM} waits on ${waiting.join(', ')}`, ask: 'Report what is in flight.' };
+  }
+  if (!nx) return { go: false, kind: 'stuck', reason: `nothing in ${actM} is startable (unmet dependencies, or tasks without criteria / file scope)`,
+    ask: 'Say which tasks are not startable and why, and what you need (criteria, scope, a dependency decision).' };
+  if ((nx.milestone || null) !== actM) return { go: false, kind: 'boundary', reason: `the next task ${lab(nx.id)} belongs to another milestone`, ask: 'Report the milestone boundary and wait for the user.' };
+  return { go: true, next: nx, label: lab(nx.id) };
+}
+
 function regenDashboard() {
   if (process.env.FORGE_DEFER_REGEN === '1') return; // v0.19.1: a change script regenerates once, at its end
   try { usageAutoRefresh(readJson(CONFIG_FILE, null)); } catch (_) { /* never block state ops */ }
@@ -1944,6 +2015,7 @@ button.cchip:hover{background:var(--accsoft);color:var(--accent)}
 .vlab i{font-style:normal;color:var(--ink3);margin-left:1px}
 .cdots{display:flex;gap:3px} .cdots i{width:6px;height:6px;border-radius:50%;display:block}
 /* ---- v0.19 pages ---- */
+.phase.ap{color:#9be3c4;border-color:#2b6b55;background:#0c8a7026}
 .pbar{height:6px;border-radius:99px;background:var(--line2);overflow:hidden;display:block}
 .pbar i{display:block;height:100%;border-radius:99px;background:var(--done)}
 section.page[hidden]{display:none}
@@ -2086,7 +2158,7 @@ tbody tr:hover{background:#faf9f5}
   <div class="brand">
     <img src="data:image/png;base64,${LOGO_B64}" alt="FORGE">
     <div class="proj"><b>${esc(cfg.project)}</b>${esc(cfg.phase)} phase · v${VERSION}</div>
-    ${actM ? `<span class="phase">${esc(actM)} active</span>` : ''}
+    ${actM ? `<span class="phase">${esc(actM)} active</span>` : ''}${autopilotCfg(cfg).on ? ` <span class="phase ap" title="forge autopilot status">autopilot on</span>` : ''}
   </div>
   <nav id="snav">
     <a href="#/overview" data-p="overview">Overview</a>
@@ -2975,7 +3047,7 @@ const FORGE_AUTHORITATIVE = ['forge/config.json', 'forge/state/work.json', 'forg
   'forge/decisions.md', 'forge/discoveries.md', 'forge/briefs/', 'forge/changes/', 'forge/evidence/'];
 const FORGE_GENERATED = ['forge/dashboard.html', 'forge/state/usage.json', 'forge/state/usage-cache.json',
   'forge/state/preflight.json', 'forge/state/session.json', 'forge/state/work.lock', 'forge/state/trace.jsonl.old',
-  'forge/state/upgrade.json', 'forge/state/backups/'];
+  'forge/state/upgrade.json', 'forge/state/backups/', 'forge/state/autopilot.json'];
 function isAuthoritative(rel) { return FORGE_AUTHORITATIVE.some(p => p.endsWith('/') ? rel.startsWith(p) : rel === p); }
 function isForgePath(rel) { return rel === 'forge' || rel.startsWith('forge/'); }
 // Append-only files must start with exactly what HEAD holds. Field incident: a working
@@ -3081,7 +3153,7 @@ const commands = {
         phase: 'spec',                       // 'spec' until METHOD Step 7 sets verify commands
         specDir: opt('spec-dir') || null,    // discovered/declared later
         verify: {},                          // e.g. { test: "npm test", lint: "...", typecheck: "..." }
-        options: { graphify: 'unset', web: 'unset' }
+        options: { graphify: 'unset', web: 'unset', concurrency: 4 } // v0.20: new projects run up to 4 items in parallel (disjoint scopes)
       });
       out('Initialized forge/config.json (phase: spec).');
     } else out('forge/config.json already exists — left untouched (init is idempotent).');
@@ -4211,6 +4283,46 @@ const commands = {
     } else die('Usage: forge screen add|update <id> [flags] | assign <app> <id>…|--match re | list');
   },
 
+  // -- autopilot (v0.20) — keep building between tasks; stop only for a human -------
+  autopilot() {
+    const sub = argv[1] || 'status';
+    const cfg = loadConfig();
+    if (!cfg) die('No forge/config.json. Run: forge init');
+    const w = loadWork(); ensureMilestones(w);
+    if (sub === 'on') {
+      cfg.options = cfg.options || {};
+      cfg.options.autopilot = 'on';
+      if (opt('max-items') !== null) cfg.options.autopilotMaxItems = parseInt(opt('max-items'), 10) || 0;
+      if (opt('hours') !== null) cfg.options.autopilotMaxHours = parseFloat(opt('hours')) || 0;
+      writeJson(CONFIG_FILE, cfg);
+      writeJson(AUTOPILOT_FILE, { since: ts(), startDone: doneCount(w), continues: 0, nudges: 0 });
+      traceEvent({ outcome: 'autopilot-on', maxItems: cfg.options.autopilotMaxItems || 0, maxHours: cfg.options.autopilotMaxHours || 0 });
+      regenDashboard();
+      const ap = autopilotCfg(cfg);
+      const d = autopilotDecision(w, cfg, readJson(AUTOPILOT_FILE, {}));
+      out(`Autopilot ON${ap.maxItems ? ` · stops after ${ap.maxItems} task(s)` : ''}${ap.maxHours ? ` · stops after ${ap.maxHours}h` : ''}.`);
+      out(`It keeps taking the next task of the current milestone and stops only for you: milestone ready to test, a question, an escalation, nothing startable, a run limit, or no progress.`);
+      out(d.go ? `Next: ${d.label} — ${d.next.title}` : `Right now it would stop: ${d.reason}`);
+      out(`\nTo follow it from your phone:\n  1. run the session with Remote Control:  claude --remote-control   (or /remote-control inside a session)\n  2. in /config enable "Push when actions required" and "Push when Claude decides"\n  3. keep the Mac awake while it runs:      caffeinate -i\n  4. make sure the build loop's commands are allowed without prompts — any permission prompt pauses the run until you answer it\nThen say "continue" in the session. Turn it off with: forge autopilot off`);
+    } else if (sub === 'off') {
+      cfg.options = cfg.options || {};
+      cfg.options.autopilot = 'off';
+      writeJson(CONFIG_FILE, cfg);
+      const run = readJson(AUTOPILOT_FILE, {});
+      writeJson(AUTOPILOT_FILE, Object.assign(run, { stopped: { kind: 'user', reason: opt('reason') || 'turned off', ts: ts() } }));
+      traceEvent({ outcome: 'autopilot-off', reason: opt('reason') || null });
+      regenDashboard();
+      out('Autopilot OFF — the session stops after each task again.');
+    } else if (sub === 'status') {
+      const ap = autopilotCfg(cfg); const run = readJson(AUTOPILOT_FILE, {});
+      out(`Autopilot: ${ap.on ? 'ON' : 'off'}${ap.maxItems ? ` · max ${ap.maxItems} task(s)` : ''}${ap.maxHours ? ` · max ${ap.maxHours}h` : ''}`);
+      if (run.since) out(`  run since ${run.since.slice(0, 16).replace('T', ' ')} · ${doneCount(w) - (run.startDone || 0)} task(s) done · ${run.continues || 0} continue(s)`);
+      if (run.stopped) out(`  last stop: ${run.stopped.kind} — ${run.stopped.reason} (${String(run.stopped.ts).slice(0, 16).replace('T', ' ')})`);
+      const d = autopilotDecision(w, cfg, run);
+      out(d.go ? `  now: would continue with ${d.label} — ${d.next.title}` : `  now: would stop — ${d.reason}`);
+    } else die('Usage: forge autopilot on [--max-items N] [--hours H] | off [--reason ..] | status');
+  },
+
   // -- upgrade (v0.19) — bring this plan to the installed Forge's standards --------
   upgrade() {
     const sub = argv[1] && !argv[1].startsWith('--') ? argv[1] : 'status';
@@ -5287,6 +5399,8 @@ const commands = {
           } else {
             ns = 'The work graph is empty or nothing is startable. Review the spec/plan with the user and create or unblock work items (forge task add / update).';
           }
+          // v0.20: autopilot changes how the loop ends a task
+          try { if (autopilotCfg(cfgNS).on) ns += `\n\nAUTOPILOT IS ON: after each task, take the next one of the current milestone without asking and without a progress summary. Stop only for the user — milestone ready to test, a product question (forge task block <id> --reason "question: …", then ask it), an escalation, nothing startable. The Stop hook enforces this and tells you when to stop. The user may be following from their phone: keep the message that ends a stop short, with what you need from them in the first line.`; } catch (_) { }
           // v0.19: a plan behind the installed Forge's standards is mentioned once — never acted on unasked
           try { const openU = upgradeStatus().filter(x => !x.done);
             if (openU.length) ns += `\n\nPlan standards: ${openU.length} open for Forge v${VERSION} (${openU.map(x => x.id).join(', ')}). Mention it to the user in one line after the next step ("forge upgrade shows what a newer Forge would reshape"); automatic steps are safe to apply between items, judgement steps only with their go.`; } catch (_) { }
@@ -5440,6 +5554,19 @@ const commands = {
       }
       process.exit(0);
 
+    } else if (which === 'pre-compact') {
+      // v0.20: what the compaction summary must keep — the plan itself lives on disk
+      let note = 'Forge: the plan, its order and every task\'s state live in forge/state — after this compaction, re-read them with `forge status` and `forge task next` instead of trusting the summary. Keep in the summary: the active milestone, any IN_PROGRESS task id with its last verification result and what remains, open questions to the user, decisions taken in this conversation that are not yet recorded with `forge decision add`.';
+      try {
+        const cfgC = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
+        const wC = JSON.parse(fs.readFileSync(WORK_FILE, 'utf8')); ensureMilestones(wC);
+        const ipC = wC.order.filter(id => wC.items[id].status === 'IN_PROGRESS');
+        note += ` Now: milestone ${activeMilestone(wC) || '—'}${ipC.length ? `, in progress ${ipC.join(', ')}` : ''}${autopilotCfg(cfgC).on ? '; AUTOPILOT IS ON — keep taking the next task after compaction' : ''}.`;
+      } catch (_) { }
+      traceEvent({ outcome: 'ok', hook: 'pre-compact', trigger: input.trigger || null });
+      out(JSON.stringify({ hookSpecificOutput: { hookEventName: 'PreCompact', additionalContext: note } }));
+      process.exit(0);
+
     } else if (which === 'stop') {
       // v0.5: release the orchestrator lock on clean finish (kept on exit 2 — session continues)
       const releaseLock = () => {
@@ -5447,30 +5574,74 @@ const commands = {
         const l = loadLock();
         if (sid && l && l.sessionId === sid && !l.released) saveLock(Object.assign({}, l, { released: true, lastBeat: ts() }));
       };
-      if (input.stop_hook_active) { releaseLock(); process.exit(0); } // never loop
+      let cfgS = null; try { cfgS = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')); } catch (_) { }
+      const ap = autopilotCfg(cfgS);
+      if (input.stop_hook_active && !ap.on) { releaseLock(); process.exit(0); } // never loop
       let w = null;
       try { w = JSON.parse(fs.readFileSync(WORK_FILE, 'utf8')); } catch (_) { releaseLock(); process.exit(0); } // P4: never crash a hook on bad state
       if (!w) { releaseLock(); process.exit(0); }
+      try { ensureMilestones(w); } catch (_) { }
       const inProg = w.order.filter(id => w.items[id].status === 'IN_PROGRESS');
       // 3.2: twice-failed TODO items are dangling work too — surface them
       const failedTodo = w.order.filter(id => {
         const t = w.items[id];
         return t.status === 'TODO' && t.attempts.some(a => a.outcome === 'failed');
       });
-      if (!inProg.length && !failedTodo.length) { releaseLock(); process.exit(0); }
-      let msg = '';
-      if (inProg.length) msg +=
-        `Open work items are still IN_PROGRESS: ${inProg.join(', ')}.\n` +
-        `Before finishing: verify and complete them (forge task verify/done), mark them blocked with a reason (forge task block --reason), ` +
-        `or record a failed attempt with a diagnosis (forge task fail --note). If the user asked to pause, block with reason "user paused".\n`;
-      if (failedTodo.length) msg +=
-        `Items with recorded failed attempts are sitting in TODO: ${failedTodo.join(', ')}. ` +
-        `State their disposition in your closing summary (queued for escalation / superseded / awaiting decision) so nothing dangles silently.\n`;
-      traceEvent({ outcome: 'block', hook: 'stop', reason: 'dangling-work', inProgress: inProg, failedTodo });
-      process.stderr.write(msg + `Then give the user a short status summary.\n`);
-      process.exit(2);
+      if (!ap.on) {
+        if (!inProg.length && !failedTodo.length) { releaseLock(); process.exit(0); }
+        let msg = '';
+        if (inProg.length) msg +=
+          `Open work items are still IN_PROGRESS: ${inProg.join(', ')}.\n` +
+          `Before finishing: verify and complete them (forge task verify/done), mark them blocked with a reason (forge task block --reason), ` +
+          `or record a failed attempt with a diagnosis (forge task fail --note). If the user asked to pause, block with reason "user paused".\n`;
+        if (failedTodo.length) msg +=
+          `Items with recorded failed attempts are sitting in TODO: ${failedTodo.join(', ')}. ` +
+          `State their disposition in your closing summary (queued for escalation / superseded / awaiting decision) so nothing dangles silently.\n`;
+        traceEvent({ outcome: 'block', hook: 'stop', reason: 'dangling-work', inProgress: inProg, failedTodo });
+        process.stderr.write(msg + `Then give the user a short status summary.\n`);
+        process.exit(2);
+      }
+      // ---- v0.20 autopilot ------------------------------------------------------
+      const run = readJson(AUTOPILOT_FILE, {});
+      const key = progressKey(w);
+      const saveRun = r => { try { writeJson(AUTOPILOT_FILE, r); } catch (_) { } };
+      // a nudge that produced no change in the plan is not repeated: the turn may end
+      if (input.stop_hook_active && run.lastNudgeKey === key) {
+        if (run.stopNoticeKey === key) { traceEvent({ outcome: 'ok', hook: 'stop', autopilot: 'stop', kind: (run.stopped || {}).kind || null }); releaseLock(); process.exit(0); }
+        saveRun(Object.assign(run, { stopped: { kind: 'no-progress', reason: 'no change in the plan since the last nudge', ts: ts() } }));
+        traceEvent({ outcome: 'ok', hook: 'stop', autopilot: 'stop', kind: 'no-progress' });
+        releaseLock(); process.exit(0);
+      }
+      const nudge = (text, extra) => {
+        saveRun(Object.assign(run, { lastNudgeKey: key, lastNudgeTs: ts(), nudges: (run.nudges || 0) + 1 }, extra || {}));
+        process.stderr.write(text);
+        process.exit(2);
+      };
+      if (inProg.length) {
+        traceEvent({ outcome: 'block', hook: 'stop', autopilot: 'finish-in-progress', inProgress: inProg });
+        nudge(`AUTOPILOT is on and ${inProg.join(', ')} is still IN_PROGRESS. Settle it now — verify, review and 'forge task done'; ` +
+          `or 'forge task block <id> --reason "question: …"' if you need the user; or 'forge task fail --note' with a diagnosis. Do not stop to report progress.\n`);
+      }
+      const d = autopilotDecision(w, cfgS, run);
+      if (d.go) {
+        traceEvent({ outcome: 'block', hook: 'stop', autopilot: 'continue', next: d.next.id });
+        nudge(`AUTOPILOT: keep going — the next task is ${d.label}: ${d.next.title}.\n` +
+          (d.prepare ? `It is still thin: write its acceptance criteria from the spec and its file scope first (forge task update ${d.next.id} --criterion-add "…::check" --allowed "…"), then ` : '') +
+          `Run the build loop for it now (forge task start with no id → brief → dispatch → verify → review → done), without a progress summary in between. ` +
+          `If options.concurrency allows, start other READY tasks with disjoint scopes in parallel. ` +
+          `If a product question comes up: 'forge task block <id> --reason "question: …"' and ask it — Forge then lets the turn end so it reaches the user.\n`,
+          { continues: (run.continues || 0) + 1 });
+      }
+      // a human stop: once, make sure the turn ends with the message the user needs (it is what reaches their phone)
+      if (run.stopNoticeKey !== key) {
+        traceEvent({ outcome: 'block', hook: 'stop', autopilot: 'stop-notice', kind: d.kind });
+        nudge(`AUTOPILOT stops here: ${d.reason}.\n${d.ask}\nEnd your turn with exactly that message to the user — short, and first line saying what you need from them.\n`,
+          { stopNoticeKey: key, stopped: { kind: d.kind, reason: d.reason, ts: ts() } });
+      }
+      traceEvent({ outcome: 'ok', hook: 'stop', autopilot: 'stop', kind: d.kind });
+      releaseLock(); process.exit(0);
 
-    } else die('Usage: forge hook session-start|pretooluse|stop');
+    } else die('Usage: forge hook session-start|pretooluse|stop|pre-compact|session-end');
   },
 
   help() {
@@ -5486,7 +5657,7 @@ const commands = {
                                          refuses: no criteria, unmet deps, unapproved earlier milestone,
                                          already IN_PROGRESS, 3rd attempt w/o --escalate, EMPTY scope.allowed
                                          (set it: task update --allowed; deliberate: --whole-tree --reason),
-                                         concurrency cap reached (options.concurrency, default 1 = serial),
+                                         concurrency cap reached (options.concurrency; new projects 4, unset 1),
                                          scope overlap with an in-progress item; records pre-work check state
   task dispatch <id> [--agent name] [--kind launch|message] [--note n]
                                          record the handoff to a worker (state, not transcript inference);
@@ -5563,6 +5734,10 @@ const commands = {
   screen list                            screens and mocks, grouped by the app they belong to
   component add|update <id> ... | list   legacy entry point — routed to a screen, a part or a plain tag;
                                          items tag via task --component (screen, part or tag)
+  autopilot on [--max-items N] [--hours H] | off | status
+                                         v0.20: keep taking the next task of the current milestone; stop only
+                                         for a human (milestone ready to test, a question, an escalation,
+                                         nothing startable, a run limit, no progress). Enforced by the Stop hook.
   upgrade [--json]                       v0.19: which plan standards of this Forge the project meets
   upgrade apply                          run the automatic steps (state backed up first)
   upgrade dry-run <script> | run <script>  judgement steps: a reviewed change script in forge/changes/,
@@ -5580,7 +5755,7 @@ const commands = {
                options.branchPattern "milestone/<id>" · options.mergeMethod merge · options.remote origin
                options.gateSteps "step one || step two"   shown at 'milestone ship', confirmed with --steps-done
                options.versionStart 0   number of the first release (V0 = MVP; an existing product may start at 2)
-               options.concurrency N     max items IN_PROGRESS at once (default 1 = serial; raise only with
+               options.concurrency N     max items IN_PROGRESS at once (new projects: 4; unset = 1 serial; parallel only with
                                          disjoint scopes — see OPERATING.md parallel dispatch)
                options.scopeExempt "a/,b/"  dirs exempt from the scope whitelist (default forge/,spec/,docs/; *.md always exempt)
                options.usageAuto false   stop refreshing the token snapshot automatically (then it is

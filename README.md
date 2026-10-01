@@ -166,6 +166,30 @@ memory.
 
 ## Changelog
 
+### v0.20.0 — autopilot: leave it running, it stops only for you
+- **`forge autopilot on [--max-items N] [--hours H]`** keeps the build loop going between the
+  tasks of a milestone. A session cannot clear its own context, and does not need to: each task
+  runs in fresh worker contexts, Claude Code compacts the orchestrator's thread when it fills,
+  and the plan lives on disk. What used to stop the loop was the turn ending after every task;
+  with autopilot on, the Stop hook refuses that ending while the next task of the same milestone
+  is ready.
+- **It stops only for a human**: the milestone is complete and ready for your testing, a task is
+  blocked on a product question, a task failed twice and needs an escalation decision, nothing is
+  startable, a run limit is reached, or a nudge produced no change in the plan (no spinning).
+  Each stop is announced once, with what to ask you, so the last message is the one you need —
+  with Remote Control and its push notifications, that is what reaches your phone.
+- **Compaction keeps what matters.** A new PreCompact hook tells the summary to keep the active
+  milestone, the task in progress and open questions, and to re-read the plan from disk after;
+  session start re-injects the contract and the autopilot rule after every compaction.
+- A thin next task (no criteria or file scope yet) is the next piece of work, not a dead end:
+  autopilot tells the orchestrator to write its criteria and scope from the spec, then start it.
+- **New projects start with `options.concurrency` 4** — up to four tasks in flight, still only
+  with disjoint file scopes (the overlap refusal is unchanged). Existing projects keep their setting;
+  unset still means serial.
+- `forge autopilot status` shows the run (tasks done, continues, last stop and why) and what it
+  would do now; `forge autopilot off` returns to stopping after each task. The dashboard sidebar
+  marks a project with autopilot on.
+
 ### v0.19.1 — upgrades survive a hostile filesystem and a killed run
 - **The state lock no longer spins where files cannot be deleted.** Field incident: a
   change script run from a sandbox whose mounted folders refuse deletes left the state

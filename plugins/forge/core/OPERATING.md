@@ -40,6 +40,15 @@ link`), every screen `forge screen add <id> --app <part> --mock ..` — BEFORE i
 created, and every item carries `--component` (screen, part, or plain tag). On an
 existing project, `forge arch scan` drafts the parts from the repo.
 
+**Autopilot** (`forge autopilot on`): after each task, take the next task of the current
+milestone at once — no progress summary, no "shall I continue?". The Stop hook refuses to end
+the turn while such a task is ready and tells you when to stop: the milestone is ready for the
+user's testing, a task is blocked on a product question, a task failed twice, nothing is
+startable, or a run limit is reached. Put a question to the user by blocking the task
+(`forge task block <id> --reason "question: …"`) and asking it; never guess a product answer to
+keep the run going. The user may be on their phone: the message that ends a stop is short and
+its first line says what you need from them.
+
 **Plan standards**: when session start reports open `forge upgrade` steps, tell the
 user once, in one line, and move on. Never run a judgement step (a change script)
 without their go; automatic steps (`forge upgrade apply`) are safe between items.
@@ -215,8 +224,8 @@ from confirmed goals, milestone cut across everything. Then the same loop.
   dirs). A blocked edit means stop and report, or deliberately revise the
   scope (`forge task update --allowed/--forbidden ... --reason ...`) —
   never work around the guard.
-- One item in flight is a gate, not a convention: `task start` refuses while
-  another item is IN_PROGRESS (`options.concurrency`, default 1). An orphaned
+- The in-flight cap is a gate, not a convention: `task start` refuses once
+  the cap of items IN_PROGRESS is reached (`options.concurrency`; new projects 4, unset 1). An orphaned
   IN_PROGRESS item from a dead session therefore blocks new starts — that is
   deliberate: audit and settle it (done/fail/block) before dispatching new
   work.
@@ -310,13 +319,13 @@ Routing rule — be conservative, escalate on evidence:
 - Never handle or echo the user's API key; the CLI reads it from the
   environment and it is never written to disk or state.
 
-## Parallel dispatch (opt-in — off by default)
+## Parallel dispatch
 
-Forge is serial by default: `options.concurrency` is 1 and the CLI refuses a
-second in-flight item. Field measurement showed unmanaged multi-worker bursts
-arising anyway — so concurrency is now a deliberate, guarded choice, never a
-drift. Only the **user** raises the cap
-(`forge config set options.concurrency 3`); never raise it yourself.
+New projects start with `options.concurrency` 4 (v0.20, the user's choice);
+projects without the setting run serial (1). The CLI refuses an item beyond the
+cap. Field measurement showed unmanaged multi-worker bursts arising anyway — so
+concurrency is a deliberate, guarded setting, never a drift. Only the **user**
+changes the cap (`forge config set options.concurrency N`); never change it yourself.
 
 When the cap is above 1, the loop changes in exactly one place: **after an
 async dispatch, do not poll it — start the next READY item first** (scope it,

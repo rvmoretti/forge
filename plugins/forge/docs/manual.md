@@ -212,6 +212,19 @@ blocked-with-reason / failed-with-diagnosis).
   view, and a selected-part panel linking to its work (`#/plan/c:<part>`). **Screens &
   mockups** is a gallery per app. Addresses are links (`#/plan/<task>`, `#/architecture/<part>`).
 
+## Leave it running — autopilot (v0.20)
+
+`forge autopilot on` keeps the build loop going between the tasks of a milestone: the Stop hook
+refuses to end the turn while the next task of the same milestone is ready. It stops only for
+you — the milestone is complete and ready to test, a task is blocked on a question, a task failed
+twice, nothing is startable, a run limit (`--max-items N`, `--hours H`) is reached, or a nudge made
+no progress. Each stop is announced once so the last message says what is needed from you.
+To follow from a phone: run the session with `claude --remote-control` (or `/remote-control`), enable
+"Push when actions required" and "Push when Claude decides" in `/config`, keep the machine awake
+(`caffeinate -i` on macOS), and allow the build loop's commands so no permission prompt pauses the
+run. `forge autopilot status` shows the run; `forge autopilot off` ends it. Claude Code overrides a
+Stop hook after eight consecutive blocks without progress (`CLAUDE_CODE_STOP_HOOK_BLOCK_CAP` raises it).
+
 ## Upgrading an existing project (v0.19)
 
 `forge upgrade` lists the plan standards of the installed Forge and which this project

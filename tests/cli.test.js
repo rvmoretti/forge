@@ -612,7 +612,9 @@ test('task list flags items without a scope and withholds READY', () => {
 
 // --- v0.12: concurrency cap + disjoint scopes ---------------------------------
 
-test('second in-flight item refused at default cap 1; cap 2 allows disjoint scopes, refuses overlap', () => {
+test('second in-flight item refused at cap 1; cap 2 allows disjoint scopes, refuses overlap; new projects start at 4', () => {
+  assert.strictEqual(JSON.parse(fs.readFileSync(path.join(dir, 'forge', 'config.json'), 'utf8')).options.concurrency, 4);
+  forge(['config', 'set', 'options.concurrency', '1']);
   addItem('C1'); // src/
   forge(['task', 'add', '--id', 'C2', '--title', 'c', '--criterion', 'ok::node -e "process.exit(0)"', '--allowed', 'lib/']);
   forge(['task', 'add', '--id', 'C3', '--title', 'c', '--criterion', 'ok::node -e "process.exit(0)"', '--allowed', 'src/deep/']);
@@ -1992,4 +1994,80 @@ test('v0.19.1: a released lock marker is free; arch writes wait on a live lock; 
   const c = JSON.parse(fs.readFileSync(path.join(dir, 'forge', 'state', 'components.json'), 'utf8'));
   assert.ok(!c.components.db, 'revert removed the half-applied part');
   assert.ok(c.components.app);
+});
+
+// --- v0.20: autopilot ----------------------------------------------------------
+
+test('autopilot: the Stop hook continues inside a milestone and stops only for a human, with one notice', () => {
+  // off: behaviour unchanged — nothing in progress, the turn may end
+  addItem('A1', ['--milestone', 'M1']); addItem('A2', ['--milestone', 'M1', '--deps', 'A1']); addItem('B1', ['--milestone', 'M2']);
+  assert.strictEqual(hook('stop', { session_id: 's' }).code, 0);
+  const on = forge(['autopilot', 'on', '--max-items', '5']);
+  assert.strictEqual(on.code, 0);
+  assert.match(on.out, /Autopilot ON · stops after 5 task\(s\)/);
+  assert.match(on.out, /Next: .*A1/);
+  assert.match(on.out, /claude --remote-control/);
+  // next task ready in the same milestone → keep going
+  let h = hook('stop', { session_id: 's' });
+  assert.strictEqual(h.code, 2);
+  assert.match(h.out, /AUTOPILOT: keep going — the next task is .*A1/);
+  // the nudge produced nothing → the next stop is allowed (no spinning)
+  h = hook('stop', { session_id: 's', stop_hook_active: true });
+  assert.strictEqual(h.code, 0);
+  assert.match(forge(['autopilot', 'status']).out, /last stop: no-progress/);
+  // progress: A1 done → continue with A2
+  forge(['task', 'start', 'A1']); touch('a.txt'); forge(['task', 'verify', 'A1']);
+  h = hook('stop', { session_id: 's', stop_hook_active: true });
+  assert.strictEqual(h.code, 2);
+  assert.match(h.out, /A1 is still IN_PROGRESS/);
+  forge(['task', 'done', 'A1']);
+  h = hook('stop', { session_id: 's', stop_hook_active: true });
+  assert.strictEqual(h.code, 2);
+  assert.match(h.out, /next task is .*A2/);
+  // A2 done → milestone complete → one stop notice telling the agent what to ask, then the turn ends
+  forge(['task', 'start', 'A2']); touch('b.txt'); forge(['task', 'verify', 'A2']); forge(['task', 'done', 'A2']);
+  h = hook('stop', { session_id: 's', stop_hook_active: true });
+  assert.strictEqual(h.code, 2);
+  assert.match(h.out, /AUTOPILOT stops here: milestone .*M1 is complete and waiting for your testing/);
+  assert.match(h.out, /ready to test/);
+  h = hook('stop', { session_id: 's', stop_hook_active: true });
+  assert.strictEqual(h.code, 0, 'the notice is given once');
+  assert.match(forge(['autopilot', 'status']).out, /last stop: gate/);
+  assert.match(fs.readFileSync(path.join(dir, 'forge', 'dashboard.html'), 'utf8'), /autopilot on/);
+  assert.strictEqual(forge(['autopilot', 'off']).code, 0);
+  assert.strictEqual(hook('stop', { session_id: 's' }).code, 0);
+});
+
+test('autopilot: a blocked question and the run limit stop it; pre-compact tells the summary what to keep', () => {
+  addItem('Q1', ['--milestone', 'M1']); addItem('Q2', ['--milestone', 'M1']); addItem('Q3', ['--milestone', 'M1']);
+  forge(['autopilot', 'on', '--max-items', '1']);
+  forge(['task', 'start', 'Q1']); forge(['task', 'block', 'Q1', '--reason', 'question: card or invoice?']);
+  let h = hook('stop', { session_id: 's' });
+  assert.strictEqual(h.code, 2);
+  assert.match(h.out, /AUTOPILOT stops here: .*Q1 is blocked: question: card or invoice\?/);
+  assert.match(h.out, /Ask the user the exact question/);
+  forge(['task', 'cancel', 'Q1', '--reason', 'answered: dropped']);
+  forge(['task', 'start', 'Q2']); touch('q.txt'); forge(['task', 'verify', 'Q2']); forge(['task', 'done', 'Q2']);
+  h = hook('stop', { session_id: 's', stop_hook_active: true });
+  assert.strictEqual(h.code, 2);
+  assert.match(h.out, /run limit reached: 1 task\(s\) done this run/);
+  const pc = hook('pre-compact', { session_id: 's', trigger: 'auto' });
+  assert.strictEqual(pc.code, 0);
+  const j = JSON.parse(pc.out);
+  assert.strictEqual(j.hookSpecificOutput.hookEventName, 'PreCompact');
+  assert.match(j.hookSpecificOutput.additionalContext, /forge task next/);
+  assert.match(j.hookSpecificOutput.additionalContext, /AUTOPILOT IS ON/);
+  const ss = hook('session-start', { session_id: 's2', source: 'compact' });
+  assert.match(ss.out, /AUTOPILOT IS ON/);
+});
+
+test('autopilot: a thin next task is prepared, not treated as a dead end', () => {
+  addItem('P1', ['--milestone', 'M1']);
+  forge(['task', 'add', '--id', 'P2', '--title', 'later', '--milestone', 'M1', '--deps', 'P1']); // thin: no criteria, no scope
+  forge(['autopilot', 'on']);
+  forge(['task', 'start', 'P1']); touch('p.txt'); forge(['task', 'verify', 'P1']); forge(['task', 'done', 'P1']);
+  const h = hook('stop', { session_id: 's' });
+  assert.strictEqual(h.code, 2);
+  assert.match(h.out, /next task is .*P2/);
+  assert.match(h.out, /still thin: write its acceptance criteria/);
 });

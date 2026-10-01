@@ -40,6 +40,16 @@
           }
         ]
       }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/bin/forge.js\" hook pre-compact"
+          }
+        ]
+      }
     ]
   }
 }
