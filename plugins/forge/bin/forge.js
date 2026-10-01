@@ -1240,7 +1240,8 @@ function graphifyStatus(cfg) {
   const read = f => { try { return fs.readFileSync(path.join(PROJECT, f), 'utf8'); } catch (_) { return ''; } };
   const claudeMd = /^##\s+graphify\b/m.test(read('CLAUDE.md'));
   const claudeHook = /graphify/.test(read('.claude/settings.json'));
-  let gitHook = false; try { const gd = spawnSync('git', ['rev-parse', '--git-dir'], { cwd: PROJECT, encoding: 'utf8', timeout: 5000 }).stdout.trim(); gitHook = /graphify-hook-start/.test(fs.readFileSync(path.resolve(PROJECT, gd, 'hooks', 'post-commit'), 'utf8')); } catch (_) { }
+  // --git-path hooks honours core.hooksPath (e.g. a tracked .githooks/), not only .git/hooks
+  let gitHook = false; try { const hd = spawnSync('git', ['rev-parse', '--git-path', 'hooks'], { cwd: PROJECT, encoding: 'utf8', timeout: 5000 }).stdout.trim(); gitHook = !!hd && /graphify-hook-start/.test(fs.readFileSync(path.resolve(PROJECT, hd, 'post-commit'), 'utf8')); } catch (_) { }
   return { choice, built: !!st, builtMs: st ? st.mtimeMs : null, sizeKB: st ? Math.round(st.size / 1024) : null,
     stale: !!(st && lastCommitMs && lastCommitMs > st.mtimeMs + 60000), ignored, claudeMd, claudeHook, gitHook };
 }

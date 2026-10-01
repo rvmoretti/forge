@@ -166,6 +166,12 @@ memory.
 
 ## Changelog
 
+### v0.21.1 — Graphify git hook found under core.hooksPath
+- The Configuration page and `forge doctor` said "graph is not rebuilt after commits" in projects
+  whose git hooks live in a tracked folder (`core.hooksPath`, e.g. `.githooks/`), although
+  `graphify hook install` had installed them there. Forge now asks git where hooks live
+  (`git rev-parse --git-path hooks`) instead of assuming `.git/hooks`.
+
 ### v0.21.0 — the CTO leads a team again (docs/IMPL-team-delegation.md)
 Every behaviour change below sits behind an `options.*` switch: **on for projects created by
 v0.21, off when absent** — existing projects change nothing until you turn a switch on, one per

@@ -2327,3 +2327,16 @@ test('v0.21: Configuration is Forge and the dev setup (why, risk, copyable comma
   assert.match(sys, /2026-10-01-recut\.md/);
   assert.match(dash, /closest\('code\.copyable'\)/);
 });
+
+test('v0.21: the graphify git hook is found under core.hooksPath (a tracked .githooks/), not only .git/hooks', () => {
+  forge(['config', 'set', 'options.graphify', 'use']);
+  addItem('H1', ['--milestone', 'M1']);
+  const dash = () => { forge(['dashboard']); return fs.readFileSync(path.join(dir, 'forge', 'dashboard.html'), 'utf8').split('data-page="configuration"')[1].split('</section>')[0]; };
+  assert.match(dash(), /graphify hook install/);
+  fs.mkdirSync(path.join(dir, '.githooks'), { recursive: true });
+  fs.writeFileSync(path.join(dir, '.githooks', 'post-commit'), '#!/bin/sh\n# graphify-hook-start\n# graphify-hook-end\n');
+  spawnSync('git', ['config', 'core.hooksPath', '.githooks'], { cwd: dir });
+  const d = dash();
+  assert.match(d, /rebuilt after every commit \(git hook\)/);
+  assert.doesNotMatch(d, /graphify hook install/);
+});
