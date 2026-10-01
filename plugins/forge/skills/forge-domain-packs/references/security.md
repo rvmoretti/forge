@@ -4,6 +4,10 @@ Include in ANY brief touching auth, secrets, payments, user data, file
 handling, or external input. These are the failure modes AI-generated code
 ships by default — check them explicitly, every time.
 
+## Implementer
+- For every external call and transaction, name each failure class and its distinct handling; an unknown outcome is never treated as a known failure.
+- Examples: an invalid token vs an unreachable key set (JWKS) → 401 vs 503 — never sign a user out because a dependency was down; offline vs signed-out are different states.
+
 ## Secrets
 - No credentials in code, ever — including "just to test".
 - Nothing secret behind client-exposed env prefixes (`NEXT_PUBLIC_`, `VITE_`, `PUBLIC_`, `EXPO_PUBLIC_`) or imported anywhere the frontend bundle can reach (service-role keys especially).

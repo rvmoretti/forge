@@ -43,7 +43,14 @@ function freshProject() {
   // v0.17: the per-milestone git flow is the default; the legacy tests exercise the
   // gates without git, so they opt out explicitly (the v0.17 tests opt back in).
   forge(['config', 'set', 'options.integration', 'manual', '--reason', 'test fixture']);
+  // v0.21: forge init turns the delegation switches on for NEW projects; the legacy tests
+  // exercise an existing project, where they are absent (off). v0.21 tests opt back in.
+  const cf = path.join(dir, 'forge', 'config.json');
+  const c = JSON.parse(fs.readFileSync(cf, 'utf8'));
+  for (const k of ['itemShape', 'workerExplore', 'contextPack', 'briefLimit', 'retryFromReview', 'requireDispatch', 'requireTester', 'architectPrepass', 'delegateSpecSync']) delete c.options[k];
+  fs.writeFileSync(cf, JSON.stringify(c, null, 2));
 }
+function switchOn(k, v) { forge(['config', 'set', 'options.' + k, String(v)]); }
 function addItem(id, extra = []) {
   // v0.12: start refuses an unscoped item — default a scope; explicit --allowed in `extra` wins (opt() takes the first).
   return forge(['task', 'add', '--id', id, '--title', id, '--criterion', 'ok::node -e "process.exit(0)"', ...extra, '--allowed', 'src/']);
@@ -2094,4 +2101,229 @@ test('v0.20.1: graphify "use" without a built graph is flagged with the fix; bri
   assert.match(dash, /graphify-out\/ ignored/);
   assert.doesNotMatch(dash, /graphify update \./);         // built and fresh: no rebuild advice
   assert.match(dash, /graphify claude install/);             // still not wired into Claude Code
+});
+
+// --- v0.21: team delegation (docs/IMPL-team-delegation.md) ------------------
+
+test('C0: lines that share one message.id are one call; the last line\'s usage counts', () => {
+  const lines = [];
+  const u = (out) => ({ input_tokens: 2, cache_creation_input_tokens: 100, cache_read_input_tokens: 1000, output_tokens: out });
+  lines.push({ type: 'assistant', timestamp: '2026-10-01T10:00:00Z', message: { id: 'msg_1', model: 'claude-opus-5-5', content: [{ type: 'thinking' }], usage: u(10) } });
+  lines.push({ type: 'assistant', timestamp: '2026-10-01T10:00:01Z', message: { id: 'msg_1', model: 'claude-opus-5-5', content: [{ type: 'text', text: 'x' }], usage: u(10) } });
+  lines.push({ type: 'assistant', timestamp: '2026-10-01T10:00:02Z', message: { id: 'msg_1', model: 'claude-opus-5-5', content: [{ type: 'tool_use', name: 'Bash', input: {} }], usage: u(50) } });
+  lines.push({ type: 'assistant', timestamp: '2026-10-01T10:00:03Z', message: { id: 'msg_2', model: 'claude-opus-5-5', content: [{ type: 'text', text: 'y' }], usage: u(7) } });
+  const root = fakeLogs(lines.map(l => JSON.stringify(l)));
+  const r = forge(['usage', '--rescan'], { env: { FORGE_CLAUDE_PROJECTS: root } });
+  assert.strictEqual(r.code, 0, r.out);
+  assert.match(r.out, /claude-opus-5-5 \[main\]: 2 calls · in 4 · out 57 · cache write 200 \/ read 2,000/);
+});
+
+test('C6: two verifies started together run one after the other; --no-wait refuses; state writes are not blocked meanwhile', async () => {
+  const { spawn } = require('child_process');
+  const log = path.join(dir, 'verify-log.txt');
+  const slow = `node -e "const fs=require('fs');fs.appendFileSync('${log.replace(/\\/g, '/')}', 'start '+Date.now()+'\\n');const t=Date.now();while(Date.now()-t<1200){};fs.appendFileSync('${log.replace(/\\/g, '/')}', 'end '+Date.now()+'\\n')"`;
+  forge(['config', 'set', 'verify.test', slow]);
+  addItem('V1', ['--allowed', 'a/']); forge(['task', 'add', '--id', 'V2', '--title', 'v', '--criterion', 'ok::node -e "process.exit(0)"', '--allowed', 'b/']);
+  assert.strictEqual(forge(['task', 'start', 'V1']).code, 0);
+  assert.strictEqual(forge(['task', 'start', 'V2']).code, 0);
+  const runV = id => new Promise(res => {
+    const p = spawn(process.execPath, [CLI, 'task', 'verify', id], { cwd: dir, env: Object.assign({}, process.env, { CLAUDE_PROJECT_DIR: dir, FORGE_CLAUDE_PROJECTS: path.join(os.tmpdir(), 'forge-no-such-logs') }) });
+    let o = ''; p.stdout.on('data', d => { o += d; }); p.stderr.on('data', d => { o += d; }); p.on('exit', c => res({ c, o }));
+  });
+  const both = Promise.all([runV('V1'), runV('V2')]);
+  // while a verify runs, an ordinary state write still goes through (the state lock is not held)
+  await new Promise(r => setTimeout(r, 400));
+  assert.strictEqual(forge(['decision', 'add', 'meanwhile', '--decision', 'x', '--why', 'y']).code, 0);
+  const nw = forge(['task', 'verify', 'V1', '--no-wait']);
+  const [a, b] = await both;
+  assert.strictEqual(a.c, 0, a.o); assert.strictEqual(b.c, 0, b.o);
+  assert.match(a.o + b.o, /Waiting for the verify of/);
+  assert.notStrictEqual(nw.code, 0); assert.match(nw.out, /another verify is running/);
+  const ev = fs.readFileSync(log, 'utf8').trim().split('\n').map(l => l.split(' '));
+  // runs must not interleave: start,end,start,end
+  assert.deepStrictEqual(ev.map(e => e[0]), ['start', 'end', 'start', 'end']);
+  const w = JSON.parse(fs.readFileSync(path.join(dir, 'forge', 'state', 'work.json'), 'utf8'));
+  assert.strictEqual(w.items.V1.verifications.length, 1); assert.strictEqual(w.items.V2.verifications.length, 1);
+});
+
+test('v0.21: new projects start with every delegation switch on; existing projects (absent) are off; doctor lists them', () => {
+  const t = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-new-'));
+  spawnSync('git', ['init', '-q'], { cwd: t });
+  spawnSync(process.execPath, [CLI, 'init', '--project', 'n'], { cwd: t, env: Object.assign({}, process.env, { CLAUDE_PROJECT_DIR: t }) });
+  const o = JSON.parse(fs.readFileSync(path.join(t, 'forge', 'config.json'), 'utf8')).options;
+  assert.deepStrictEqual([o.itemShape, o.workerExplore, o.contextPack, o.briefLimit, o.retryFromReview, o.requireDispatch, o.requireTester, o.architectPrepass, o.delegateSpecSync],
+    ['refuse', 'bounded', true, 'on', true, true, 'high-risk', 'high-risk', true]);
+  const d = forge(['doctor']).out;   // the fixture project: switches absent
+  assert.match(d, /switch itemShape: "warn" \(not set — off; new projects start with "refuse": forge config set options.itemShape refuse\)/);
+  assert.match(d, /switch requireTester: false/);
+});
+
+test('C1: more than 6 criteria is refused at start without --reason, recorded with it; warn keeps the warning; autopilot states the limit', () => {
+  const crit = []; for (let i = 0; i < 7; i++) crit.push('--criterion', `c${i}::node -e "process.exit(0)"`);
+  forge(['task', 'add', '--id', 'BIG', '--title', 'big', '--milestone', 'M1', ...crit, '--allowed', 'src/']);
+  // warn (absent): today's behaviour
+  let r = forge(['task', 'start', 'BIG']);
+  assert.strictEqual(r.code, 0); assert.match(r.out, /ITEM-SHAPE WARNING: 7 acceptance criteria/);
+  forge(['task', 'fail', 'BIG', '--note', 'reset']);
+  switchOn('itemShape', 'refuse');
+  r = forge(['task', 'start', 'BIG']);
+  assert.notStrictEqual(r.code, 0); assert.match(r.out, /7 acceptance criteria \(limit 6, options.itemShape=refuse\)/); assert.match(r.out, /SIDE BY SIDE/);
+  r = forge(['task', 'start', 'BIG', '--reason', 'one atomic migration']);
+  assert.strictEqual(r.code, 0);
+  const w = JSON.parse(fs.readFileSync(path.join(dir, 'forge', 'state', 'work.json'), 'utf8'));
+  assert.strictEqual(w.items.BIG.attempts.slice(-1)[0].shapeReason, 'one atomic migration');
+  // autopilot's thin-task message states the limit
+  forge(['task', 'add', '--id', 'THIN', '--title', 'thin', '--milestone', 'M1', '--deps', 'BIG']);
+  forge(['autopilot', 'on']);
+  touch('z.txt'); forge(['task', 'verify', 'BIG']); forge(['task', 'done', 'BIG']);
+  const h = hook('stop', { session_id: 's' });
+  assert.match(h.out, /at most 6 criteria .* side by side/);
+});
+
+test('C2: bounded exploration, context pack and brief limit — and with every C2 switch off the brief is unchanged', () => {
+  fs.mkdirSync(path.join(dir, 'src'), { recursive: true }); fs.writeFileSync(path.join(dir, 'src', 'a.ts'), 'export const a = 1;\n');
+  addItem('B1', ['--objective', 'obj']);
+  const off = forge(['brief', 'B1']).out;
+  assert.match(off, /this is the set; do not go looking for more/);
+  assert.match(off, /Do not search or scan the repository/);
+  assert.match(off, /_Orchestrator: prepend relevant spec excerpts/);
+  assert.match(forge(['brief', 'B1', '--context']).out, /Context packs are off for this project \(options.contextPack\)/);
+  switchOn('workerExplore', 'bounded'); switchOn('contextPack', true); switchOn('briefLimit', 'on');
+  forge(['config', 'set', 'options.workerReadBudget', '7']);
+  const on = forge(['brief', 'B1']).out;
+  assert.match(on, /Files in scope \(\d+\) — start here/);
+  assert.match(on, /up to 7 files OUTSIDE the allowed scope/);
+  assert.match(on, /STOP and report only for a scope change/);
+  assert.doesNotMatch(on, /Do not search or scan the repository/);
+  assert.match(on, /no line numbers or code-level fix lists here/);
+  // --context: an explorer prompt that writes nothing
+  const ctx = forge(['brief', 'B1', '--context']);
+  assert.match(ctx.out, /^# Explore brief — B1: context pack/);
+  assert.match(ctx.out, /## Invariants/); assert.match(ctx.out, /context save B1/); assert.match(ctx.out, /--purpose explore --item B1/);
+  assert.ok(!fs.existsSync(path.join(dir, 'forge', 'context', 'B1.md')));
+  // the explorer records the pack; the brief then points at it
+  const sv = spawnSync(process.execPath, [CLI, 'context', 'save', 'B1'], { cwd: dir, input: '# Context pack — B1\n## Relevant files\n- src/a.ts\n', encoding: 'utf8', env: Object.assign({}, process.env, { CLAUDE_PROJECT_DIR: dir }) });
+  assert.strictEqual(sv.status, 0, sv.stdout + sv.stderr);
+  assert.match(forge(['brief', 'B1']).out, /Read `forge\/context\/B1\.md` first/);
+  // brief limit: >20 KB refused at --save without --reason; warned above 12 KB at launch
+  forge(['task', 'update', 'B1', '--objective', 'x'.repeat(21 * 1024)]);
+  let r = forge(['brief', 'B1', '--save']);
+  assert.notStrictEqual(r.code, 0); assert.match(r.out, /limit 20 KB, options.briefLimit=on/);
+  r = forge(['brief', 'B1', '--save', '--reason', 'one-off']);
+  assert.strictEqual(r.code, 0);
+  forge(['task', 'start', 'B1']);
+  r = forge(['task', 'dispatch', 'B1', '--agent', 'forge-implementer', '--model', 'sonnet']);
+  assert.notStrictEqual(r.code, 0); assert.match(r.out, /is 2\d\.\d KB \(limit 20 KB/);
+  forge(['task', 'update', 'B1', '--objective', 'x'.repeat(14 * 1024)]); forge(['brief', 'B1', '--save']);
+  r = forge(['task', 'dispatch', 'B1', '--agent', 'forge-implementer', '--model', 'sonnet']);
+  assert.strictEqual(r.code, 0); assert.match(r.out, /BRIEF SIZE WARNING/);
+});
+
+test('C3: a retry brief is the original brief plus only the latest review findings', () => {
+  switchOn('retryFromReview', true);
+  addItem('R1');
+  forge(['brief', 'R1', '--save']);
+  const bf = path.join(dir, 'forge', 'briefs', 'R1.md');
+  fs.appendFileSync(bf, '\n## Spec excerpt\nThe CTO completed this brief.\n');
+  forge(['task', 'start', 'R1']);
+  fs.writeFileSync(path.join(dir, 'review1.md'), '- FINDING-ONE: 401 returned when JWKS is down\n');
+  assert.strictEqual(forge(['task', 'fail', 'R1', '--from-review', 'review1.md']).code, 0);
+  forge(['brief', 'R1', '--save']);
+  let b = fs.readFileSync(bf, 'utf8');
+  assert.match(b, /The CTO completed this brief/); assert.match(b, /FINDING-ONE/);
+  forge(['task', 'start', 'R1']);
+  fs.writeFileSync(path.join(dir, 'review2.md'), '- FINDING-TWO: refresh offline signs the user out\n');
+  forge(['task', 'fail', 'R1', '--from-review', 'review2.md']);
+  forge(['brief', 'R1', '--save']);
+  b = fs.readFileSync(bf, 'utf8');
+  assert.match(b, /FINDING-TWO/); assert.doesNotMatch(b, /FINDING-ONE/);
+  assert.strictEqual((b.match(/## Fix these review findings/g) || []).length, 1);
+  assert.match(b, /The CTO completed this brief/);
+  assert.match(forge(['task', 'start', 'R1']).out, /REQUIRES --escalate|failed 2 attempts/);
+});
+
+test('C4: a task tagged api/auth carries the failure-class rule from its domain packs', () => {
+  addItem('D1', ['--domain', 'api,auth']);
+  const b = forge(['brief', 'D1']).out;
+  assert.match(b, /## Domain rules \(backend, security\)/);
+  assert.match(b, /name each failure class and its distinct handling; an unknown outcome is never treated as a known failure/);
+  addItem('D2');
+  assert.doesNotMatch(forge(['brief', 'D2']).out, /Domain rules/);
+});
+
+test('C5: done refuses without a worker dispatch; accepts a recorded one; --self --reason is counted in stats', () => {
+  switchOn('requireDispatch', true);
+  addItem('S1', ['--allowed', 'a/']); forge(['task', 'add', '--id', 'S2', '--title', 's', '--criterion', 'ok::node -e "process.exit(0)"', '--allowed', 'b/']);
+  forge(['task', 'start', 'S1']); touch('s1.txt'); forge(['task', 'verify', 'S1']);
+  let r = forge(['task', 'done', 'S1']);
+  assert.notStrictEqual(r.code, 0); assert.match(r.out, /no implementer or tester dispatch recorded/); assert.match(r.out, /forge task dispatch S1 --agent forge-implementer/);
+  forge(['task', 'dispatch', 'S1', '--agent', 'forge-implementer', '--model', 'sonnet']);
+  assert.strictEqual(forge(['task', 'done', 'S1']).code, 0);
+  forge(['task', 'start', 'S2']); touch('s2.txt'); forge(['task', 'verify', 'S2']);
+  assert.notStrictEqual(forge(['task', 'done', 'S2', '--self']).code, 0);
+  assert.strictEqual(forge(['task', 'done', 'S2', '--self', '--reason', 'one-line copy fix']).code, 0);
+  assert.match(forge(['stats']).out, /Closed by the CTO \(--self\): 1\/2 — S2/);
+});
+
+test('C8: high-risk tasks need a tester (or a reason); warn mode only warns on test-lane tasks', () => {
+  switchOn('requireTester', 'high-risk');
+  addItem('H1', ['--domain', 'payments', '--allowed', 'a/']);
+  forge(['task', 'start', 'H1']); touch('h1.txt'); forge(['task', 'verify', 'H1']);
+  let r = forge(['task', 'done', 'H1']);
+  assert.notStrictEqual(r.code, 0); assert.match(r.out, /high-risk \(payments\) and no forge-tester was dispatched/);
+  forge(['task', 'dispatch', 'H1', '--agent', 'forge-tester', '--model', 'sonnet']);
+  assert.strictEqual(forge(['task', 'done', 'H1']).code, 0);
+  // a routine task is not held
+  addItem('H2', ['--allowed', 'b/']); forge(['task', 'start', 'H2']); touch('h2.txt'); forge(['task', 'verify', 'H2']);
+  assert.strictEqual(forge(['task', 'done', 'H2']).code, 0);
+  // warn: test-lane criteria without a tester warn, never refuse
+  switchOn('requireTester', 'warn');
+  forge(['task', 'add', '--id', 'H3', '--title', 't', '--criterion', 'tests pass::node -e "process.exit(0)" # vitest', '--allowed', 'c/']);
+  forge(['task', 'start', 'H3']); touch('h3.txt'); forge(['task', 'verify', 'H3']);
+  r = forge(['task', 'done', 'H3']);
+  assert.strictEqual(r.code, 0); assert.match(r.out, /TESTER WARNING/);
+});
+
+test('C9: starting a high-risk task without an architect dispatch prints the design prompt; the brief carries the note', () => {
+  switchOn('architectPrepass', 'high-risk');
+  addItem('A9', ['--domain', 'auth']);
+  const r = forge(['task', 'start', 'A9']);
+  assert.match(r.out, /HIGH-RISK TASK \(auth\)/); assert.match(r.out, /# Design brief — A9/); assert.match(r.out, /context save A9 --section design-note/);
+  const sv = spawnSync(process.execPath, [CLI, 'context', 'save', 'A9', '--section', 'design-note'], { cwd: dir, input: 'Failure classes: invalid token → 401; JWKS down → 503.\n', encoding: 'utf8', env: Object.assign({}, process.env, { CLAUDE_PROJECT_DIR: dir }) });
+  assert.strictEqual(sv.status, 0);
+  forge(['brief', 'A9', '--save']);
+  assert.match(fs.readFileSync(path.join(dir, 'forge', 'briefs', 'A9.md'), 'utf8'), /## Design note \(forge-architect\)\nFailure classes: invalid token → 401; JWKS down → 503\./);
+  // a routine task gets no prompt
+  addItem('A8', ['--allowed', 'zz/']);
+  assert.doesNotMatch(forge(['task', 'start', 'A8']).out, /HIGH-RISK/);
+});
+
+test('C11: milestone security --brief prints a reviewer prompt with the range, pack and output shape, and writes nothing', () => {
+  addItem('M1a', ['--milestone', 'M1']);
+  const before = fs.readFileSync(path.join(dir, 'forge', 'state', 'work.json'), 'utf8');
+  const r = forge(['milestone', 'security', 'M1', '--brief']);
+  assert.strictEqual(r.code, 0, r.out);
+  assert.match(r.out, /^# Security brief — milestone M1/);
+  assert.match(r.out, /forge-domain-packs\/references\/security\.md/);
+  assert.match(r.out, /NEW WORK ITEM .* ACCEPTED RISK/);
+  assert.strictEqual(fs.readFileSync(path.join(dir, 'forge', 'state', 'work.json'), 'utf8'), before);
+});
+
+test('v0.21: Configuration is Forge and the dev setup (why, risk, copyable command); Specs is the application; change scripts live on System', () => {
+  addItem('S1', ['--milestone', 'M1']);
+  fs.mkdirSync(path.join(dir, 'forge', 'changes'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'forge', 'changes', '2026-10-01-recut.md'), '# recut\n');
+  forge(['dashboard']);
+  const dash = fs.readFileSync(path.join(dir, 'forge', 'dashboard.html'), 'utf8');
+  const page = id => dash.split(`data-page="${id}"`)[1].split('</section>')[0];
+  const conf = page('configuration'), specs = page('specs'), sys = page('system');
+  assert.match(conf, /how Forge and the development setup are configured/);
+  assert.match(conf, /<th>Why you'd change it<\/th><th>Risk<\/th><th>How to change<\/th>/);
+  assert.match(conf, /<code>options\.itemShape<\/code>.*class="risk risk-testfirst">test first<\/span>.*<code class="cmd copyable"[^>]*>forge config set options\.itemShape refuse<\/code>/);
+  assert.match(conf, /turn it back off/);
+  assert.match(specs, /what the application must do/);
+  assert.doesNotMatch(specs, /2026-10-01-recut\.md|Change scripts/);
+  assert.match(sys, /Plan change scripts/);
+  assert.match(sys, /2026-10-01-recut\.md/);
+  assert.match(dash, /closest\('code\.copyable'\)/);
 });

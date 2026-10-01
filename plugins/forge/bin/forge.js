@@ -106,7 +106,7 @@ const MUTATING = (() => {
   const c = process.argv[2] || '', s = process.argv[3] || '';
   if (c === 'init') return true;
   if (c === 'task') return !['list', 'show', 'next', ''].includes(s);
-  if (c === 'milestone') return ['security', 'approve', 'reopen', 'add', 'update', 'move', 'remove', 'ship'].includes(s);
+  if (c === 'milestone') return ['security', 'approve', 'reopen', 'add', 'update', 'move', 'remove', 'ship'].includes(s) && !(s === 'security' && process.argv.includes('--brief'));
   if (c === 'dispatch') return true;
   if (c === 'release') return ['add', 'update', 'move', 'remove', 'freeze', 'tag'].includes(s);
   if (c === 'component') return ['add', 'update'].includes(s);
@@ -165,6 +165,47 @@ function releaseWorkLock() {
   LOCK_HELD = false;
 }
 process.on('exit', releaseWorkLock);
+// v0.21 (C6): verifies run one at a time. They share the project's local database, auth
+// server and ports, so two at once corrupt each other's results. Unlike the state lock
+// (held for milliseconds) a verify can run for minutes: a second verify WAITS, visibly,
+// and the state lock is NOT held while checks run, so parallel workers can still record
+// starts and dispatches. Same no-delete-filesystem fallbacks as the state lock.
+const VERIFY_LOCK = path.join(STATE, 'verify.lock');
+const VERIFY_WAIT_MS = parseInt(process.env.FORGE_VERIFY_WAIT_MS || '', 10) || 30 * 60 * 1000;
+const VERIFY_STALE_MS = parseInt(process.env.FORGE_VERIFY_STALE_MS || '', 10) || 2 * 60 * 60 * 1000;
+let VERIFY_HELD = false;
+function acquireVerifyLock(itemId, noWait) {
+  if (VERIFY_HELD) return;
+  const deadline = Date.now() + VERIFY_WAIT_MS;
+  let told = false;
+  for (;;) {
+    const mine = { pid: process.pid, ts: ts(), item: itemId, nonce: crypto.randomBytes(6).toString('hex') };
+    try { fs.writeFileSync(VERIFY_LOCK, JSON.stringify(mine), { flag: 'wx' }); VERIFY_HELD = true; return; }
+    catch (e) {
+      if (e.code !== 'EEXIST') { VERIFY_HELD = true; return; } // fs oddity — fail open, like the state lock
+      let h = null; try { h = JSON.parse(fs.readFileSync(VERIFY_LOCK, 'utf8')); } catch (_) { }
+      const age = h && Number.isFinite(Date.parse(h.ts)) ? Date.now() - Date.parse(h.ts) : Infinity;
+      if (!h || h.released || !pidAlive(h.pid) || age > VERIFY_STALE_MS) {
+        try { fs.unlinkSync(VERIFY_LOCK); continue; } catch (u) {
+          if (u.code === 'ENOENT') continue;
+          try { fs.writeFileSync(VERIFY_LOCK, JSON.stringify(mine)); if (JSON.parse(fs.readFileSync(VERIFY_LOCK, 'utf8')).nonce === mine.nonce) { VERIFY_HELD = true; return; } } catch (_) { }
+          die(`Refused: the verify lock is stale but cannot be removed or claimed (${u.code}). Remove ${path.relative(PROJECT, VERIFY_LOCK)} by hand, then retry.`);
+        }
+      }
+      if (noWait) die(`Refused: another verify is running (${h.item || '?'}, pid ${h.pid}, since ${h.ts}). Verifies run one at a time — they share the local database and servers. Retry when it finishes, or drop --no-wait to queue behind it.`);
+      if (!told) { out(`Waiting for the verify of ${h.item || '?'} to finish (pid ${h.pid}, since ${String(h.ts).slice(11, 19)}) — verifies run one at a time because they share the local database and servers.`); told = true; }
+      if (Date.now() >= deadline) die(`Refused: waited ${Math.round(VERIFY_WAIT_MS / 60000)}min for the verify of ${h.item || '?'} (pid ${h.pid}). If it is hung, stop it; a dead process's lock breaks by itself.`);
+      sleepMs(250);
+    }
+  }
+}
+function releaseVerifyLock() {
+  if (!VERIFY_HELD) return;
+  try { fs.unlinkSync(VERIFY_LOCK); } catch (_) { try { fs.writeFileSync(VERIFY_LOCK, JSON.stringify({ released: true, pid: process.pid, ts: ts() })); } catch (_) { } }
+  VERIFY_HELD = false;
+}
+process.on('exit', releaseVerifyLock);
+
 
 // -- orchestrator session lock (v0.5): one active orchestrator per project ----
 function loadLock() { try { return JSON.parse(fs.readFileSync(SESSION_FILE, 'utf8')); } catch (_) { return null; } }
@@ -288,7 +329,7 @@ function usageFiles(dirs) {
 }
 
 function emptyUsageCache() {
-  return { v: 4, files: {}, models: {}, byType: {}, perItem: {}, byDay: {},
+  return { v: 5, files: {}, models: {}, byType: {}, perItem: {}, byDay: {},
            dispatches: 0, tied: 0, firstTs: null, lastTs: null, bytes: 0, total: 0, complete: false };
 }
 
@@ -312,6 +353,11 @@ function readTail(file, off) {
 // Folds one chunk of JSONL into an aggregate. Pure accumulation, so the same
 // function serves the persistent cache and the throwaway tail view.
 function consumeUsage(agg, text, side, knownIdRe, rec) {
+  // v0.21 (C0): Claude Code writes one JSONL line per content block (thinking, text,
+  // tool_use …), each repeating the SAME message.id and usage. Counting lines counted one
+  // API call 2–7 times (measured: 497 lines for 229 calls in one transcript). A repeated id
+  // replaces the previous line's usage (the last line wins) and is not a new call.
+  const holder = rec || {};
   for (const line of text.split('\n')) {
     if (!line.trim()) continue;
     let d; try { d = JSON.parse(line); } catch (_) { continue; }
@@ -340,20 +386,31 @@ function consumeUsage(agg, text, side, knownIdRe, rec) {
       const c0 = d.message.content;
       const txt = typeof c0 === 'string' ? c0 : (Array.isArray(c0) ? c0.filter(x => x && x.type === 'text').map(x => x.text).join('\n') : '');
       rec.firstUser = true;
-      if (/^\s*#\s*(Work|Review|Security|Explore|Test) brief (—|-)/.test(txt)) rec.workerTop = true;
+      if (/^\s*#\s*(Work|Review|Security|Explore|Test|Design) brief (—|-)/.test(txt)) rec.workerTop = true;
     }
     if (d.type !== 'assistant' || !d.message) continue;
     const model = d.message.model || 'unknown';
     if (model === '<synthetic>') continue;
-    if (rec) { rec.calls = (rec.calls || 0) + 1; rec.model = model; }
     const u = d.message.usage || {};
+    const cur = { in: u.input_tokens || 0, out: u.output_tokens || 0, cc: u.cache_creation_input_tokens || 0, cr: u.cache_read_input_tokens || 0 };
+    const mid = d.message.id || null;
+    const prev = holder.lastMsg;
+    if (mid && prev && prev.id === mid && agg.models[prev.model] && agg.models[prev.model][prev.thread]) {
+      const tp = agg.models[prev.model][prev.thread];
+      tp.in += cur.in - prev.in; tp.out += cur.out - prev.out; tp.cacheCreate += cur.cc - prev.cc; tp.cacheRead += cur.cr - prev.cr;
+      if (prev.day) agg.byDay[prev.day] = (agg.byDay[prev.day] || 0) + cur.out - prev.out;
+      holder.lastMsg = Object.assign({}, prev, cur);
+    } else {
+    if (rec) { rec.calls = (rec.calls || 0) + 1; rec.model = model; }
     const external = rec ? !!rec.external : (/^sdk/i.test(String(d.entrypoint || '')) && !side);
     const thread = external ? 'external' : (side || d.isSidechain || (rec && rec.workerTop)) ? 'side' : 'main';
     const m = (agg.models[model] = agg.models[model] || {});
     const t = (m[thread] = m[thread] || { calls: 0, in: 0, out: 0, cacheCreate: 0, cacheRead: 0 });
-    t.calls++; t.in += u.input_tokens || 0; t.out += u.output_tokens || 0;
-    t.cacheCreate += u.cache_creation_input_tokens || 0; t.cacheRead += u.cache_read_input_tokens || 0;
-    if (tsv) agg.byDay[tsv.slice(0, 10)] = (agg.byDay[tsv.slice(0, 10)] || 0) + (u.output_tokens || 0);
+    t.calls++; t.in += cur.in; t.out += cur.out; t.cacheCreate += cur.cc; t.cacheRead += cur.cr;
+    const day = tsv ? tsv.slice(0, 10) : null;
+    if (day) agg.byDay[day] = (agg.byDay[day] || 0) + cur.out;
+    holder.lastMsg = mid ? Object.assign({ id: mid, model, thread, day }, cur) : null;
+    }
     for (const ct of (Array.isArray(d.message.content) ? d.message.content : [])) {
       if (!ct || ct.type !== 'tool_use' || (ct.name !== 'Task' && ct.name !== 'Agent')) continue;
       const pr = (ct.input || {}).prompt || '';
@@ -373,7 +430,7 @@ function collectUsage(opts = {}) {
   const budgetMs = opts.budgetMs || 0;
   const t0 = Date.now();
   let c = opts.rescan ? null : readJson(USAGE_CACHE, null);
-  if (!c || c.v !== 4) c = emptyUsageCache(); // v0.17.1: v4 separates external (SDK-driven) sessions
+  if (!c || c.v !== 5) c = emptyUsageCache(); // v0.17.1: v4 separates external sessions · v0.21: v5 counts one call per message id
   const dirs = usageDirs(opts.rescan ? null : c.dirs);
   if (!dirs) return null;
   c.dirs = dirs;
@@ -518,7 +575,7 @@ function usageMetrics(c, doneCount) {
     done: doneCount,
     byModel,
     external,
-    defs: 2, // v0.17.1: external sessions excluded from the totals above
+    defs: 3, // v0.17.1: external sessions excluded · v0.21: one call per message id (C0)
     perItem: doneCount ? { calls: calls / doneCount, context: context / doneCount, out: outTok / doneCount } : null
   };
 }
@@ -1202,29 +1259,39 @@ function graphifyProblems(g) {
 // v0.20.1: what every setting means and how to change it — one registry feeds the dashboard
 // ============================================================================
 const CONFIG_DOCS = [
-  { key: 'phase', def: 'spec', group: 'Project', what: 'Where the project is: spec (shaping the product, no building) or build (the build loop runs).', change: 'forge config set phase build' },
-  { key: 'specDir', def: '—', group: 'Project', what: 'Folder holding the spec layers; the Specs page lists it and briefs cite it.', change: 'forge config set specDir spec' },
-  { key: 'verify.*', def: '—', group: 'Verification', what: 'Commands every task verification runs (test, lint, typecheck, security, build, e2e …). A task is DONE only when all pass on the current tree.', change: 'forge config set verify.test "npm test"' },
-  { key: 'options.verifyVerbose', def: 'false', group: 'Verification', what: 'Print every check\'s full output on verify (default: one line per passing check; the full tail is always kept in state).', change: 'forge config set options.verifyVerbose true' },
-  { key: 'options.security', def: 'on', group: 'Verification', what: 'Security gate before a milestone is approved and a preflight warning when no verify.security scanner is set. "off" disables both.', change: 'forge config set options.security off' },
-  { key: 'options.gates', def: 'per-milestone', group: 'Gates', what: 'per-milestone: each milestone waits for your approval before the next starts. end-only: one review at the end.', change: 'forge config set options.gates end-only' },
-  { key: 'options.protect', def: '—', group: 'Gates', what: 'Comma-separated paths no task may edit (generated code, migrations …). Edits there are blocked by the hook.', change: 'forge config set options.protect "src/generated/,supabase/migrations/"' },
-  { key: 'options.scopeExempt', def: 'forge/,spec/,docs/', group: 'Gates', what: 'Folders exempt from a task\'s file-scope guard (orchestrator housekeeping). *.md is always exempt.', change: 'forge config set options.scopeExempt "forge/,spec/,docs/"' },
-  { key: 'options.concurrency', def: '4 (new) · 1 (unset)', group: 'Build loop', what: 'Most tasks in progress at once. Parallel tasks must have disjoint file scopes; start refuses an overlap.', change: 'forge config set options.concurrency 4' },
-  { key: 'options.autopilot', def: 'off', group: 'Build loop', what: 'on: keep taking the next task of the milestone; stop only for you (milestone ready to test, a question, an escalation, nothing startable, a run limit).', change: 'forge autopilot on   ·   forge autopilot off' },
-  { key: 'options.autopilotMaxItems', def: '0 (no limit)', group: 'Build loop', what: 'Autopilot stops after this many tasks in one run.', change: 'forge autopilot on --max-items 8' },
-  { key: 'options.autopilotMaxHours', def: '0 (no limit)', group: 'Build loop', what: 'Autopilot stops after this many hours in one run.', change: 'forge autopilot on --hours 6' },
-  { key: 'options.graphify', def: 'unset', group: 'Build loop', what: 'use: agents orient with the code graph (graphify-out/) instead of grep — needs a built graph and the Claude Code integration (see the Graphify card). skip: proceed without.', change: 'forge config set options.graphify use' },
-  { key: 'options.web', def: 'false', group: 'Build loop', what: 'The project has a web UI: preflight checks Playwright so E2E criteria can be machine-verified.', change: 'forge config set options.web true' },
-  { key: 'options.integration', def: 'per-milestone', group: 'Git flow', what: 'per-milestone: one branch per milestone, one commit per task (task done), one PR per milestone (milestone ship). manual: Forge runs no git (needs a recorded reason).', change: 'forge config set options.integration manual --reason "…"' },
-  { key: 'options.baseBranch', def: '—', group: 'Git flow', what: 'Integration branch milestone branches start from and merge into (staging, develop). Production branches are refused.', change: 'forge config set options.baseBranch staging' },
-  { key: 'options.branchPattern', def: 'milestone/<id>', group: 'Git flow', what: 'Name of each milestone branch.', change: 'forge config set options.branchPattern "milestone/<id>"' },
-  { key: 'options.mergeMethod', def: 'merge', group: 'Git flow', what: 'How a milestone PR is merged (merge, squash, rebase).', change: 'forge config set options.mergeMethod squash' },
-  { key: 'options.remote', def: 'origin', group: 'Git flow', what: 'Git remote that task commits are pushed to.', change: 'forge config set options.remote origin' },
-  { key: 'options.gateSteps', def: '—', group: 'Git flow', what: 'Manual steps shown at milestone ship and confirmed with --steps-done ("step one || step two").', change: 'forge config set options.gateSteps "db push || deploy staging"' },
-  { key: 'options.versionStart', def: '0', group: 'Versions', what: 'Number of the first release: V0 = MVP; an existing product may start at 2.', change: 'forge config set options.versionStart 0' },
-  { key: 'options.usageAuto', def: 'true', group: 'Telemetry', what: 'Refresh the token snapshot from session logs on every state change. false: only when you run forge usage.', change: 'forge config set options.usageAuto false' },
-  { key: 'providers.*', def: '—', group: 'Telemetry', what: 'API workers (forge worker run): model, url (default OpenRouter), keyEnv, maxTurns.', change: 'forge config set providers.model "<id>"' },
+  { key: 'options.itemShape', def: 'warn', group: 'Delegation', what: 'refuse: task start refuses a task with more than 6 criteria unless --reason (oversized tasks rarely pass first time). warn: only warns.', change: 'forge config set options.itemShape refuse', why: 'Big tasks are where first-pass collapses; refusing them forces a side-by-side split before a worker burns an attempt.', risk: 'test first' },
+  { key: 'options.workerExplore', def: 'off', group: 'Delegation', what: 'bounded: workers investigate inside their scope (plus a small read budget outside it) and decide HOW; the brief says WHAT. off: the brief pre-solves and forbids exploring.', change: 'forge config set options.workerExplore bounded', why: 'The CTO stops pre-solving: briefs get shorter and the worker, closest to the code, picks the approach.', risk: 'test first' },
+  { key: 'options.workerReadBudget', def: '10', group: 'Delegation', what: 'With workerExplore=bounded: how many files outside its scope a worker may read (it lists them).', change: 'forge config set options.workerReadBudget 10', why: 'Raise it when bounded workers report they ran out of reads on legitimate cross-cutting work.', risk: 'low' },
+  { key: 'options.contextPack', def: 'false', group: 'Delegation', what: 'true: a cheap explorer assembles each task\'s context (files, patterns, invariants, spec, decisions, rules) into forge/context/<id>.md instead of the CTO reading it.', change: 'forge config set options.contextPack true', why: 'Moves context gathering off the expensive session model to a cheap explorer; pairs with workerExplore.', risk: 'test first' },
+  { key: 'options.briefLimit', def: 'off', group: 'Delegation', what: 'on: briefs warn above 12 KB and are refused above 20 KB — split the task or move detail into the context pack.', change: 'forge config set options.briefLimit on', why: 'Keeps briefs from growing into fix lists; a brief over the limit usually means the task should be split.', risk: 'low' },
+  { key: 'options.retryFromReview', def: 'false', group: 'Delegation', what: 'true: a retry brief is the original brief plus only the latest review findings (task fail --from-review) — never stacked passes.', change: 'forge config set options.retryFromReview true', why: 'Retries stop accumulating stale instructions; the worker sees one clear set of findings.', risk: 'low' },
+  { key: 'options.requireDispatch', def: 'false', group: 'Delegation', what: 'true: task done refuses without a recorded implementer/tester launch; trivial self-closes need --self --reason and are counted.', change: 'forge config set options.requireDispatch true', why: 'Keeps the CTO from quietly doing the work itself, and makes every worker run visible in the record.', risk: 'low' },
+  { key: 'options.requireTester', def: 'false', group: 'Delegation', what: 'high-risk: auth/data/payments/migrations/security tasks get a tester in parallel; done refuses without one. warn: warns when most criteria are tests.', change: 'forge config set options.requireTester high-risk', why: 'Independent tests written from the criteria catch what the implementer\'s own tests miss on risky code.', risk: 'test first' },
+  { key: 'options.architectPrepass', def: 'false', group: 'Delegation', what: 'high-risk: before the first worker on a high-risk task, the architect (Opus) writes a short design note the brief carries.', change: 'forge config set options.architectPrepass high-risk', why: 'Gets the strongest model\'s thinking on failure classes before the first attempt, not after two failures.', risk: 'test first' },
+  { key: 'options.delegateSpecSync', def: 'false', group: 'Delegation', what: 'true: at close the CTO decides what changed in the spec; a Haiku worker makes the edit.', change: 'forge config set options.delegateSpecSync true', why: 'Spec edits are mechanical once decided; a cheap worker makes them while the CTO decides what changed.', risk: 'low' },
+  { key: 'phase', def: 'spec', group: 'Project', what: 'Where the project is: spec (shaping the product, no building) or build (the build loop runs).', change: 'forge config set phase build', why: 'Move to build once the spec has gated and the plan is cut.', risk: 'none' },
+  { key: 'specDir', def: '—', group: 'Project', what: 'Folder holding the spec layers; the Specs page lists it and briefs cite it.', change: 'forge config set specDir spec', why: 'Point it at the folder holding the application spec, so briefs and the Specs page find it.', risk: 'none' },
+  { key: 'verify.*', def: '—', group: 'Verification', what: 'Commands every task verification runs (test, lint, typecheck, security, build, e2e …). A task is DONE only when all pass on the current tree.', change: 'forge config set verify.test "npm test"', why: 'Without them nothing is machine-checked; set at least test and lint before building.', risk: 'none' },
+  { key: 'options.verifyVerbose', def: 'false', group: 'Verification', what: 'Print every check\'s full output on verify (default: one line per passing check; the full tail is always kept in state).', change: 'forge config set options.verifyVerbose true', why: 'When you are debugging a check and want its full output on screen.', risk: 'none' },
+  { key: 'options.security', def: 'on', group: 'Verification', what: 'Security gate before a milestone is approved and a preflight warning when no verify.security scanner is set. "off" disables both.', change: 'forge config set options.security off', why: 'Leave on; turn off only for throwaway prototypes.', risk: 'none' },
+  { key: 'options.gates', def: 'per-milestone', group: 'Gates', what: 'per-milestone: each milestone waits for your approval before the next starts. end-only: one review at the end.', change: 'forge config set options.gates end-only', why: 'end-only for short or low-stakes projects where a review per milestone is overhead.', risk: 'low' },
+  { key: 'options.protect', def: '—', group: 'Gates', what: 'Comma-separated paths no task may edit (generated code, migrations …). Edits there are blocked by the hook.', change: 'forge config set options.protect "src/generated/,supabase/migrations/"', why: 'Paths a worker must never touch: generated code, applied migrations, vendored files.', risk: 'none' },
+  { key: 'options.scopeExempt', def: 'forge/,spec/,docs/', group: 'Gates', what: 'Folders exempt from a task\'s file-scope guard (orchestrator housekeeping). *.md is always exempt.', change: 'forge config set options.scopeExempt "forge/,spec/,docs/"', why: 'Add folders the orchestrator edits as housekeeping, outside any task\'s scope.', risk: 'low' },
+  { key: 'options.concurrency', def: '4 (new) · 1 (unset)', group: 'Build loop', what: 'Most tasks in progress at once. Parallel tasks must have disjoint file scopes; start refuses an overlap.', change: 'forge config set options.concurrency 4', why: 'More than one worker at a time when tasks have disjoint scopes; verifies still run one at a time.', risk: 'test first' },
+  { key: 'options.autopilot', def: 'off', group: 'Build loop', what: 'on: keep taking the next task of the milestone; stop only for you (milestone ready to test, a question, an escalation, nothing startable, a run limit).', change: 'forge autopilot on   ·   forge autopilot off', why: 'Leave a milestone running unattended; it still stops for you at every human decision.', risk: 'low' },
+  { key: 'options.autopilotMaxItems', def: '0 (no limit)', group: 'Build loop', what: 'Autopilot stops after this many tasks in one run.', change: 'forge autopilot on --max-items 8', why: 'Cap an unattended run so you review in batches.', risk: 'none' },
+  { key: 'options.autopilotMaxHours', def: '0 (no limit)', group: 'Build loop', what: 'Autopilot stops after this many hours in one run.', change: 'forge autopilot on --hours 6', why: 'Cap an unattended run by time.', risk: 'none' },
+  { key: 'options.graphify', def: 'unset', group: 'Build loop', what: 'use: agents orient with the code graph (graphify-out/) instead of grep — needs a built graph and the Claude Code integration (see the Graphify card). skip: proceed without.', change: 'forge config set options.graphify use', why: 'Agents answer structural questions from the graph instead of reading files — fewer tokens per task.', risk: 'low' },
+  { key: 'options.web', def: 'false', group: 'Build loop', what: 'The project has a web UI: preflight checks Playwright so E2E criteria can be machine-verified.', change: 'forge config set options.web true', why: 'The application has a browser UI and criteria that need E2E checks.', risk: 'none' },
+  { key: 'options.integration', def: 'per-milestone', group: 'Git flow', what: 'per-milestone: one branch per milestone, one commit per task (task done), one PR per milestone (milestone ship). manual: Forge runs no git (needs a recorded reason).', change: 'forge config set options.integration manual --reason "…"', why: 'Keep per-milestone; manual only when another tool owns git.', risk: 'low' },
+  { key: 'options.baseBranch', def: '—', group: 'Git flow', what: 'Integration branch milestone branches start from and merge into (staging, develop). Production branches are refused.', change: 'forge config set options.baseBranch staging', why: 'Set it to the branch milestones should merge into.', risk: 'none' },
+  { key: 'options.branchPattern', def: 'milestone/<id>', group: 'Git flow', what: 'Name of each milestone branch.', change: 'forge config set options.branchPattern "milestone/<id>"', why: 'Match your team\'s branch naming.', risk: 'none' },
+  { key: 'options.mergeMethod', def: 'merge', group: 'Git flow', what: 'How a milestone PR is merged (merge, squash, rebase).', change: 'forge config set options.mergeMethod squash', why: 'Match how your repository merges PRs.', risk: 'none' },
+  { key: 'options.remote', def: 'origin', group: 'Git flow', what: 'Git remote that task commits are pushed to.', change: 'forge config set options.remote origin', why: 'When pushes go somewhere other than origin.', risk: 'none' },
+  { key: 'options.gateSteps', def: '—', group: 'Git flow', what: 'Manual steps shown at milestone ship and confirmed with --steps-done ("step one || step two").', change: 'forge config set options.gateSteps "db push || deploy staging"', why: 'Manual release steps you want confirmed at every ship.', risk: 'none' },
+  { key: 'options.versionStart', def: '0', group: 'Versions', what: 'Number of the first release: V0 = MVP; an existing product may start at 2.', change: 'forge config set options.versionStart 0', why: 'An existing product that already shipped versions.', risk: 'none' },
+  { key: 'options.usageAuto', def: 'true', group: 'Telemetry', what: 'Refresh the token snapshot from session logs on every state change. false: only when you run forge usage.', change: 'forge config set options.usageAuto false', why: 'Turn off if refreshing usage on every command is slow on a large log.', risk: 'none' },
+  { key: 'providers.*', def: '—', group: 'Telemetry', what: 'API workers (forge worker run): model, url (default OpenRouter), keyEnv, maxTurns.', change: 'forge config set providers.model "<id>"', why: 'Run some workers on an API model outside the session.', risk: 'test first' },
 ];
 const COMMAND_DOCS = [
   { group: 'Start and status', items: [
@@ -1243,13 +1310,20 @@ const COMMAND_DOCS = [
     ['forge task block <id> --reason "question: …"', 'Park a task on a question for you.'],
     ['forge task fail <id> --note …', 'Record a failed attempt with its diagnosis.'],
     ['forge task move <id> --before|--after <id>', 'Reorder unstarted tasks (dependency-checked).'],
-    ['forge brief <id> --save', 'Write the worker brief for a task.'] ] },
+    ['forge brief <id> --save', 'Write the worker brief for a task.'],
+    ['forge brief <id> --context', 'Print the explorer prompt that assembles the task\'s context pack (contextPack).'],
+    ['forge context save <id> [--section design-note]', 'Record a context pack or design note (explorer / architect, from stdin).'],
+    ['forge task add|update <id> --domain api,auth', 'Tag domains: the brief carries their rules; auth/data/payments/migrations/security are high-risk.'],
+    ['forge task fail <id> --from-review <file>', 'Fail with the reviewer\'s findings; the retry brief carries only the latest.'],
+    ['forge task done <id> --self --reason …', 'Close a trivial task without a worker (requireDispatch), counted in stats.'],
+    ['forge task verify <id> [--no-wait]', 'Verifies run one at a time; a second waits (or refuses with --no-wait).'] ] },
   { group: 'Milestones and releases', items: [
     ['forge milestone list', 'Milestones in order with labels and gates.'],
     ['forge milestone add <id> --name … --release <R>', 'Add a milestone named after the feature it enables.'],
     ['forge milestone move <id> --before|--after <M> --reason …', 'Reorder (refuses breaking dependencies or started work).'],
     ['forge milestone approve <id>', 'Your approval at the gate.'],
     ['forge milestone ship <id>', 'Open the milestone PR (git flow).'],
+    ['forge milestone security <id> --brief', 'Print the security-pass prompt for a fresh reviewer.'],
     ['forge release list | add | move | tag', 'Releases (V0 = MVP, V1 …) above milestones.'] ] },
   { group: 'Architecture and screens', items: [
     ['forge arch scan [--write]', 'Draft the architecture from the repo (zero tokens).'],
@@ -1272,6 +1346,81 @@ const COMMAND_DOCS = [
     ['forge usage [--baseline --label …]', 'Observed tokens and calls; baseline to measure a change.'],
     ['forge trace [--refusals]', 'Flight recorder of every command and hook decision.'] ] },
 ];
+
+// ============================================================================
+// v0.21: team-delegation switches (docs/IMPL-team-delegation.md). Every behaviour change
+// sits behind one options.* switch: ON for projects created by this version (forge init
+// writes them), OFF — today's behaviour — when the key is absent, so existing projects
+// change nothing until the user turns a switch on (one per measured segment).
+// ============================================================================
+const SWITCH_ON = { itemShape: 'refuse', workerExplore: 'bounded', contextPack: true, briefLimit: 'on', retryFromReview: true,
+  requireDispatch: true, requireTester: 'high-risk', architectPrepass: 'high-risk', delegateSpecSync: true };
+const SWITCH_OFF = { itemShape: 'warn', workerExplore: 'off', contextPack: false, briefLimit: 'off', retryFromReview: false,
+  requireDispatch: false, requireTester: false, architectPrepass: false, delegateSpecSync: false };
+function sw(cfg, k) {
+  const v = (((cfg || {}).options) || {})[k];
+  if (v === undefined || v === null || v === '') return SWITCH_OFF[k];
+  if (v === 'false' || v === false) return false;
+  if (v === 'true' || v === true) return true;
+  return v;
+}
+// Task domains (--domain): which domain packs a brief carries, and whether the task is high-risk.
+const HIGH_RISK_DOMAINS = ['auth', 'data', 'payments', 'migrations', 'security'];
+const DOMAIN_PACKS = { api: 'backend.md', backend: 'backend.md', data: 'backend.md', migrations: 'backend.md',
+  auth: 'security.md', security: 'security.md', payments: 'security.md', secrets: 'security.md',
+  frontend: 'frontend.md', ui: 'frontend.md', ux: 'design-ux.md', tests: 'testing.md' };
+function itemDomains(item) { return (item.domains || []).map(d => String(d).toLowerCase()); }
+function isHighRisk(item) { return itemDomains(item).some(d => HIGH_RISK_DOMAINS.includes(d)); }
+function packsFor(item) {
+  const set = [];
+  for (const d of itemDomains(item)) { const p = DOMAIN_PACKS[d]; if (p && !set.includes(p)) set.push(p); }
+  if (itemDomains(item).some(d => ['auth', 'security', 'payments', 'secrets', 'data'].includes(d)) && !set.includes('security.md')) set.push('security.md');
+  return set;
+}
+const PACKS_DIR = path.join(PLUGIN_ROOT, 'skills', 'forge-domain-packs', 'references');
+const CONTEXT_DIR = path.join(FORGE, 'context');
+function launchesOf(item, agentRe) { return (item.dispatches || []).filter(d => d.kind !== 'message' && agentRe.test(String(d.agent || ''))); }
+
+// v0.21 (C2): the forge-explorer prompt that assembles a task's context pack (writes nothing itself)
+function contextPackPrompt(item, cfg) {
+  const L = [];
+  L.push(`# Explore brief — ${item.id}: context pack`);
+  L.push('', `Assemble the context a worker needs for this task and RECORD it — do not implement anything. You are read-only on the code.`);
+  L.push('', `## The task`, `${item.title}${item.objective ? ` — ${item.objective}` : ''}`);
+  if ((item.criteria || []).length) { L.push('', `Acceptance criteria:`); item.criteria.forEach((c, i) => L.push(`${i + 1}. ${c.desc}`)); }
+  L.push(`Allowed scope: ${((item.scope || {}).allowed || []).join(', ') || '(not set yet)'}`);
+  if (item.component) L.push(`Tagged: ${item.component}`);
+  if ((item.domains || []).length) L.push(`Domains: ${item.domains.join(', ')}${isHighRisk(item) ? ' (high-risk)' : ''}`);
+  L.push('', `## Sources to read`);
+  if (cfg.specDir) L.push(`- the spec: \`${cfg.specDir}/\` — only the sections this task touches`);
+  L.push(`- decisions and discoveries: \`forge/decisions.md\`, \`forge/discoveries.md\` — only the entries that bind this task`);
+  for (const p of packsFor(item)) L.push(`- domain pack: \`${path.relative(PROJECT, path.join(PACKS_DIR, p)).split(path.sep).join('/')}\``);
+  L.push(`- the code under the allowed scope and what it calls${(((cfg.options || {}).graphify === 'use') && fs.existsSync(path.join(PROJECT, 'graphify-out', 'graph.json'))) ? ' — use `graphify query` / `graphify affected` first' : ''}`);
+  L.push('', `## Write the pack with exactly these sections`,
+    `## Relevant files — path and one line on why`,
+    `## Patterns to follow — existing code the change should look like (paths)`,
+    `## Invariants — what must stay true after the change`,
+    `## Spec — the sections that apply, quoted briefly with file references`,
+    `## Decisions and discoveries — the entries that bind this task`,
+    `## Domain rules — the pack lines that apply`,
+    '', `Keep it under 6 KB. Facts with file references; mark inferences as such.`,
+    '', `## Record it`,
+    `Pipe the pack into Forge (it writes forge/context/${item.id}.md; nothing else may):`,
+    `  node "${__filename}" context save ${item.id} <<'PACK'`, `  …the pack…`, `  PACK`,
+    `Then reply with one line: the path and its size.`);
+  L.push('', `_Orchestrator: dispatch this to forge-explorer (haiku) and record it: forge dispatch --agent forge-explorer --purpose explore --item ${item.id} --model haiku._`);
+  return L;
+}
+
+// the commit a milestone's work started from: the previous gate's head, else its first task's start
+function milestoneBase(w, m) {
+  const seqA = milestoneSeq(w);
+  for (const p of seqA.slice(0, seqA.indexOf(m)).reverse()) { const pc = ((w.gates || {})[p] || {}).commits; if (pc && pc.head) return pc.head; }
+  const starts = w.order.map(id => w.items[id]).filter(t => t.milestone === m && t.commitBase)
+    .map(t => ({ b: t.commitBase, at: Date.parse((t.attempts.find(a => a.outcome === 'started') || {}).ts || 0) }))
+    .sort((a, b) => a.at - b.at);
+  return starts.length ? starts[0].b : null;
+}
 
 function regenDashboard() {
   if (process.env.FORGE_DEFER_REGEN === '1') return; // v0.19.1: a change script regenerates once, at its end
@@ -1942,10 +2091,12 @@ function generateDashboard() {
       : gsD.choice === 'skip' ? '<p class="mut">Skipped by choice. Agents orient with explorer runs and grep.</p>' : '<p class="mut">No choice recorded. <code>forge config set options.graphify use</code> after installing it, or <code>skip</code>.</p>'}
   </div>`;
   const cfgGroups = [...new Set(CONFIG_DOCS.map(d => d.group))];
-  const configPage = `<div class="cfgintro panel"><p><b>How to change a setting:</b> run the command in the last column in a terminal, from the project folder — or ask the Claude session to run it. The CLI validates the value and records the decisions it needs (opting out of the git flow asks for a reason). Settings live in <code>forge/config.json</code>; change them through the CLI, not by editing the file. The dashboard refreshes on the next command.</p></div>
+  const configPage = `<div class="cfgintro panel"><p><b>This page is how Forge and the development setup are configured</b> — verify commands, gates, git flow, the build loop, delegation. It says nothing about the application itself: what the application must do lives in <a href="#/specs">Specs</a>.</p>
+    <p><b>Delegation switches are reversible.</b> Turn on one per milestone, record a baseline first (<code>forge usage --baseline --label &lt;switch&gt;</code>), and watch first-pass and the orchestrator's share of calls on <a href="#/plan">Plan</a> and <a href="#/usage">Usage</a>. If first-pass drops by more than one task, turn it back off. Risk: <b>none</b> — no effect on how work is done · <b>low</b> — changes the process, easy to see if it misbehaves · <b>test first</b> — try it on one milestone before keeping it.</p>
+    <p><b>How to change a setting:</b> run the command in the last column in a terminal, from the project folder — or ask the Claude session to run it. The CLI validates the value and records the decisions it needs (opting out of the git flow asks for a reason). Settings live in <code>forge/config.json</code>; change them through the CLI, not by editing the file. The dashboard refreshes on the next command. Click a command to copy it.</p></div>
     ${graphCard}
-    ${cfgGroups.map(gname => `<h3 class="h3s">${esc(gname)}</h3><div class="tblwrap"><table class="cfgt"><thead><tr><th>Setting</th><th>Now</th><th>Default</th><th>What it does</th><th>How to change</th></tr></thead><tbody>${
-      CONFIG_DOCS.filter(d => d.group === gname).map(d => { const v = cfgVal(d.key); return `<tr><td><code>${esc(d.key)}</code></td><td>${v || '<span class="mut">default</span>'}</td><td class="mut">${esc(d.def)}</td><td>${esc(d.what)}</td><td><code class="cmd">${esc(d.change)}</code></td></tr>`; }).join('')
+    ${cfgGroups.map(gname => `<h3 class="h3s">${esc(gname)}</h3><div class="tblwrap"><table class="cfgt"><colgroup><col style="width:19%"><col style="width:6%"><col style="width:7%"><col style="width:26%"><col style="width:21%"><col style="width:6%"><col style="width:15%"></colgroup><thead><tr><th>Setting</th><th>Now</th><th>Default</th><th>What it does</th><th>Why you'd change it</th><th>Risk</th><th>How to change</th></tr></thead><tbody>${
+      CONFIG_DOCS.filter(d => d.group === gname).map(d => { const v = cfgVal(d.key); return `<tr><td><code>${esc(d.key)}</code></td><td>${v || '<span class="mut">default</span>'}</td><td class="mut">${esc(d.def)}</td><td>${esc(d.what)}</td><td>${esc(d.why)}</td><td><span class="risk risk-${d.risk.replace(/\s+/g, '')}">${esc(d.risk)}</span></td><td><code class="cmd copyable" title="Click to copy">${esc(d.change)}</code></td></tr>`; }).join('')
     }</tbody></table></div>`).join('')}`;
   const commandsPage = `<div class="workbar"><input class="filter" id="cmdfilter" type="search" placeholder="Filter commands… (e.g. milestone, verify, autopilot)" aria-label="Filter commands"><span class="mut">every command is <code>node &lt;forge&gt;/bin/forge.js …</code> — in a Claude session just say what you want; <code>forge help</code> prints the full reference</span></div>
     ${COMMAND_DOCS.map(g => `<section class="cmdgroup"><h3 class="h3s">${esc(g.group)}</h3><div class="tblwrap"><table class="cmdt"><tbody>${g.items.map(([c, wtxt]) => `<tr data-q="${esc((c + ' ' + wtxt).toLowerCase())}"><td><code class="cmd">${esc(c)}</code></td><td>${esc(wtxt)}</td></tr>`).join('')}</tbody></table></div></section>`).join('')}`;
@@ -1956,7 +2107,7 @@ function generateDashboard() {
     ['Versions', `labels start at V${versionStart()} (<code>options.versionStart</code>)`],
     ['Graphify', esc((cfg.options || {}).graphify || 'unset')],
   ].map(([k, v]) => `<div class="sysrow"><span class="n">${k}</span><span class="d">${v}</span></div>`).join('');
-  // Specs: the spec folder plus the change scripts (upgrades, re-cuts) with their explanations
+  // Change scripts (re-cuts, upgrades) are Forge plumbing: listed on System, not Specs (Specs = the application)
   let changeRows = '';
   try {
     const cd = path.join(FORGE, 'changes');
@@ -2162,6 +2313,13 @@ button.cchip:hover{background:var(--accsoft);color:var(--accent)}
 table.cfgt{table-layout:fixed} table.cfgt th:nth-child(1){width:19%} table.cfgt th:nth-child(2){width:20%} table.cfgt th:nth-child(3){width:10%} table.cfgt th:nth-child(5){width:21%}
 table.cfgt td{overflow-wrap:anywhere} table.cfgt td code{white-space:normal;word-break:break-word} table.cfgt td:nth-child(4){color:var(--ink2)} table.cfgt td div{margin:1px 0}
 code.cmd{white-space:pre-wrap;word-break:break-word}
+.risk{display:inline-block;font-size:11.5px;font-weight:600;padding:1px 7px;border-radius:999px;white-space:nowrap;background:var(--line2);color:var(--ink2)}
+.risk-low{background:#0c8a7014;color:var(--readyc)}
+.risk-testfirst{background:#b3660a14;color:var(--awaitc)}
+code.copyable{cursor:copy}
+table.cfgt{table-layout:fixed;width:100%}
+table.cfgt td{overflow-wrap:anywhere}
+code.copyable.copied{outline:1px solid var(--done)}
 table.cmdt td:first-child{width:44%}
 .cmdgroup{margin-top:14px}
 /* ---- v0.19 pages ---- */
@@ -2377,15 +2535,13 @@ tbody tr:hover{background:#faf9f5}
 </section>
 
 <section class="page" data-page="specs" id="specs" hidden>
-  <div class="phead"><h2>Specs</h2><span class="mut">the source of intent, and the change scripts that reshaped the plan</span></div>
+  <div class="phead"><h2>Specs</h2><span class="mut">what the application must do — the source of intent the plan is cut from. How Forge and the development setup are configured is under <a href="#/configuration">Configuration</a>.</span></div>
   ${specRows ? `<h3 class="h3s">Specification <span class="mut">(${esc(cfg.specDir)}/)</span></h3>
   <div class="tblwrap"><table><thead><tr><th>File</th><th>Size</th><th>Modified</th></tr></thead><tbody>${specRows}</tbody></table></div>` : `<p class="mut">No spec folder configured${cfg.specDir ? ` (${esc(cfg.specDir)}/ not found)` : ''}.</p>`}
-  ${changeRows ? `<h3 class="h3s">Change scripts <span class="mut">(forge/changes/ — re-cuts and upgrades, newest first)</span></h3>
-  <div class="tblwrap"><table><thead><tr><th>File</th><th>Size</th><th>Modified</th></tr></thead><tbody>${changeRows}</tbody></table></div>` : ''}
 </section>
 
 <section class="page" data-page="configuration" id="configuration" hidden>
-  <div class="phead"><h2>Configuration</h2><span class="mut">how this project is set up, what each setting does, and how to change it</span></div>
+  <div class="phead"><h2>Configuration</h2><span class="mut">how Forge and the development setup are configured for this project — not the application</span></div>
   ${configPage}
 </section>
 
@@ -2395,7 +2551,7 @@ tbody tr:hover{background:#faf9f5}
 </section>
 
 <section class="page" data-page="system" id="system" hidden>
-  <div class="phead"><h2>System</h2><span class="mut">plan standards · preflight · baseline · settings — the plumbing</span></div>
+  <div class="phead"><h2>System</h2><span class="mut">plan standards · preflight · baseline · change scripts — the plumbing</span></div>
   ${standardsBlock ? `<h3 class="h3s">Plan standards <span class="mut">— ${standardsMet}/${standardsAll} met for Forge v${VERSION}${standardsMet < standardsAll ? ' · <code>forge upgrade</code> shows how to close the rest' : ''}</span></h3><div class="syscard">${standardsBlock}</div>` : ''}
   <div class="jgrid" style="margin-top:18px">
   <div><h3 class="h3s">Preflight ${pf ? `<span class="mut">${esc(pf.ts.slice(0, 16).replace('T', ' '))} · <span data-since="${esc(pf.ts)}" data-post=" ago"></span> — rerun with <code>forge preflight</code></span>` : ''}</h3>
@@ -2403,6 +2559,8 @@ tbody tr:hover{background:#faf9f5}
   <div><h3 class="h3s">Baseline ${base ? `<span class="mut">${esc(base.ts.slice(0, 16).replace('T', ' '))} · a recorded moment, not a live check</span>` : ''}</h3>
   <div class="syscard">${baseBlock}</div></div>
   </div>
+  ${changeRows ? `<h3 class="h3s" style="margin-top:18px">Plan change scripts <span class="mut">(forge/changes/ — re-cuts and Forge upgrades, newest first)</span></h3>
+  <div class="tblwrap"><table><thead><tr><th>File</th><th>Size</th><th>Modified</th></tr></thead><tbody>${changeRows}</tbody></table></div>` : ''}
   <p class="mut" style="margin-top:18px">Settings and what they do: <a href="#/configuration">Configuration</a> · commands: <a href="#/commands">Commands</a></p>
 </section>
 
@@ -2600,6 +2758,15 @@ tbody tr:hover{background:#faf9f5}
   closeB.addEventListener('click',closeDoc);
   scrim.addEventListener('click',closeDoc);
   document.addEventListener('keydown',function(e){ if(e.key==='Escape'&&panel.classList.contains('on')) closeDoc(); });
+})();
+/* v0.21: click a configuration command to copy it (works opened from disk; falls back to a selection copy) */
+(function(){
+  document.addEventListener('click',function(e){
+    var c=e.target&&e.target.closest?e.target.closest('code.copyable'):null; if(!c) return;
+    var txt=c.textContent, done=function(){ c.classList.add('copied'); setTimeout(function(){ c.classList.remove('copied'); },900); };
+    var fallback=function(){ try{ var r=document.createRange(); r.selectNodeContents(c); var sel=window.getSelection(); sel.removeAllRanges(); sel.addRange(r); document.execCommand('copy'); sel.removeAllRanges(); done(); }catch(_){} };
+    if(navigator.clipboard&&navigator.clipboard.writeText) navigator.clipboard.writeText(txt).then(done,fallback); else fallback();
+  });
 })();
 /* v0.19: one page at a time. The side menu switches pages; the hash is the address
    (#/plan/<item or milestone>, #/plan/c:<part or screen>, #/architecture/<part>),
@@ -2801,8 +2968,10 @@ function treeState() {
   const head = run('git rev-parse HEAD', { timeout: 10000 });
   const st = run('git status --porcelain', { timeout: 20000 });
   if (st.exit !== 0) return null; // not a git repo — preflight makes this mandatory anyway
+  // v0.21: Forge's own lock files come and go around a verify — they are not the work
+  const porcelain = st.tail.split('\n').filter(l => !/forge\/state\/(verify|work)\.lock$/.test(l)).join('\n');
   return ((head.exit === 0 ? head.tail : 'NOHEAD') + '|' +
-          crypto.createHash('sha1').update(st.tail).digest('hex')).slice(0, 80);
+          crypto.createHash('sha1').update(porcelain).digest('hex')).slice(0, 80);
 }
 
 // F4/3.4: baseline comparison as data — used by `task verify` and `baseline check`
@@ -2912,6 +3081,8 @@ function resolveScopeFiles(allowed, limit = 80) {
 // workers ('forge worker run') consume it directly.
 function briefLines(item, cfg) {
   const lines = [];
+  const bounded = sw(cfg, 'workerExplore') === 'bounded'; // v0.21 (C2)
+  const readBudget = parseInt(((cfg || {}).options || {}).workerReadBudget, 10) || 10;
   lines.push(`# Work brief — ${item.id}: ${item.title}`);
   lines.push('', `## Objective`, item.objective || '(fill in)');
   lines.push('', `## Acceptance criteria (your work is verified against these — they are the definition of done)`);
@@ -2925,20 +3096,41 @@ function briefLines(item, cfg) {
     if (sc.wholeTree) {
       lines.push('', `## Files in scope`, `This item is deliberately whole-tree — no file list can be given. Ask before reading widely.`);
     } else if (sc.files.length) {
-      lines.push('', `## Files in scope (${sc.files.length}${sc.truncated ? '+, truncated' : ''}) — this is the set; do not go looking for more`);
+      lines.push('', bounded
+        ? `## Files in scope (${sc.files.length}${sc.truncated ? '+, truncated' : ''}) — start here`
+        : `## Files in scope (${sc.files.length}${sc.truncated ? '+, truncated' : ''}) — this is the set; do not go looking for more`);
       for (const f of sc.files) lines.push(`- \`${f.rel}\`${f.size ? ` (${f.size < 1024 ? f.size + ' B' : Math.round(f.size / 1024) + ' KB'})` : ''}`);
       if (sc.truncated) lines.push(`- …the scope resolves to more files than listed. If the item genuinely needs all of them it is probably too big — say so.`);
     } else {
       lines.push('', `## Files in scope`, `The allowed scope resolves to no existing files — this is new-file work. Create only inside the allowed paths.`);
     }
   }
-  lines.push('', `## How to work (this is what keeps the item cheap and fast)`,
-    `- Read the files listed above FIRST. They are the working set.`,
-    `- Do not search or scan the repository. If you believe you need a file that is not listed, STOP and report which one and why — that is a scope question for the orchestrator, not something to resolve by exploring.`,
-    ...(((cfg.options || {}).graphify === 'use' && fs.existsSync(path.join(PROJECT, 'graphify-out', 'graph.json')))
-      ? [`- The files above are your working set — read them directly. For a question about code OUTSIDE that set (who calls this, what does that depend on), ask the code graph instead of searching: \`graphify query "<question>"\`, \`graphify explain "<symbol>"\`, \`graphify path "<A>" "<B>"\`. Each answer is a small scoped subgraph.`] : []),
-    `- Make the change, then run the verification commands below. Iterate on failures; do not re-read files you have already read.`,
-    `- If you find yourself unsure what to do next, STOP and report. A question costs one message; guessing costs an hour.`);
+  // v0.21 (C2): context pack + design note, when the switches are on and the files exist
+  const ctxFile = path.join(CONTEXT_DIR, `${item.id}.md`);
+  if (sw(cfg, 'contextPack') && fs.existsSync(ctxFile))
+    lines.push('', `## Context pack`, `Read \`forge/context/${item.id}.md\` first — the relevant files, patterns to follow, invariants this change must keep, the spec sections, decisions and domain rules, assembled for this task.`);
+  if (sw(cfg, 'architectPrepass') && fs.existsSync(ctxFile)) {
+    const note = (fs.readFileSync(ctxFile, 'utf8').match(/^## Design note[\s\S]*?(?=^## |(?![\s\S]))/m) || [])[0];
+    if (note) lines.push('', note.trim());
+  }
+  if (bounded) {
+    lines.push('', `## How to work`,
+      `- Read freely inside the allowed scope — the files above and anything else under the allowed paths.`,
+      `- You may read up to ${readBudget} files OUTSIDE the allowed scope when you need context (callers, types, conventions). List every out-of-scope file you read in your report.`,
+      ...(((cfg.options || {}).graphify === 'use' && fs.existsSync(path.join(PROJECT, 'graphify-out', 'graph.json')))
+        ? [`- For a question about code outside the scope (who calls this, what does that depend on), ask the code graph first: \`graphify query "<question>"\`, \`graphify explain "<symbol>"\`, \`graphify path "<A>" "<B>"\`.`] : []),
+      `- You decide HOW: the brief says what must be true and how it is checked, not how to write it.`,
+      `- Make the change, then run the verification commands below. Iterate on failures.`,
+      `- STOP and report only for a scope change (you need to MODIFY a file outside the allowed scope) or a product question the spec does not answer.`);
+  } else {
+    lines.push('', `## How to work (this is what keeps the item cheap and fast)`,
+      `- Read the files listed above FIRST. They are the working set.`,
+      `- Do not search or scan the repository. If you believe you need a file that is not listed, STOP and report which one and why — that is a scope question for the orchestrator, not something to resolve by exploring.`,
+      ...(((cfg.options || {}).graphify === 'use' && fs.existsSync(path.join(PROJECT, 'graphify-out', 'graph.json')))
+        ? [`- The files above are your working set — read them directly. For a question about code OUTSIDE that set (who calls this, what does that depend on), ask the code graph instead of searching: \`graphify query "<question>"\`, \`graphify explain "<symbol>"\`, \`graphify path "<A>" "<B>"\`. Each answer is a small scoped subgraph.`] : []),
+      `- Make the change, then run the verification commands below. Iterate on failures; do not re-read files you have already read.`,
+      `- If you find yourself unsure what to do next, STOP and report. A question costs one message; guessing costs an hour.`);
+  }
   lines.push('', `## Project verification commands (will be run on your result)`);
   Object.entries(cfg.verify || {}).forEach(([k, v]) => lines.push(`- ${k}: \`${v}\``));
   // provider failures carry no approach diagnosis — only real failed attempts inform the retry
@@ -2951,7 +3143,18 @@ function briefLines(item, cfg) {
     `- Stay inside the allowed scope. If correctness requires touching excluded areas, STOP and report — do not expand scope yourself.`,
     `- If the spec does not answer a question you need answered, STOP and report the hole — never invent product behavior.`,
     `- Report back: summary, files changed, tests run and results, discoveries, open questions.`);
-  lines.push('', `_Orchestrator: prepend relevant spec excerpts, decisions, and the applicable domain pack before dispatching._`);
+  // v0.21 (C4): tasks tagged with --domain carry their domain packs' rules
+  const packs = packsFor(item);
+  if (packs.length) {
+    lines.push('', `## Domain rules (${packs.map(p => p.replace(/\.md$/, '')).join(', ')})`);
+    for (const p of packs) {
+      let t = ''; try { t = fs.readFileSync(path.join(PACKS_DIR, p), 'utf8'); } catch (_) { continue; }
+      lines.push('', t.replace(/^# .*\n+/, '').replace(/^(Include in|Include in ANY)[^\n]*\n(?:[^\n#][^\n]*\n)*/m, '').trim().replace(/^## /gm, '### '));
+    }
+  }
+  lines.push('', sw(cfg, 'contextPack')
+    ? `_Orchestrator: say WHAT must be true and how it is checked. Investigation goes in the context pack (forge brief ${item.id} --context); no line numbers or code-level fix lists here._`
+    : `_Orchestrator: prepend relevant spec excerpts, decisions, and the applicable domain pack before dispatching._`);
   return lines;
 }
 
@@ -3221,7 +3424,7 @@ const FORGE_AUTHORITATIVE = ['forge/config.json', 'forge/state/work.json', 'forg
   'forge/decisions.md', 'forge/discoveries.md', 'forge/briefs/', 'forge/changes/', 'forge/evidence/'];
 const FORGE_GENERATED = ['forge/dashboard.html', 'forge/state/usage.json', 'forge/state/usage-cache.json',
   'forge/state/preflight.json', 'forge/state/session.json', 'forge/state/work.lock', 'forge/state/trace.jsonl.old',
-  'forge/state/upgrade.json', 'forge/state/backups/', 'forge/state/autopilot.json'];
+  'forge/state/upgrade.json', 'forge/state/backups/', 'forge/state/autopilot.json', 'forge/state/verify.lock'];
 function isAuthoritative(rel) { return FORGE_AUTHORITATIVE.some(p => p.endsWith('/') ? rel.startsWith(p) : rel === p); }
 function isForgePath(rel) { return rel === 'forge' || rel.startsWith('forge/'); }
 // Append-only files must start with exactly what HEAD holds. Field incident: a working
@@ -3327,7 +3530,7 @@ const commands = {
         phase: 'spec',                       // 'spec' until METHOD Step 7 sets verify commands
         specDir: opt('spec-dir') || null,    // discovered/declared later
         verify: {},                          // e.g. { test: "npm test", lint: "...", typecheck: "..." }
-        options: { graphify: 'unset', web: 'unset', concurrency: 4 } // v0.20: new projects run up to 4 items in parallel (disjoint scopes)
+        options: Object.assign({ graphify: 'unset', web: 'unset', concurrency: 4 }, SWITCH_ON) // v0.20: 4 in parallel · v0.21: delegation switches on for new projects
       });
       out('Initialized forge/config.json (phase: spec).');
     } else out('forge/config.json already exists — left untouched (init is idempotent).');
@@ -3504,6 +3707,7 @@ const commands = {
         title: '', objective: '', milestone: null, deps: [], criteria: [],
         scope: { allowed: [], forbidden: [] },
         component: opt('component') || null,
+        domains: opt('domain') ? String(opt('domain')).split(',').map(x => x.trim().toLowerCase()).filter(Boolean) : undefined, // v0.21: packs + high-risk
         mock: opt('mock') || null, // v0.14: the approved mock this screen item is bound to (spec/mocks/...)
         status: 'TODO', attempts: [], verifications: [], history: [],
         preState: null, startTree: null,
@@ -3654,6 +3858,15 @@ const commands = {
                 `Serialize them, or narrow one scope: forge task update ${item.id} --allowed "..."`);
         }
       }
+      // v0.21 (C1): oversized tasks are refused, not warned. Field evidence: the six 4wines items with
+      // 8–12 criteria went 1/6 first-pass; items with 1–3 criteria went 94%. The warning was overridden every time.
+      const shapeReason = (sw(loadConfig(), 'itemShape') === 'refuse' && (item.criteria || []).length > 6) ? opt('reason') : null;
+      if (sw(loadConfig(), 'itemShape') === 'refuse' && (item.criteria || []).length > 6 && !opt('reason'))
+        die(`Refused: '${item.id}' has ${item.criteria.length} acceptance criteria (limit 6, options.itemShape=refuse).\n` +
+            `Oversized tasks fail far more often (8–12 criteria: 1 in 6 passed first time; 1–3 criteria: 94%). Split it SIDE BY SIDE —\n` +
+            `sibling tasks that can run in parallel, each with its own criteria and scope — not into a chain:\n` +
+            `  forge task add --id ${item.id}b --title "…" --milestone ${item.milestone || '<m>'} --criterion "…::check" --allowed "…"\n` +
+            `If it genuinely cannot split: forge task start ${item.id} --reason "<why it cannot split>" (recorded on the attempt).`);
       const fails = failedAttempts(item);
       if (fails >= 2 && !opt('escalate'))
         die(`Refused: '${item.id}' has failed ${fails} attempts. A third identical attempt is not allowed.\n` +
@@ -3671,11 +3884,25 @@ const commands = {
       const alreadyGreen = item.preState.filter(p => p && p.exit === 0);
       item.status = 'IN_PROGRESS';
       item.blockReason = null;
-      item.attempts.push({ ts: ts(), outcome: 'started', escalation: opt('escalate') || null, note: opt('note') || null, agent: opt('agent') || null, outOfOrder: (!pickedNext && opt('reason')) ? opt('reason') : undefined });
+      item.attempts.push({ ts: ts(), outcome: 'started', escalation: opt('escalate') || null, note: opt('note') || null, agent: opt('agent') || null, outOfOrder: (!pickedNext && opt('reason')) ? opt('reason') : undefined, shapeReason: shapeReason || undefined });
       item.updated = ts();
       if (item.milestone) freezeLabels(w); // v0.18: the version label freezes when work starts
       saveWork(w);
       out(`${item.id}${item.label ? ` (${item.label})` : ''} → IN_PROGRESS${opt('escalate') ? ` (escalation: ${opt('escalate')})` : ''}`);
+      // v0.21 (C9): a high-risk task gets an architect's design note BEFORE its first worker dispatch
+      if (sw(loadConfig(), 'architectPrepass') === 'high-risk' && isHighRisk(item)
+          && !launchesOf(item, /architect/i).length && !(w.dispatchLog || []).some(d => d.item === item.id && /architect/i.test(d.agent || ''))) {
+        out(`\nHIGH-RISK TASK (${itemDomains(item).filter(d => HIGH_RISK_DOMAINS.includes(d)).join(', ')}) — options.architectPrepass: dispatch forge-architect (opus) for a design note BEFORE the implementer. Prompt:\n`);
+        out([`# Design brief — ${item.id}: ${item.title}`, '',
+          `Write a SHORT design note for the implementer (Sonnet) of this high-risk task. Advise; do not implement.`,
+          `Objective: ${item.objective || '(see criteria)'}`, `Criteria:`, ...item.criteria.map((c, i) => `${i + 1}. ${c.desc}`),
+          `Scope: ${((item.scope || {}).allowed || []).join(', ')}`, '',
+          `Cover, in at most a page: the failure classes of every external call and transaction and the distinct handling of each (an unknown outcome is never a known failure); transaction boundaries; the invariants that must hold; what NOT to do.`, '',
+          `Record it (Forge writes it into the task's context pack; the next brief includes it):`,
+          `  node "${__filename}" context save ${item.id} --section design-note <<'NOTE'`, `  …the note…`, `  NOTE`,
+          `Reply with one line: saved.`].join('\n'));
+        out(`\nRecord the dispatch: forge task dispatch ${item.id} --agent forge-architect --model opus`);
+      }
       for (const wmsg of itemShapeWarnings(item)) out(`ITEM-SHAPE WARNING: ${wmsg}`);
       if (alreadyGreen.length)
         out(`WARNING: ${alreadyGreen.length} criterion check(s) ALREADY PASS before any work:\n` +
@@ -3683,8 +3910,11 @@ const commands = {
             `\nEither the item is already satisfied (cancel it with a reason) or these checks are vacuous (fix them: forge task update). 'done' will refuse if nothing changes.`);
 
     } else if (sub === 'verify') {
-      const item = getItem(w, argv[2]);
+      let item = getItem(w, argv[2]);
       const cfg = loadConfig() || { verify: {} };
+      // C6: checks run under the verify lock, NOT the state lock
+      releaseWorkLock();
+      acquireVerifyLock(item.id, flag('no-wait'));
       const results = [];
       for (const [k, cmd] of Object.entries(cfg.verify || {})) results.push(Object.assign({ kind: `project:${k}` }, run(cmd)));
       for (const c of item.criteria) if (c.check) results.push(Object.assign({ kind: `criterion: ${c.desc}` }, run(c.check)));
@@ -3707,10 +3937,16 @@ const commands = {
         if (fs.existsSync(path.resolve(PROJECT, a))) return true;
         out(`WARNING: --artifact ${a} does not exist — not recorded.`); return false;
       });
-      item.verifications.push({ ts: ts(), passed, results, tree: treeState(), skippedBaseline, artifacts: artifacts.length ? artifacts : undefined,
+      const tree = treeState();
+      releaseVerifyLock();
+      // re-read state under the state lock: other workers may have written while checks ran
+      acquireWorkLock();
+      const wNow = readJson(WORK_FILE, w);
+      item = wNow.items[item.id] || item;
+      item.verifications.push({ ts: ts(), passed, results, tree, skippedBaseline, artifacts: artifacts.length ? artifacts : undefined,
         durationMs: results.reduce((a, r) => a + (r.ms || 0), 0) });
       item.updated = ts();
-      saveWork(w);
+      saveWork(wNow);
       // v0.16: passing checks print one line. Field measurement: tool results were
       // 29–47% of the orchestrator's context window, and a passing test's output is
       // never read by anyone. The FULL tail still goes to work.json below, so the
@@ -3743,6 +3979,31 @@ const commands = {
       if (v.tree && now && v.tree !== now)
         die(`Refused: the tree changed since the passing verification (${v.ts}).\n` +
             `Stale evidence proves nothing — re-verify: forge task verify ${item.id}`);
+      // v0.21 (C5): delegation is enforced — a task closes on a worker's launch, or on a recorded self-close
+      const cfgSw = loadConfig() || {};
+      let selfClosed = null, testerWaived = null;
+      if (sw(cfgSw, 'requireDispatch') && !launchesOf(item, /implementer|tester|^api$|worker/i).length && !(item.dispatches || []).some(d => d.kind === 'api')) {
+        if (!(flag('self') && opt('reason')))
+          die(`Refused: '${item.id}' has no implementer or tester dispatch recorded (options.requireDispatch).\n` +
+              `If a worker did the work, record its launch (this also fixes the record for workers that ran unrecorded):\n` +
+              `  forge task dispatch ${item.id} --agent forge-implementer --model sonnet\n` +
+              `If you did it yourself because it was trivial: forge task done ${item.id} --self --reason "<why trivial>"  (counted in forge stats)`);
+        selfClosed = { ts: ts(), reason: opt('reason') };
+      }
+      // v0.21 (C8): high-risk tasks get a tester in parallel with the implementer
+      const testerRule = sw(cfgSw, 'requireTester');
+      const hasTester = launchesOf(item, /tester/i).length > 0;
+      if (testerRule === 'high-risk' && isHighRisk(item) && !hasTester) {
+        if (!opt('reason'))
+          die(`Refused: '${item.id}' is high-risk (${itemDomains(item).filter(d => HIGH_RISK_DOMAINS.includes(d)).join(', ')}) and no forge-tester was dispatched (options.requireTester=high-risk).\n` +
+              `Dispatch forge-tester alongside the implementer — it writes the tests from the criteria, red first — and record it:\n` +
+              `  forge task dispatch ${item.id} --agent forge-tester --model sonnet\n` +
+              `Or close without one, recorded: forge task done ${item.id} --reason "<why no tester>"`);
+        testerWaived = opt('reason');
+      }
+      const testLane = (item.criteria || []).filter(c => /\b(test|vitest|jest|pytest|playwright|e2e|spec)\b/i.test(c.check || '')).length;
+      if ((testerRule === 'warn' || testerRule === 'high-risk') && !hasTester && !testerWaived && (item.criteria || []).length && testLane * 2 > item.criteria.length)
+        out(`TESTER WARNING: most of '${item.id}''s criteria are tests, and no forge-tester was dispatched (options.requireTester=${testerRule}). Turn off: forge config set options.requireTester false`);
       // 1.2/F5: red-first — green-before, green-after, nothing changed ⇒ the checks proved nothing
       const checked = (item.preState || []).filter(Boolean);
       if (checked.length && checked.every(p => p.exit === 0) && item.startTree && now && item.startTree === now)
@@ -3781,6 +4042,8 @@ const commands = {
               `  forge task update ${item.id} --allowed "..." --reason "..."`);
         commitPlan = { branch: cur, mine, deferred };
       }
+      if (selfClosed) item.selfClosed = selfClosed; // v0.21 (C5)
+      if (testerWaived) item.testerWaived = { ts: ts(), reason: testerWaived }; // v0.21 (C8)
       item.status = 'DONE';
       item.attempts.push({ ts: ts(), outcome: 'passed', note: opt('note') || null });
       // v0.16.2: the commits that landed while this item was in flight. Forge does not
@@ -3843,7 +4106,14 @@ const commands = {
       const fkind = opt('kind') || null;
       if (fkind && !['provider', 'worker'].includes(fkind))
         die(`--kind must be 'provider' (rate limit / outage / timeout — does not count toward escalation) or 'worker' (the approach failed — counts).`);
-      item.attempts.push({ ts: ts(), outcome: 'failed', kind: fkind, note: opt('note') || '(no diagnosis recorded)' });
+      // v0.21 (C3): --from-review stores the reviewer's findings; a retry brief carries only the latest ones
+      let review;
+      if (opt('from-review')) {
+        const rf = path.resolve(PROJECT, opt('from-review'));
+        if (!fs.existsSync(rf)) die(`No such review file: ${opt('from-review')}`);
+        review = fs.readFileSync(rf, 'utf8').slice(0, 16 * 1024);
+      }
+      item.attempts.push({ ts: ts(), outcome: 'failed', kind: fkind, note: opt('note') || (review ? '(see review findings)' : '(no diagnosis recorded)'), review, reviewFile: review ? opt('from-review') : undefined });
       item.status = 'TODO';
       item.updated = ts();
       saveWork(w);
@@ -3939,6 +4209,7 @@ const commands = {
       if (opt('allowed') !== null) { item.scope.allowed = opt('allowed').split(',').map(s => s.trim()).filter(Boolean); changes.push('scope.allowed updated'); }
       if (opt('forbidden') !== null) { item.scope.forbidden = opt('forbidden').split(',').map(s => s.trim()).filter(Boolean); changes.push('scope.forbidden updated'); }
       if (opt('component') !== null) { item.component = opt('component') || null; changes.push('component = ' + item.component); }
+      if (opt('domain') !== null) { item.domains = String(opt('domain')).split(',').map(x => x.trim().toLowerCase()).filter(Boolean); changes.push('domains = ' + item.domains.join(',')); }
       if (opt('mock') !== null) { item.mock = opt('mock') || null; changes.push('mock = ' + item.mock); }
       for (const idx of optAll('criterion-remove').map(Number).sort((a, b) => b - a)) {
         if (!item.criteria[idx]) die(`No criterion at index ${idx} (use: forge task show ${item.id}).`);
@@ -4010,6 +4281,14 @@ const commands = {
       const kind = opt('kind') || 'launch';
       if (!['launch', 'message'].includes(kind))
         die(`--kind must be 'launch' (handing the brief to a worker) or 'message' (mid-flight message to a running worker).`);
+      // v0.21 (C2): the brief a worker actually receives is the completed file — its size is checked at launch too
+      if (kind === 'launch' && sw(loadConfig(), 'briefLimit') === 'on' && /implementer|tester/i.test(opt('agent') || '')) {
+        const bf = path.join(FORGE, 'briefs', `${item.id}.md`);
+        const kb = fs.existsSync(bf) ? fs.statSync(bf).size / 1024 : 0;
+        if (kb > 20 && !opt('reason'))
+          die(`Refused: forge/briefs/${item.id}.md is ${kb.toFixed(1)} KB (limit 20 KB, options.briefLimit=on) — the brief is doing the worker's job. Split the task, or move investigation into the context pack (forge brief ${item.id} --context). Override: --reason "…".`);
+        if (kb > 12) out(`BRIEF SIZE WARNING: forge/briefs/${item.id}.md is ${kb.toFixed(1)} KB (warn above 12 KB). Say WHAT and how it is checked; leave HOW to the worker.`);
+      }
       item.dispatches = item.dispatches || [];
       // v0.15.2: a launch record without an agent is worthless — it cannot be
       // attributed, costed, or compared, and it used to surface as a phantom
@@ -4039,16 +4318,60 @@ const commands = {
     const w = loadWork();
     const item = getItem(w, argv[1]);
     const cfg = loadConfig() || {};
-    const lines = briefLines(item, cfg);
-    // v0.13.1: briefs become readable artifacts — saved briefs are linked from the dashboard
+    // v0.21 (C2): --context emits the forge-explorer prompt that assembles this task's context pack
+    if (flag('context')) {
+      if (!sw(cfg, 'contextPack')) { out(`Context packs are off for this project (options.contextPack). Turn them on: forge config set options.contextPack true`); return; }
+      out(contextPackPrompt(item, cfg).join('\n'));
+      return;
+    }
+    let lines = briefLines(item, cfg);
+    // v0.21 (C3): a retry brief is the ORIGINAL brief plus the LATEST review findings — earlier passes are replaced, not stacked
+    const bdir = path.join(FORGE, 'briefs');
+    const bfile = path.join(bdir, `${item.id}.md`), ofile = path.join(bdir, `${item.id}.original.md`);
+    const lastFail = [...(item.attempts || [])].reverse().find(a => a.outcome === 'failed' && a.kind !== 'provider');
+    let text = lines.join('\n') + '\n';
+    if (flag('save') && sw(cfg, 'retryFromReview') && lastFail) {
+      if (!fs.existsSync(ofile) && fs.existsSync(bfile)) fs.writeFileSync(ofile, fs.readFileSync(bfile, 'utf8').replace(/\n## Fix these review findings[\s\S]*$/m, '\n'));
+      const base = fs.existsSync(ofile) ? fs.readFileSync(ofile, 'utf8') : text;
+      const fn = (item.attempts || []).filter(a => a.outcome === 'failed' && a.kind !== 'provider').length;
+      text = base.replace(/\s*$/, '\n') + `\n## Fix these review findings (attempt ${fn + 1} — they replace any earlier retry notes)\n` +
+        (lastFail.review ? lastFail.review.trim() : `- ${lastFail.note}`) + '\n';
+    }
     if (flag('save')) {
-      const bdir = path.join(FORGE, 'briefs');
+      // v0.21 (C2): a brief that big is doing the worker's job — split, or move detail to the context pack
+      const kb = Buffer.byteLength(text, 'utf8') / 1024;
+      if (sw(cfg, 'briefLimit') === 'on' && kb > 20 && !opt('reason'))
+        die(`Refused: the brief for '${item.id}' is ${kb.toFixed(1)} KB (limit 20 KB, options.briefLimit=on). Split the task, or move investigation into the context pack (forge brief ${item.id} --context). Override: --reason "…".`);
       fs.mkdirSync(bdir, { recursive: true });
-      fs.writeFileSync(path.join(bdir, `${item.id}.md`), lines.join('\n') + '\n');
+      fs.writeFileSync(bfile, text);
       regenDashboard();
       out(`Saved skeleton to forge/briefs/${item.id}.md — COMPLETE IT IN PLACE (spec excerpts, decisions, domain pack) before dispatch.\n` +
           `The dashboard links it on the item's card, and dispatch prompts can reference the file path.`);
-    } else out(lines.join('\n'));
+      if (sw(cfg, 'briefLimit') === 'on' && kb > 12) out(`BRIEF SIZE WARNING: ${kb.toFixed(1)} KB (warn above 12 KB, refused above 20 KB). Say what must be true and how it is checked; leave HOW to the worker.`);
+    } else out(text.replace(/\n$/, ''));
+  },
+
+  // -- context (v0.21, C2/C9) — the context pack an explorer or architect records ---------
+  // Explorers and architects are read-only on the codebase; they record their output here,
+  // through the CLI, like every other Forge state write. Nothing else writes forge/context/.
+  context() {
+    const sub = argv[1], id = argv[2];
+    if (sub !== 'save' || !id) die('Usage: forge context save <id> [--section design-note] < pack.md   (reads the pack from stdin)');
+    const w = loadWork(); getItem(w, id);
+    let body = ''; try { body = fs.readFileSync(0, 'utf8'); } catch (_) { }
+    if (!body.trim()) die('Refused: empty context — pipe the pack on stdin.');
+    fs.mkdirSync(CONTEXT_DIR, { recursive: true });
+    const f = path.join(CONTEXT_DIR, `${id}.md`);
+    if (opt('section') === 'design-note') {
+      let cur = fs.existsSync(f) ? fs.readFileSync(f, 'utf8') : `# Context pack — ${id}\n`;
+      cur = cur.replace(/\n## Design note[\s\S]*?(?=\n## |$)/, '');
+      const note = body.trim().replace(/^## Design note[^\n]*\n?/, '');
+      fs.writeFileSync(f, cur.replace(/\s*$/, '\n') + `\n## Design note (forge-architect)\n${note}\n`);
+    } else {
+      const keep = fs.existsSync(f) ? ((fs.readFileSync(f, 'utf8').match(/\n## Design note[\s\S]*?(?=\n## |$)/) || [])[0] || '') : '';
+      fs.writeFileSync(f, body.replace(/\s*$/, '\n') + keep);
+    }
+    out(`Saved forge/context/${id}.md (${Math.round(fs.statSync(f).size / 1024 * 10) / 10} KB). The next 'forge brief ${id} --save' references it.`);
   },
 
   // -- worker (v0.15, providers phase A) --------------------------------------
@@ -4800,6 +5123,21 @@ const commands = {
     if (fs.existsSync(CONFIG_FILE)) {
       try { const c = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')); check('config.json', true, `phase: ${c.phase}`); }
       catch (e) { check('config.json', false, 'CORRUPT: ' + e.message); }
+      // v0.21 (C10): one line per delegation switch — absent means off (today's behaviour)
+      try {
+        const c = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
+        for (const k of Object.keys(SWITCH_ON)) {
+          const raw = ((c.options || {})[k]);
+          check(`switch ${k}`, true, `${JSON.stringify(sw(c, k))}${raw === undefined ? ' (not set — off; new projects start with ' + JSON.stringify(SWITCH_ON[k]) + ': forge config set options.' + k + ' ' + SWITCH_ON[k] + ')' : ''}`);
+        }
+      } catch (_) { }
+      // v0.21 (C6): parallel tasks + a shared local database: verifies are serialised by the verify lock
+      try {
+        const c = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
+        const conc = parseInt((c.options || {}).concurrency, 10) || 1;
+        const shared = !!((c.verify || {}).db || (c.verify || {}).e2e) || fs.existsSync(path.join(PROJECT, 'supabase'));
+        if (conc > 1 && shared) check('parallel verify', false, `concurrency ${conc} with a shared local database/servers — verifies run one at a time under forge/state/verify.lock (a second one waits); tests must still isolate their own data, because implementers run in parallel`, true);
+      } catch (_) { }
       try {
         const w = JSON.parse(fs.readFileSync(WORK_FILE, 'utf8'));
         const inProg = w.order.filter(id => w.items[id].status === 'IN_PROGRESS');
@@ -4856,6 +5194,7 @@ const commands = {
         !(i.verifications || []).some(v => v.passed === false)).length;
       out(`  Clean-run rate:  ${cleanRun}/${done.length} (${Math.round(100 * cleanRun / done.length)}%) — one start, zero failed attempts, zero failed verify runs`);
       out(`  Failed attempts absorbed: ${totalFails} · avg ${(totalFails / done.length).toFixed(2)} per completed item`);
+      { const sc = done.filter(i => i.selfClosed).length; if (sc || sw(loadConfig(), 'requireDispatch')) out(`  Closed by the CTO (--self): ${sc}/${done.length}${sc ? ' — ' + done.filter(i => i.selfClosed).slice(0, 6).map(i => i.id).join(', ') : ''}`); }
       const retried = done.filter(i => failsOf(i) > 0).sort((a, b) => failsOf(b) - failsOf(a)).slice(0, 8);
       if (retried.length) out(`  Most retried: ` + retried.map(i => `${i.id}×${failsOf(i)}`).join(' · '));
       const esc = items.reduce((a, i) => a + i.attempts.filter(x => x.outcome === 'started' && x.escalation).length, 0);
@@ -5029,7 +5368,7 @@ const commands = {
       if (since.vs)
         out(`  vs baseline: calls ${since.vs.calls > 0 ? '+' : ''}${since.vs.calls}% · context ${since.vs.context > 0 ? '+' : ''}${since.vs.context}% · output ${since.vs.out > 0 ? '+' : ''}${since.vs.out}%`);
       if (since.defsChanged)
-        out(`  ⚠ This baseline counted external (SDK-driven) sessions as Forge's own cost; this report does not. The delta above mixes two definitions — re-record: forge usage --baseline --label <name>`);
+        out(`  ⚠ This baseline was recorded with an older way of counting (before v0.17.1 it counted external SDK sessions as Forge's cost; before v0.21 it counted every transcript line as a call — 2–7 lines per real call). The delta above mixes two definitions — re-record: forge usage --baseline --label <name>`);
       if (since.external && since.external.calls > 0)
         out(`  External sessions in this segment (not Forge — started through the Agent SDK by another tool): ${since.external.calls.toLocaleString()} calls · ${fmtBig(since.external.context)} context — excluded from the per-item cost above`);
       if (since.byModelUnavailable)
@@ -5444,6 +5783,23 @@ const commands = {
       // v0.8: record the milestone security review (fresh-context reviewer over the slice's diff)
       const m = argv[2];
       if (!m || !milestoneSeq(w).includes(m)) die(`Unknown milestone '${m || ''}'. See: forge milestone list`);
+      // v0.21 (C11): a ready-to-dispatch prompt for the security pass; writes nothing
+      if (flag('brief')) {
+        const base = milestoneBase(w, m), head = gitHead();
+        const ids = w.order.filter(id => w.items[id].milestone === m);
+        const pack = path.relative(PROJECT, path.join(PACKS_DIR, 'security.md')).split(path.sep).join('/');
+        out([`# Security brief — milestone ${m}${milestoneName(w, m) ? ` (${milestoneName(w, m)})` : ''}`, '',
+          `Review the milestone's cumulative change for security defects, with fresh eyes. You did not write it.`, '',
+          `## The change`, base && head ? `\`git diff ${base.slice(0, 12)}..${head.slice(0, 12)}\`  (and \`git log --oneline ${base.slice(0, 12)}..${head.slice(0, 12)}\` for the task-by-task story)` : `The milestone's diff against its base branch (no recorded commit range yet).`,
+          `Tasks in this milestone: ${ids.join(', ') || '—'}`, '',
+          `## Review against`, `\`${pack}\` — every section: secrets, authorization, input, honesty. Check RLS policies and storage rules against the domain spec, not against their presence.`, '',
+          `## Output — exactly this shape`,
+          `For each finding: severity (critical/high/medium/low) · file:line · what is wrong · the exploit or failure in one sentence · the fix.`,
+          `Then a verdict: every finding is either a NEW WORK ITEM (title + acceptance criterion) or an ACCEPTED RISK (why it is acceptable now). Nothing is left unassigned.`,
+          `Report what you checked AND what you did not.`, '',
+          `_Orchestrator: dispatch to forge-reviewer (opus — it inherits your model), then record: forge milestone security ${m} --agent forge-reviewer --note "<coverage + findings>"; findings become work items before approval._`].join('\n'));
+        return;
+      }
       if (!opt('note')) die('Usage: forge milestone security <M> --agent <worker|self> --note "<who reviewed, what was covered, findings summary>"');
       // v0.16: the contract has always said the security pass is DISPATCHED to a
       // fresh-context reviewer. Field measurement: it was absorbed in-session
@@ -5809,6 +6165,7 @@ const commands = {
         traceEvent({ outcome: 'block', hook: 'stop', autopilot: 'continue', next: d.next.id });
         nudge(`AUTOPILOT: keep going — the next task is ${d.label}: ${d.next.title}.\n` +
           (d.prepare ? `It is still thin: write its acceptance criteria from the spec and its file scope first (forge task update ${d.next.id} --criterion-add "…::check" --allowed "…"), then ` : '') +
+          (d.prepare && sw(cfgS, 'itemShape') === 'refuse' ? `Keep it to at most 6 criteria (task start refuses more); if it needs more, split it side by side into sibling tasks that can run in parallel, not into a chain. ` : '') +
           `Run the build loop for it now (forge task start with no id → brief → dispatch → verify → review → done), without a progress summary in between. ` +
           `If options.concurrency allows, start other READY tasks with disjoint scopes in parallel. ` +
           `If a product question comes up: 'forge task block <id> --reason "question: …"' and ask it — Forge then lets the turn end so it reaches the user.\n`,
@@ -5916,6 +6273,13 @@ const commands = {
   screen list                            screens and mocks, grouped by the app they belong to
   component add|update <id> ... | list   legacy entry point — routed to a screen, a part or a plain tag;
                                          items tag via task --component (screen, part or tag)
+  brief <id> --context                   v0.21: forge-explorer prompt that assembles forge/context/<id>.md (options.contextPack)
+  context save <id> [--section design-note] < file   record a context pack / design note (stdin)
+  task add|update … --domain api,auth    domain packs in the brief; auth|data|payments|migrations|security = high-risk
+  task fail <id> --from-review <file>    retry brief = original + latest findings (options.retryFromReview)
+  task done <id> --self --reason ..      self-close without a worker (options.requireDispatch)
+  task verify <id> [--no-wait]           verifies run one at a time (forge/state/verify.lock)
+  milestone security <M> --brief         ready-to-dispatch security-pass prompt (writes nothing)
   autopilot on [--max-items N] [--hours H] | off | status
                                          v0.20: keep taking the next task of the current milestone; stop only
                                          for a human (milestone ready to test, a question, an escalation,
@@ -5937,6 +6301,10 @@ const commands = {
                options.branchPattern "milestone/<id>" · options.mergeMethod merge · options.remote origin
                options.gateSteps "step one || step two"   shown at 'milestone ship', confirmed with --steps-done
                options.versionStart 0   number of the first release (V0 = MVP; an existing product may start at 2)
+               v0.21 switches (on for new projects, off when absent): options.itemShape warn|refuse ·
+               options.workerExplore off|bounded · options.workerReadBudget 10 · options.contextPack false|true ·
+               options.briefLimit off|on · options.retryFromReview · options.requireDispatch ·
+               options.requireTester false|warn|high-risk · options.architectPrepass false|high-risk · options.delegateSpecSync
                options.concurrency N     max items IN_PROGRESS at once (new projects: 4; unset = 1 serial; parallel only with
                                          disjoint scopes — see OPERATING.md parallel dispatch)
                options.scopeExempt "a/,b/"  dirs exempt from the scope whitelist (default forge/,spec/,docs/; *.md always exempt)

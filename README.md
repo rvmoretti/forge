@@ -166,6 +166,42 @@ memory.
 
 ## Changelog
 
+### v0.21.0 — the CTO leads a team again (docs/IMPL-team-delegation.md)
+Every behaviour change below sits behind an `options.*` switch: **on for projects created by
+v0.21, off when absent** — existing projects change nothing until you turn a switch on, one per
+measured segment (`forge doctor` lists each switch and the command to enable it).
+- **Usage counts real calls (C0).** Claude Code writes one transcript line per content block,
+  each repeating the same message id and usage; Forge counted lines. One measured transcript:
+  497 lines for 229 calls. Calls, context and output are now counted once per message id
+  (cache v5 rescans by itself; baselines recorded before this are flagged as a different definition).
+- **Verifies run one at a time (C6).** `task verify` takes a verify lock — a second verify waits
+  visibly (`--no-wait` refuses) — and no longer holds the state lock while checks run, so
+  parallel workers can still record starts and dispatches during a long verify. `doctor` warns
+  when concurrency > 1 and verify shares a local database.
+- **Oversized tasks refused (C1, `itemShape`):** more than 6 criteria needs `--reason` at start;
+  autopilot's thin-task preparation states the limit and says to split side by side.
+- **Workers investigate again (C2, `workerExplore`, `contextPack`, `briefLimit`):** bounded
+  exploration inside the scope plus a read budget outside it; `forge brief <id> --context` prints
+  an explorer prompt that assembles the task's context pack, recorded with `forge context save`;
+  briefs warn above 12 KB and are refused above 20 KB (at save and at the worker's launch). With
+  every C2 switch off the brief is byte-identical to v0.20.1.
+- **Retries replace, never stack (C3, `retryFromReview`):** `task fail --from-review <file>`; the
+  retry brief is the original plus only the latest findings.
+- **Failure classes, shifted left (C4):** the backend and security packs carry an Implementer
+  rule — name every failure class and its handling; an unknown outcome is never a known failure.
+  Tasks tagged with `--domain` get their packs' rules in the brief.
+- **Delegation enforced (C5, `requireDispatch`):** `task done` needs a recorded worker launch, or
+  `--self --reason` (counted in `forge stats`).
+- **High-risk tasks (`--domain auth|data|payments|migrations|security`):** a tester in parallel
+  (C8, `requireTester`) and an architect's design note before the first worker (C9,
+  `architectPrepass`).
+- **Specs vs Configuration, made explicit (C10).** Specs is the application — what it must do.
+  Configuration is how Forge and the development setup run; every setting now says why you'd
+  change it and its risk (none / low / test first), and its command copies on click. Plan change
+  scripts (re-cuts, upgrades) moved from Specs to System. `forge doctor` prints one line per switch.
+- **Model routing and spec sync (C7, `delegateSpecSync`)** written into the operating contract;
+  **security pass prompt (C11):** `forge milestone security <M> --brief`.
+
 ### v0.20.1 — Graphify actually used; Configuration and Commands pages
 - **"Graphify: use" now means a graph the agents can query.** Field finding: projects had
   `options.graphify use` and the CLI installed, but no graph was ever built, so every "query the

@@ -3,6 +3,10 @@
 Include in briefs for API/service/data work. Testable items should become
 acceptance criteria.
 
+## Implementer
+- For every external call and transaction, name each failure class and its distinct handling; an unknown outcome is never treated as a known failure.
+- Examples: invalid credentials vs the auth provider being unavailable → 401 vs 503; a rolled-back transaction vs an unknown outcome after a lost COMMIT acknowledgement → retry vs reconcile.
+
 ## External calls (network, DB, third-party APIs)
 - Every external call has: an explicit timeout, a retry policy with backoff, and an idempotency story (what happens if it runs twice?).
 - Failure isolation where it matters: what happens when the dependency is down — error surfaced, degraded mode, or queue? Never an unhandled hang.

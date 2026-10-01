@@ -212,6 +212,19 @@ blocked-with-reason / failed-with-diagnosis).
   view, and a selected-part panel linking to its work (`#/plan/c:<part>`). **Screens &
   mockups** is a gallery per app. Addresses are links (`#/plan/<task>`, `#/architecture/<part>`).
 
+## Team delegation switches (v0.21)
+
+Projects created by v0.21 start with nine switches on; older projects have them off until you
+turn them on, one per measured segment: `itemShape` (refuse tasks over 6 criteria),
+`workerExplore` (workers investigate inside their scope), `contextPack` (an explorer assembles
+each task's context), `briefLimit` (12 KB warn / 20 KB refuse), `retryFromReview` (retry briefs
+carry only the latest findings), `requireDispatch` (a task closes on a recorded worker),
+`requireTester` and `architectPrepass` (for tasks tagged with a high-risk `--domain`), and
+`delegateSpecSync`. `forge doctor` lists each with the command to enable it; the operating
+contract describes what changes. Measure each: `forge usage --baseline --label <switch>` before,
+compare first-pass, clean-run, orchestrator share and brief size after ~15 tasks. Verifies always
+run one at a time (`forge/state/verify.lock`).
+
 ## Leave it running — autopilot (v0.20)
 
 `forge autopilot on` keeps the build loop going between the tasks of a milestone: the Stop hook

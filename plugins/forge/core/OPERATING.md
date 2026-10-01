@@ -18,6 +18,14 @@ short on purpose — every rule here matters; follow all of them.
 - Engineering ambiguity you resolve yourself; record material choices
   (`forge decision add --authority forge`).
 
+**Spec and config are different things.** The spec (`specDir`) describes the
+application: what it must do, for whom, under which rules. Forge's config
+(`forge/config.json`, changed only through `forge config set`) describes how
+Forge and the development setup run: verify commands, gates, git flow,
+concurrency, delegation switches. A product decision never goes into config; a
+tooling setting never goes into the spec. Spec sync at item close touches the
+spec only for product behaviour.
+
 ## Phases
 
 **Spec phase** (no `forge/config.json` yet, or `phase: spec`): run the
@@ -75,7 +83,9 @@ from confirmed goals, milestone cut across everything. Then the same loop.
    in brief prose is unenforceable; `start` refuses an unscoped item
    (genuinely whole-tree work: `start --whole-tree --reason`). Then start it
    (`forge task start <id>`).
-2. **Brief**: generate the skeleton to a file (`forge brief <id> --save` →
+2. **Brief** — *when `options.contextPack` / `options.workerExplore` are on, read
+   "Team delegation switches" below first; it replaces the parts of this step it names.*
+   Generate the skeleton to a file (`forge brief <id> --save` →
    `forge/briefs/<id>.md`), then complete it IN THAT FILE — prepend the
    relevant spec excerpts, decisions, discoveries, and the applicable domain
    pack (see `forge-domain-packs` skill). The saved brief is the audit
@@ -125,7 +135,8 @@ from confirmed goals, milestone cut across everything. Then the same loop.
    a fresh-context reviewer judge it against the approved mock and the
    `design-ux` pack's review protocol — a screen whose checks pass but whose
    UX review fails is a failed item, not a nit.
-5. **Close or retry**:
+5. **Close or retry** — *`options.requireDispatch`, `options.requireTester` and
+   `options.delegateSpecSync` change this step when on; see "Team delegation switches".*
    - Pass and review clean → `forge task done <id>`. Under the per-milestone
      git flow (v0.17 default) `done` also makes the item's ONE commit
      (`<id>: <title>` — its scope's files plus Forge's authoritative state) on
@@ -275,9 +286,15 @@ call*. Two consequences, and they are not what the token-share view suggests:
 delegating does not reduce total consumption by itself (those workers made 79%
 of all calls and 53% of all context reads), and a worker that thrashes is more
 expensive than the same work absorbed. So delegate to compress *your* window and
-to parallelise — then make each dispatch land in as few turns as possible: exact
-scope, the file list in the brief, one bounded task, no exploration. Fewer,
-better-briefed dispatches beat more dispatches.
+to parallelise — then make each dispatch land in as few turns as possible.
+**When `options.workerExplore` is off (projects older than v0.21):** exact scope, the
+file list in the brief, one bounded task, no exploration. Fewer, better-briefed
+dispatches beat more dispatches.
+**When it is `bounded`:** you write WHAT must be true and how it is checked; the
+worker decides HOW and investigates inside its scope (plus a small read budget
+outside it). Field evidence for the change: pre-solving the work in the brief moved
+investigation into your window (orchestrator ~5% → ~64% of calls on one project,
+briefs 9.6 KB → 25 KB) without raising first-pass.
 
 **One change per measured segment.** A baseline plus a delta only attributes a
 change if exactly one thing changed. Shipping a Forge release and switching the
@@ -346,6 +363,60 @@ overlap), and every state write is lock-serialised. You enforce the rest:
   parallelism.
 - Review does not thin out because workers overlap: every item still gets
   its review before `done`, one at a time.
+
+## Team delegation switches (v0.21)
+
+You are the CTO: you turn product into spec, cut tasks, write acceptance criteria
+and briefs, and judge results. Workers investigate and implement. Each switch below
+restores one part of that split. Projects created by v0.21 start with all of them on;
+older projects have them off until the user turns them on, one per measured segment
+(`forge doctor` lists them). Off means the build loop above, unchanged.
+
+- **`options.itemShape = refuse`** — `task start` refuses a task with more than 6
+  criteria unless `--reason "<why it cannot split>"`. Split side by side (siblings
+  that can run in parallel, each with its own scope), not into a chain.
+- **`options.workerExplore = bounded`** — the brief lets the worker read freely inside
+  its scope and up to `options.workerReadBudget` (default 10) files outside it, listing
+  them. Your brief says WHAT and how it is checked: no line numbers, no code-level fix
+  lists. "STOP and report" stays for scope changes and product questions.
+- **`options.contextPack = true`** — investigation is a dispatch, not your reading:
+  `forge brief <id> --context` prints a `forge-explorer` (haiku) prompt that assembles
+  the relevant files, patterns, invariants, spec sections, decisions and domain rules
+  and records them with `forge context save <id>` into `forge/context/<id>.md`. Record
+  it: `forge dispatch --agent forge-explorer --purpose explore --item <id> --model haiku`.
+  Then `forge brief <id> --save`; the brief points the worker at the pack.
+- **`options.briefLimit = on`** — `brief --save` and the worker's launch warn above
+  12 KB and refuse above 20 KB (`--reason` to override): split, or move detail to the pack.
+- **`options.retryFromReview = true`** — a rejected review fails the task with the
+  reviewer's findings: `forge task fail <id> --from-review <file>`. The next
+  `brief --save` is the original brief plus only the latest findings — earlier retry
+  passes are replaced, not stacked. After two failures the escalation rule applies.
+- **`options.requireDispatch = true`** — `task done` refuses a task with no implementer
+  or tester launch recorded. Record the worker that ran (`forge task dispatch <id>
+  --agent forge-implementer --model sonnet`), or close a trivial task yourself with
+  `--self --reason "<why trivial>"` — counted in `forge stats`.
+- **`options.requireTester = high-risk`** — tasks with a high-risk domain
+  (`--domain auth|data|payments|migrations|security`) get `forge-tester` dispatched in
+  parallel with the implementer (tests from the criteria, red first); `task done`
+  refuses without it unless `--reason`. `warn` only warns when most criteria are tests.
+- **`options.architectPrepass = high-risk`** — `task start` on a high-risk task prints a
+  `forge-architect` (opus) prompt for a short design note (failure classes, transaction
+  boundaries, invariants); the architect records it with `forge context save <id>
+  --section design-note` and the brief carries it. The implementer stays on Sonnet.
+- **`options.delegateSpecSync = true`** — at close you decide WHAT changed in the spec;
+  the edit itself is dispatched to `forge-implementer` with a haiku model override and
+  recorded (`forge dispatch --agent forge-implementer --purpose other --model haiku
+  --item <id>`).
+
+Tag a task's domains when you cut it (`forge task add/update … --domain api,auth`): the
+brief then carries those domain packs' rules, and the high-risk rules above apply.
+
+**Model routing.** You (the session model) stay the CTO. `forge-architect`, high-risk
+review (auth, data access, payments, migrations) and the milestone security pass run on
+Opus (they inherit your model). `forge-implementer`, `forge-tester` and routine review run
+on Sonnet. `forge-explorer` (context packs) and spec/doc sync edits run on Haiku.
+Deterministic scanning (`verify.security`) runs on no model. The security pass prompt:
+`forge milestone security <M> --brief`.
 
 ## Discoveries
 
