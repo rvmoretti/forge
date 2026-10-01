@@ -54,7 +54,10 @@ the turn while such a task is ready and tells you when to stop: the milestone is
 user's testing, a task is blocked on a product question, a task failed twice, nothing is
 startable, or a run limit is reached. Put a question to the user by blocking the task
 (`forge task block <id> --reason "question: …"`) and asking it; never guess a product answer to
-keep the run going. The user may be on their phone: the message that ends a stop is short and
+keep the run going. The same goes for anything only the user can do — commit or revert a file of
+theirs, supply a credential: block the task with that request, never just end the turn with tasks
+in progress. When they have answered, `forge task unblock <id> --note "…"` resumes it — a task
+blocked mid-work keeps its attempt and verification, so it goes straight back to `task done`. The user may be on their phone: the message that ends a stop is short and
 its first line says what you need from them.
 
 **Plan standards**: when session start reports open `forge upgrade` steps, tell the

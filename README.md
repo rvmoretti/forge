@@ -166,6 +166,22 @@ memory.
 
 ## Changelog
 
+### v0.21.2 — Dashboard fits any screen; autopilot stops are visible; task unblock
+- The overview overflowed sideways at common desktop widths (and badly on tablets and phones): a
+  long task title in "Now" widened its grid column past the page. Grid columns now shrink to the
+  screen and long titles truncate. Checked at 360–1920 px on every page.
+- KPI tiles stack 1 + 4 between 941 and 1240 px; on phones the menu is one swipeable row that keeps
+  the current page in view.
+- "Latest in the journal" is gone from the overview — the Journal page has it all.
+- **Autopilot no longer hides a stop.** When the session ends its turn with tasks still in
+  progress (or stops for any other reason), the overview says "Autopilot stopped — your session is
+  waiting for you" with the reason, and the sidebar chip turns amber, until work moves again. A
+  blocked task now shows as needing you even while others are in progress.
+- **`forge task unblock <id> [--note]`** — the way back from a question. A task blocked mid-work
+  resumes the same attempt with its verification intact (before, the only way back was `task start`,
+  which re-ran the before-work checks and counted a new start). `task done` refusing on the user's
+  own stray files now says to block with that request and unblock after.
+
 ### v0.21.1 — Graphify git hook found under core.hooksPath
 - The Configuration page and `forge doctor` said "graph is not rebuilt after commits" in projects
   whose git hooks live in a tracked folder (`core.hooksPath`, e.g. `.githooks/`), although

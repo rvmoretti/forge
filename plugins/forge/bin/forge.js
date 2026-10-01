@@ -1309,6 +1309,7 @@ const COMMAND_DOCS = [
     ['forge task verify <id>', 'Run the project and criterion checks; records evidence.'],
     ['forge task done <id>', 'Close a verified task (commits it under the git flow).'],
     ['forge task block <id> --reason "question: …"', 'Park a task on a question for you.'],
+    ['forge task unblock <id> [--note "answer"]', 'Resume a blocked task; one blocked mid-work keeps its attempt and verification.'],
     ['forge task fail <id> --note …', 'Record a failed attempt with its diagnosis.'],
     ['forge task move <id> --before|--after <id>', 'Reorder unstarted tasks (dependency-checked).'],
     ['forge brief <id> --save', 'Write the worker brief for a task.'],
@@ -1889,6 +1890,9 @@ function generateDashboard() {
   }
 
   // ---- v0.14: needs-you banner (deterministic, same priority as session guidance) ----
+  // v0.21.2: an autopilot stop is current while the plan has not moved since it
+  const apRun = readJson(AUTOPILOT_FILE, {});
+  const apStop = autopilotCfg(cfg).on && apRun.stopped && apRun.stopped.key && apRun.stopped.key === progressKey(w) && apRun.stopped.kind !== 'user' ? apRun.stopped : null;
   let bannerBlock = '';
   {
     const seqB = milestoneSeq(w);
@@ -1898,7 +1902,8 @@ function generateDashboard() {
     let g = '🔥', h = '', p = '';
     if (cfg.phase === 'spec') { g = '🎨'; h = 'Spec phase — the product is still being shaped'; p = 'Resume the interview in your Claude session; share any feature lists, notes, or mockups you have — they shape everything that follows.'; }
     else if (awaiting.length) { g = '👋'; h = `Milestone ${esc(awaiting[0])} is finished — your review is the next step`; p = 'Try the running slice, give your verdict, and say anything you want to change or add before the next milestone starts. Then Forge records the approval.'; }
-    else if (blockedIds.length && !inProgIds.length) { g = '⛔'; h = `${blockedIds.length} item(s) are blocked and need your answer`; p = blockedIds.map(id => `<code>${esc(id)}</code> — ${esc(w.items[id].blockReason || '')}`).join(' · '); }
+    else if (apStop) { g = '⏸️'; h = `Autopilot stopped — your session is waiting for you`; p = `${esc(apStop.reason)}. Answer in the Claude session; autopilot carries on by itself once work moves again.`; }
+    else if (blockedIds.length) { g = '⛔'; h = `${blockedIds.length} item(s) are blocked and need your answer`; p = blockedIds.map(id => `<code>${esc(id)}</code> — ${esc(w.items[id].blockReason || '')}`).join(' · '); }
     else if (inProgIds.length) { g = '⚙️'; h = `Building — ${inProgIds.map(esc).join(', ')} in progress`; p = 'Nothing needs you right now. Forge stops for exactly three things: a product decision, a high-risk approval, a milestone review.'; }
     else if (ready > 0) { g = '▶️'; h = `${ready} item(s) ready — say “continue” in your Claude session`; p = 'The next item is briefed, dispatched, verified, and reviewed automatically; you\'ll be interrupted only if a product question surfaces.'; }
     else if (total > 0 && counts.DONE + counts.CANCELLED === total) { g = '🏁'; h = 'All planned work is done'; p = 'Start the next thing: a bounded change or a new destination — Forge asks which door when you open a session.'; }
@@ -2057,8 +2062,6 @@ function generateDashboard() {
       ${NEXT_ID ? `<h4>Next up</h4><ul class="nowl">${li(NEXT_ID)}</ul>` : ''}
       ${!inP.length && !blk.length && !NEXT_ID ? '<p class="mut">Nothing in flight.</p>' : ''}</div>`;
   }
-  const recentBlock = decisions.length || discoveries.length
-    ? `<div class="panel"><h3>Latest in the journal <a class="mut" href="#/journal">all →</a></h3>${logBlock([...decisions.slice(0, 2), ...discoveries.slice(0, 1)], '')}</div>` : '';
   // System: plan standards (forge upgrade) and the git/verify settings in force
   let standardsBlock = '', standardsMet = 0, standardsAll = 0;
   try {
@@ -2162,7 +2165,8 @@ main{flex:1;min-width:0;padding:26px clamp(16px,3.5vw,44px) 80px}
 .needsyou{border:1px solid var(--line);border-left:4px solid var(--awaitc);border-radius:var(--r);display:flex;gap:16px;align-items:flex-start;padding:16px 20px;background:linear-gradient(0deg,#b3660a08,#b3660a08),var(--surface);margin-bottom:14px;box-shadow:var(--shadow)}
 .needsyou .glyph{width:38px;height:38px;flex:none;border-radius:10px;background:#b3660a1a;display:grid;place-items:center;font-size:18px}
 .needsyou h3{font-size:15px} .needsyou p{font-size:13px;color:var(--ink2);margin-top:3px;max-width:78ch}
-.kpis{display:grid;grid-template-columns:1.35fr repeat(4,1fr);gap:12px}
+.kpis{display:grid;grid-template-columns:minmax(0,1.35fr) repeat(4,minmax(0,1fr));gap:12px}
+@media (max-width:1240px) and (min-width:941px){.kpis{grid-template-columns:repeat(4,minmax(0,1fr))} .kpi.hero{grid-column:1/-1}}
 .kpi{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:16px 18px;display:flex;flex-direction:column;gap:1px;justify-content:center;box-shadow:var(--shadow)}
 .kpi.hero{flex-direction:row;align-items:center;justify-content:flex-start;gap:16px}
 .kpi .v{font-weight:700;font-size:26px;letter-spacing:-.025em;font-variant-numeric:tabular-nums;line-height:1.15}
@@ -2325,6 +2329,7 @@ table.cmdt td:first-child{width:44%}
 .cmdgroup{margin-top:14px}
 /* ---- v0.19 pages ---- */
 .phase.ap{color:#9be3c4;border-color:#2b6b55;background:#0c8a7026}
+.phase.apstop{color:#f3c98f;border-color:#8a5a14;background:#b3660a26}
 .pbar{height:6px;border-radius:99px;background:var(--line2);overflow:hidden;display:block}
 .pbar i{display:block;height:100%;border-radius:99px;background:var(--done)}
 section.page[hidden]{display:none}
@@ -2332,11 +2337,12 @@ section.page[hidden]{display:none}
 .phead h2{font-size:22px;letter-spacing:-.02em}
 .h3s{margin:4px 0 9px}
 .warnk{color:#e9b98a!important}
-.ovgrid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px;align-items:start}
+.ovgrid{display:grid;grid-template-columns:minmax(0,1.7fr) minmax(0,1fr);gap:12px;margin-top:12px;align-items:start}
+.ovgrid>*,.panel{min-width:0}
 .ovgrid .panel h4,.archfoot h4{font-size:10.5px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--ink3);margin:4px 0 -4px}
 .nowl{list-style:none;display:flex;flex-direction:column;gap:6px;font-size:12.5px}
 .nowl li{display:flex;gap:8px;align-items:baseline;min-width:0}
-.nowl li>span{color:var(--ink2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.nowl li>span{flex:1;min-width:0;color:var(--ink2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .nowl a{font-family:var(--mono);font-size:11.5px;white-space:nowrap}
 .nowbar{display:flex;align-items:center;gap:12px} .nowbar .pbar{flex:1}
 .rels{display:flex;flex-direction:column;gap:10px}
@@ -2434,7 +2440,7 @@ details.icd.flash>summary,details.sec.sub.flash>summary{animation:flash 1.6s eas
 .sysrow:last-child{border-bottom:0}
 .sysrow .bdg{font-size:9.5px;font-weight:700;letter-spacing:.06em;width:46px;flex:none}
 .sysrow .n{width:168px;flex:none;font-weight:500}
-.sysrow .d{color:var(--ink3);font-size:12.5px;min-width:0}
+.sysrow .d{color:var(--ink3);font-size:12.5px;min-width:0;overflow-wrap:anywhere}
 .ok{color:var(--done)} .warn{color:var(--awaitc)} .bad{color:var(--blockc)}
 /* ---- shared ---- */
 .tblwrap{overflow-x:auto;background:var(--surface);border:1px solid var(--line);border-radius:var(--r);box-shadow:var(--shadow)}
@@ -2454,11 +2460,16 @@ tbody tr:hover{background:#faf9f5}
   #snav{flex-direction:row;flex-wrap:wrap;padding:0;overflow:visible} #snav a .k{display:none}
   .sidefoot{display:none}
   .kpis{grid-template-columns:1fr 1fr} .kpi.hero{grid-column:1/-1}
-  .telgrid,.jgrid,.dgrid,.dpair,.ovgrid,.archfoot{grid-template-columns:1fr}
+  .telgrid,.jgrid,.dgrid,.dpair,.ovgrid,.archfoot{grid-template-columns:minmax(0,1fr)}
   .lane{grid-template-columns:1fr}
   summary.irow{grid-template-columns:4px minmax(0,1fr) auto} .iid{display:none}
   .icdb{padding-left:22px}
   .pnote{margin-left:0}
+}
+@media (max-width:640px){
+  #snav{flex:1 1 100%;flex-wrap:nowrap;overflow-x:auto;width:100%;scrollbar-width:none;-webkit-overflow-scrolling:touch} #snav::-webkit-scrollbar{display:none}
+  #snav a{flex:none}
+  .pdiv{display:none}
 }
 @media (prefers-reduced-motion:reduce){html{scroll-behavior:auto}*{transition:none!important}}
 </style></head><body>
@@ -2467,7 +2478,7 @@ tbody tr:hover{background:#faf9f5}
   <div class="brand">
     <img src="data:image/png;base64,${LOGO_B64}" alt="FORGE">
     <div class="proj"><b>${esc(cfg.project)}</b>${esc(cfg.phase)} phase · v${VERSION}</div>
-    ${actM ? `<span class="phase">${esc(actM)} active</span>` : ''}${autopilotCfg(cfg).on ? ` <span class="phase ap" title="forge autopilot status">autopilot on</span>` : ''}
+    ${actM ? `<span class="phase">${esc(actM)} active</span>` : ''}${autopilotCfg(cfg).on ? (apStop ? ` <span class="phase apstop" title="${esc(apStop.reason)}">autopilot stopped</span>` : ` <span class="phase ap" title="forge autopilot status">autopilot on</span>`) : ''}
   </div>
   <nav id="snav">
     <a href="#/overview" data-p="overview">Overview</a>
@@ -2494,7 +2505,6 @@ tbody tr:hover{background:#faf9f5}
   ${kpiBlock}
   <div class="ovgrid">${nowBlock}${releaseBlock}</div>
   ${railBlock}
-  ${recentBlock}
 </section>
 
 <section class="page" data-page="plan" id="plan" hidden>
@@ -2781,6 +2791,8 @@ tbody tr:hover{background:#faf9f5}
     pages.forEach(function(p){ var on=p.getAttribute('data-page')===name; p.hidden=!on; if(on)hit=true; });
     if(!hit){ name='overview'; pages.forEach(function(p){ p.hidden=p.getAttribute('data-page')!=='overview'; }); }
     links.forEach(function(a){ a.classList.toggle('on', a.getAttribute('data-p')===name); });
+    var nav=document.getElementById('snav'), on=nav&&nav.querySelector('a.on');
+    if(on&&nav.scrollWidth>nav.clientWidth+1) nav.scrollLeft=Math.max(0,on.offsetLeft-(nav.clientWidth-on.offsetWidth)/2);
     return name;
   }
   function focusEl(el){
@@ -4040,7 +4052,10 @@ const commands = {
           die(`Refused: the working tree holds changes outside '${item.id}''s scope and outside every in-progress item's scope:\n` +
               outside.slice(0, 20).map(x => `  - ${x}`).join('\n') + (outside.length > 20 ? `\n  … and ${outside.length - 20} more` : '') +
               `\nOne commit per item means exactly the item's files. Revert the stray changes, or widen the scope deliberately:\n` +
-              `  forge task update ${item.id} --allowed "..." --reason "..."`);
+              `  forge task update ${item.id} --allowed "..." --reason "..."\n` +
+              `If these are the user's own changes (they belong to no task), only the user can commit or revert them — ask:\n` +
+              `  forge task block ${item.id} --reason "question: commit or revert ${outside.slice(0, 3).join(', ')}${outside.length > 3 ? ' …' : ''} so ${item.id} can close?"\n` +
+              `  then, after they have: forge task unblock ${item.id} && forge task done ${item.id}`);
         commitPlan = { branch: cur, mine, deferred };
       }
       if (selfClosed) item.selfClosed = selfClosed; // v0.21 (C5)
@@ -4127,11 +4142,33 @@ const commands = {
 
     } else if (sub === 'block') {
       const item = getItem(w, argv[2]);
+      if (['DONE', 'CANCELLED'].includes(item.status)) die(`'${item.id}' is ${item.status}; it cannot be blocked.`);
+      if (item.status !== 'BLOCKED') item.blockedFrom = item.status;
       item.status = 'BLOCKED';
       item.blockReason = opt('reason') || 'unspecified';
       item.updated = ts();
       saveWork(w);
       out(`${item.id} → BLOCKED: ${item.blockReason}`);
+      out(`When the user has answered: forge task unblock ${item.id} --note "<their answer>"${item.blockedFrom === 'IN_PROGRESS' ? ' (resumes the attempt; its verification stays valid)' : ''}`);
+
+    } else if (sub === 'unblock') {
+      // v0.21.2: the way back from a question. An item blocked mid-attempt resumes that attempt —
+      // no new start, no re-run of the before-work checks, its verification untouched.
+      const item = getItem(w, argv[2]);
+      if (item.status !== 'BLOCKED') die(`'${item.id}' is ${item.status}, not BLOCKED.`);
+      const back = item.blockedFrom === 'IN_PROGRESS' ? 'IN_PROGRESS' : 'TODO';
+      if (back === 'IN_PROGRESS') {
+        const cfgU = loadConfig() || {};
+        const conc = parseInt(((cfgU.options || {}).concurrency), 10) || 1;
+        const running = w.order.filter(id2 => w.items[id2].status === 'IN_PROGRESS').length;
+        if (running >= conc) die(`Refused: ${running} task(s) already IN_PROGRESS (options.concurrency ${conc}). Settle one first.`);
+      }
+      (item.unblocks = item.unblocks || []).push({ ts: ts(), reason: item.blockReason, answer: opt('note') || null, to: back });
+      item.status = back;
+      delete item.blockReason; delete item.blockedFrom;
+      item.updated = ts();
+      saveWork(w);
+      out(`${item.id} → ${back}${back === 'IN_PROGRESS' ? ' — the same attempt continues; verify/done as before' : ' — start it when it is next (forge task start)'}`);
 
     } else if (sub === 'cancel') {
       const item = getItem(w, argv[2]);
@@ -6147,7 +6184,7 @@ const commands = {
       // a nudge that produced no change in the plan is not repeated: the turn may end
       if (input.stop_hook_active && run.lastNudgeKey === key) {
         if (run.stopNoticeKey === key) { traceEvent({ outcome: 'ok', hook: 'stop', autopilot: 'stop', kind: (run.stopped || {}).kind || null }); releaseLock(); process.exit(0); }
-        saveRun(Object.assign(run, { stopped: { kind: 'no-progress', reason: 'no change in the plan since the last nudge', ts: ts() } }));
+        saveRun(Object.assign(run, { stopped: { kind: 'no-progress', reason: inProg.length ? `the session ended its turn with ${inProg.join(', ')} still in progress — read its last message` : 'no change in the plan since the last nudge', ts: ts(), key } }));
         traceEvent({ outcome: 'ok', hook: 'stop', autopilot: 'stop', kind: 'no-progress' });
         releaseLock(); process.exit(0);
       }
@@ -6159,7 +6196,8 @@ const commands = {
       if (inProg.length) {
         traceEvent({ outcome: 'block', hook: 'stop', autopilot: 'finish-in-progress', inProgress: inProg });
         nudge(`AUTOPILOT is on and ${inProg.join(', ')} is still IN_PROGRESS. Settle it now — verify, review and 'forge task done'; ` +
-          `or 'forge task block <id> --reason "question: …"' if you need the user; or 'forge task fail --note' with a diagnosis. Do not stop to report progress.\n`);
+          `or 'forge task block <id> --reason "question: …"' if you need the user (anything only they can do — a decision, a commit, a credential); ` +
+          `once they have answered, 'forge task unblock <id>' resumes it with its attempt and verification intact. Or 'forge task fail --note' with a diagnosis. Do not stop to report progress.\n`);
       }
       const d = autopilotDecision(w, cfgS, run);
       if (d.go) {
@@ -6176,7 +6214,7 @@ const commands = {
       if (run.stopNoticeKey !== key) {
         traceEvent({ outcome: 'block', hook: 'stop', autopilot: 'stop-notice', kind: d.kind });
         nudge(`AUTOPILOT stops here: ${d.reason}.\n${d.ask}\nEnd your turn with exactly that message to the user — short, and first line saying what you need from them.\n`,
-          { stopNoticeKey: key, stopped: { kind: d.kind, reason: d.reason, ts: ts() } });
+          { stopNoticeKey: key, stopped: { kind: d.kind, reason: d.reason, ts: ts(), key } });
       }
       traceEvent({ outcome: 'ok', hook: 'stop', autopilot: 'stop', kind: d.kind });
       releaseLock(); process.exit(0);
@@ -6213,7 +6251,7 @@ const commands = {
   task dispatch <id> --agent <worker> [--model <m>] [--kind launch|message] [--note]
                                          --agent is required on a launch; a --kind message inherits
                                          the agent of the launch it follows
-  task block <id> --reason | cancel <id> --reason [--dependents drop|cancel]
+  task block <id> --reason | unblock <id> [--note "answer"] | cancel <id> --reason [--dependents drop|cancel]
   milestone add <m> --name "<feature it enables>" [--demo "<how to try it>"] [--before|--after <M>]
   milestone update <m> [--name ..] [--demo ..] [--reason ..]
   milestone move <m> --before|--after <M> --reason ".." [--pull-deps]

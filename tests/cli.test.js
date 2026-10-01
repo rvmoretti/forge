@@ -2340,3 +2340,81 @@ test('v0.21: the graphify git hook is found under core.hooksPath (a tracked .git
   assert.match(d, /rebuilt after every commit \(git hook\)/);
   assert.doesNotMatch(d, /graphify hook install/);
 });
+
+test('v0.21.2: overview has no journal card; overview grids cannot be widened by long titles', () => {
+  addItem('L1', ['--milestone', 'M1', '--title', 'A very long title '.repeat(20)]);
+  forge(['decision', 'add', '--title', 'Some decision', '--why', 'because', '--authority', 'human']);
+  forge(['dashboard']);
+  const dash = fs.readFileSync(path.join(dir, 'forge', 'dashboard.html'), 'utf8');
+  const ov = dash.split('data-page="overview"')[1].split('</section>')[0];
+  assert.doesNotMatch(ov, /Latest in the journal/);
+  assert.match(dash, /\.ovgrid\{display:grid;grid-template-columns:minmax\(0,1\.7fr\) minmax\(0,1fr\)/);
+  assert.match(dash, /\.ovgrid>\*,\.panel\{min-width:0\}/);
+  assert.match(dash, /\.kpis\{display:grid;grid-template-columns:minmax\(0,1\.35fr\)/);
+});
+
+test('v0.21.2: a task blocked mid-work on the user\'s stray change resumes with unblock — same attempt, verification kept — and closes', () => {
+  gitFlowProject();
+  addItem('A', ['--milestone', 'M1']);
+  forge(['milestone', 'branch', 'M1']);
+  forge(['task', 'start', 'A']);
+  fs.writeFileSync(path.join(dir, 'src', 'a.js'), 'a');
+  fs.mkdirSync(path.join(dir, '.githooks'), { recursive: true });
+  fs.writeFileSync(path.join(dir, '.githooks', 'post-checkout'), '#!/bin/sh\n');
+  assert.strictEqual(forge(['task', 'verify', 'A']).code, 0);
+  const d = forge(['task', 'done', 'A']);
+  assert.notStrictEqual(d.code, 0);
+  assert.match(d.out, /only the user can commit or revert them/);
+  assert.match(d.out, /forge task unblock A && forge task done A/);
+  const b = forge(['task', 'block', 'A', '--reason', 'question: commit .githooks/post-checkout?']);
+  assert.match(b.out, /forge task unblock A/);
+  assert.strictEqual(work().items.A.blockedFrom, 'IN_PROGRESS');
+  // the user commits their file
+  g('add', '.githooks/post-checkout'); g('commit', '-qm', 'hooks');
+  const u = forge(['task', 'unblock', 'A', '--note', 'committed']);
+  assert.strictEqual(u.code, 0, u.out);
+  const wa = work().items.A;
+  assert.strictEqual(wa.status, 'IN_PROGRESS');
+  assert.strictEqual(wa.attempts.length, 1);               // no new start
+  assert.strictEqual(wa.unblocks[0].answer, 'committed');
+  assert.strictEqual(wa.blockedFrom, undefined);
+  assert.strictEqual(forge(['task', 'verify', 'A']).code, 0);
+  const done = forge(['task', 'done', 'A']);
+  assert.strictEqual(done.code, 0, done.out);
+  assert.strictEqual(work().items.A.status, 'DONE');
+});
+
+test('v0.21.2: unblock of a task blocked before it started returns it to TODO; unblock of a non-blocked task refuses', () => {
+  addItem('T', ['--milestone', 'M1']);
+  forge(['task', 'block', 'T', '--reason', 'question: which provider?']);
+  assert.strictEqual(forge(['task', 'unblock', 'T']).code, 0);
+  assert.strictEqual(work().items.T.status, 'TODO');
+  assert.notStrictEqual(forge(['task', 'unblock', 'T']).code, 0);
+});
+
+test('v0.21.2: an autopilot stop with work in progress shows on the dashboard until the plan moves', () => {
+  addItem('P1', ['--milestone', 'M1']);
+  forge(['autopilot', 'on']);
+  forge(['task', 'start', 'P1']);
+  assert.strictEqual(hook('stop', { session_id: 's' }).code, 2);                             // nudge
+  assert.strictEqual(hook('stop', { session_id: 's', stop_hook_active: true }).code, 0);     // no progress: the turn ends
+  forge(['dashboard']);
+  let dash = fs.readFileSync(path.join(dir, 'forge', 'dashboard.html'), 'utf8');
+  assert.match(dash, /Autopilot stopped — your session is waiting for you/);
+  assert.match(dash, /ended its turn with P1 still in progress/);
+  assert.match(dash, /class="phase apstop"/);
+  assert.doesNotMatch(dash, /<h3>Building — P1 in progress<\/h3>/);
+  touch('p.txt'); forge(['task', 'verify', 'P1']);                                          // the plan moves
+  dash = fs.readFileSync(path.join(dir, 'forge', 'dashboard.html'), 'utf8');
+  assert.doesNotMatch(dash, /Autopilot stopped/);
+  assert.match(dash, /class="phase ap"/);
+});
+
+test('v0.21.2: a blocked task is shown as needing you even while others are in progress', () => {
+  addItem('A', ['--milestone', 'M1', '--allowed', 'a/']); addItem('B', ['--milestone', 'M1', '--allowed', 'b/']);
+  forge(['config', 'set', 'options.concurrency', '2']);
+  forge(['task', 'start', 'A']); forge(['task', 'start', 'B']);
+  forge(['task', 'block', 'B', '--reason', 'question: which?']);
+  const dash = fs.readFileSync(path.join(dir, 'forge', 'dashboard.html'), 'utf8');
+  assert.match(dash, /1 item\(s\) are blocked and need your answer/);
+});
