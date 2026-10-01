@@ -1165,6 +1165,114 @@ function autopilotDecision(w, cfg, run) {
   return { go: true, next: nx, label: lab(nx.id) };
 }
 
+// ============================================================================
+// v0.20.1: Graphify status — "use" means a built, current, ignored graph the agents are told about
+// ----------------------------------------------------------------------------
+// Field finding: two projects had options.graphify "use" and the CLI installed, but no graph was
+// ever built, so every "query Graphify first" fell through to grep. The CLI's presence proves
+// nothing; the graph file, its age, and the Claude Code integration are what make it used.
+// ============================================================================
+function graphifyStatus(cfg) {
+  const choice = (((cfg || {}).options) || {}).graphify || 'unset';
+  const gj = path.join(PROJECT, 'graphify-out', 'graph.json');
+  let st = null; try { st = fs.statSync(gj); } catch (_) { }
+  let lastCommitMs = null;
+  try { const r = spawnSync('git', ['log', '-1', '--format=%ct'], { cwd: PROJECT, encoding: 'utf8', timeout: 5000 }); if (r.status === 0 && r.stdout.trim()) lastCommitMs = parseInt(r.stdout.trim(), 10) * 1000; } catch (_) { }
+  let ignored = null;
+  try { const r = spawnSync('git', ['check-ignore', '-q', 'graphify-out/graph.json'], { cwd: PROJECT, timeout: 5000 }); ignored = r.status === 0 ? true : r.status === 1 ? false : null; } catch (_) { }
+  const read = f => { try { return fs.readFileSync(path.join(PROJECT, f), 'utf8'); } catch (_) { return ''; } };
+  const claudeMd = /^##\s+graphify\b/m.test(read('CLAUDE.md'));
+  const claudeHook = /graphify/.test(read('.claude/settings.json'));
+  let gitHook = false; try { const gd = spawnSync('git', ['rev-parse', '--git-dir'], { cwd: PROJECT, encoding: 'utf8', timeout: 5000 }).stdout.trim(); gitHook = /graphify-hook-start/.test(fs.readFileSync(path.resolve(PROJECT, gd, 'hooks', 'post-commit'), 'utf8')); } catch (_) { }
+  return { choice, built: !!st, builtMs: st ? st.mtimeMs : null, sizeKB: st ? Math.round(st.size / 1024) : null,
+    stale: !!(st && lastCommitMs && lastCommitMs > st.mtimeMs + 60000), ignored, claudeMd, claudeHook, gitHook };
+}
+function graphifyProblems(g) {
+  if (g.choice !== 'use') return [];
+  const p = [];
+  if (!g.built) p.push({ what: 'no graph built — agents fall back to grep', fix: 'graphify update .' });
+  else if (g.stale) p.push({ what: 'graph is older than the last commit', fix: 'graphify update .   (and graphify hook install to keep it current)' });
+  if (g.ignored === false) p.push({ what: 'graphify-out/ is not git-ignored — the rebuild after each commit leaves the tree dirty and collides with task commits', fix: "printf 'graphify-out/\\n' >> .gitignore" });
+  if (!g.claudeMd || !g.claudeHook) p.push({ what: 'Claude Code is not told to use the graph (no CLAUDE.md section / PreToolUse hooks)', fix: 'graphify claude install' });
+  if (!g.gitHook) p.push({ what: 'graph is not rebuilt after commits', fix: 'graphify hook install' });
+  return p;
+}
+
+// ============================================================================
+// v0.20.1: what every setting means and how to change it — one registry feeds the dashboard
+// ============================================================================
+const CONFIG_DOCS = [
+  { key: 'phase', def: 'spec', group: 'Project', what: 'Where the project is: spec (shaping the product, no building) or build (the build loop runs).', change: 'forge config set phase build' },
+  { key: 'specDir', def: '—', group: 'Project', what: 'Folder holding the spec layers; the Specs page lists it and briefs cite it.', change: 'forge config set specDir spec' },
+  { key: 'verify.*', def: '—', group: 'Verification', what: 'Commands every task verification runs (test, lint, typecheck, security, build, e2e …). A task is DONE only when all pass on the current tree.', change: 'forge config set verify.test "npm test"' },
+  { key: 'options.verifyVerbose', def: 'false', group: 'Verification', what: 'Print every check\'s full output on verify (default: one line per passing check; the full tail is always kept in state).', change: 'forge config set options.verifyVerbose true' },
+  { key: 'options.security', def: 'on', group: 'Verification', what: 'Security gate before a milestone is approved and a preflight warning when no verify.security scanner is set. "off" disables both.', change: 'forge config set options.security off' },
+  { key: 'options.gates', def: 'per-milestone', group: 'Gates', what: 'per-milestone: each milestone waits for your approval before the next starts. end-only: one review at the end.', change: 'forge config set options.gates end-only' },
+  { key: 'options.protect', def: '—', group: 'Gates', what: 'Comma-separated paths no task may edit (generated code, migrations …). Edits there are blocked by the hook.', change: 'forge config set options.protect "src/generated/,supabase/migrations/"' },
+  { key: 'options.scopeExempt', def: 'forge/,spec/,docs/', group: 'Gates', what: 'Folders exempt from a task\'s file-scope guard (orchestrator housekeeping). *.md is always exempt.', change: 'forge config set options.scopeExempt "forge/,spec/,docs/"' },
+  { key: 'options.concurrency', def: '4 (new) · 1 (unset)', group: 'Build loop', what: 'Most tasks in progress at once. Parallel tasks must have disjoint file scopes; start refuses an overlap.', change: 'forge config set options.concurrency 4' },
+  { key: 'options.autopilot', def: 'off', group: 'Build loop', what: 'on: keep taking the next task of the milestone; stop only for you (milestone ready to test, a question, an escalation, nothing startable, a run limit).', change: 'forge autopilot on   ·   forge autopilot off' },
+  { key: 'options.autopilotMaxItems', def: '0 (no limit)', group: 'Build loop', what: 'Autopilot stops after this many tasks in one run.', change: 'forge autopilot on --max-items 8' },
+  { key: 'options.autopilotMaxHours', def: '0 (no limit)', group: 'Build loop', what: 'Autopilot stops after this many hours in one run.', change: 'forge autopilot on --hours 6' },
+  { key: 'options.graphify', def: 'unset', group: 'Build loop', what: 'use: agents orient with the code graph (graphify-out/) instead of grep — needs a built graph and the Claude Code integration (see the Graphify card). skip: proceed without.', change: 'forge config set options.graphify use' },
+  { key: 'options.web', def: 'false', group: 'Build loop', what: 'The project has a web UI: preflight checks Playwright so E2E criteria can be machine-verified.', change: 'forge config set options.web true' },
+  { key: 'options.integration', def: 'per-milestone', group: 'Git flow', what: 'per-milestone: one branch per milestone, one commit per task (task done), one PR per milestone (milestone ship). manual: Forge runs no git (needs a recorded reason).', change: 'forge config set options.integration manual --reason "…"' },
+  { key: 'options.baseBranch', def: '—', group: 'Git flow', what: 'Integration branch milestone branches start from and merge into (staging, develop). Production branches are refused.', change: 'forge config set options.baseBranch staging' },
+  { key: 'options.branchPattern', def: 'milestone/<id>', group: 'Git flow', what: 'Name of each milestone branch.', change: 'forge config set options.branchPattern "milestone/<id>"' },
+  { key: 'options.mergeMethod', def: 'merge', group: 'Git flow', what: 'How a milestone PR is merged (merge, squash, rebase).', change: 'forge config set options.mergeMethod squash' },
+  { key: 'options.remote', def: 'origin', group: 'Git flow', what: 'Git remote that task commits are pushed to.', change: 'forge config set options.remote origin' },
+  { key: 'options.gateSteps', def: '—', group: 'Git flow', what: 'Manual steps shown at milestone ship and confirmed with --steps-done ("step one || step two").', change: 'forge config set options.gateSteps "db push || deploy staging"' },
+  { key: 'options.versionStart', def: '0', group: 'Versions', what: 'Number of the first release: V0 = MVP; an existing product may start at 2.', change: 'forge config set options.versionStart 0' },
+  { key: 'options.usageAuto', def: 'true', group: 'Telemetry', what: 'Refresh the token snapshot from session logs on every state change. false: only when you run forge usage.', change: 'forge config set options.usageAuto false' },
+  { key: 'providers.*', def: '—', group: 'Telemetry', what: 'API workers (forge worker run): model, url (default OpenRouter), keyEnv, maxTurns.', change: 'forge config set providers.model "<id>"' },
+];
+const COMMAND_DOCS = [
+  { group: 'Start and status', items: [
+    ['forge init', 'Create forge/ state in a project (idempotent).'],
+    ['forge status', 'Phase, counts, what is in progress or blocked, what needs you.'],
+    ['forge dashboard', 'Regenerate this page (it also refreshes on every change).'],
+    ['forge preflight [--full]', 'Check git, verify commands, Graphify, Playwright before building.'],
+    ['forge doctor', 'Self-check of the install and the project state.'] ] },
+  { group: 'Tasks', items: [
+    ['forge task next', 'The next task in plan order.'],
+    ['forge task start [<id>]', 'Start the next task (or a named one); refuses unmet criteria, scope, deps, concurrency.'],
+    ['forge task add --id … --title … --milestone …', 'Add a task (criteria and scope can come later).'],
+    ['forge task update <id> --criterion-add "d::cmd" --allowed …', 'Flesh out a task: criteria, scope, deps.'],
+    ['forge task verify <id>', 'Run the project and criterion checks; records evidence.'],
+    ['forge task done <id>', 'Close a verified task (commits it under the git flow).'],
+    ['forge task block <id> --reason "question: …"', 'Park a task on a question for you.'],
+    ['forge task fail <id> --note …', 'Record a failed attempt with its diagnosis.'],
+    ['forge task move <id> --before|--after <id>', 'Reorder unstarted tasks (dependency-checked).'],
+    ['forge brief <id> --save', 'Write the worker brief for a task.'] ] },
+  { group: 'Milestones and releases', items: [
+    ['forge milestone list', 'Milestones in order with labels and gates.'],
+    ['forge milestone add <id> --name … --release <R>', 'Add a milestone named after the feature it enables.'],
+    ['forge milestone move <id> --before|--after <M> --reason …', 'Reorder (refuses breaking dependencies or started work).'],
+    ['forge milestone approve <id>', 'Your approval at the gate.'],
+    ['forge milestone ship <id>', 'Open the milestone PR (git flow).'],
+    ['forge release list | add | move | tag', 'Releases (V0 = MVP, V1 …) above milestones.'] ] },
+  { group: 'Architecture and screens', items: [
+    ['forge arch scan [--write]', 'Draft the architecture from the repo (zero tokens).'],
+    ['forge arch list | add | update | link | confirm', 'Runtime parts and who talks to whom.'],
+    ['forge screen list | add | assign <app> --match …', 'Screens and mocks, per app.'] ] },
+  { group: 'Running unattended', items: [
+    ['forge autopilot on [--max-items N] [--hours H]', 'Keep building; stop only for you.'],
+    ['forge autopilot status | off', 'See the run; turn it off.'] ] },
+  { group: 'Keeping the plan current', items: [
+    ['forge upgrade', 'Which standards of the installed Forge this plan meets.'],
+    ['forge upgrade apply', 'Automatic steps, with a backup.'],
+    ['forge upgrade dry-run|run <script>', 'Reviewed change scripts for judgement steps.'],
+    ['forge upgrade revert', 'Restore the last upgrade\'s backup.'] ] },
+  { group: 'Journal and settings', items: [
+    ['forge decision add "title" --decision … --why …', 'Record a product or process decision.'],
+    ['forge discovery add "title" --evidence … --impact …', 'Record something the plan did not know.'],
+    ['forge config get [path] | set <path> <value>', 'Read or change a setting (see the Configuration page).'] ] },
+  { group: 'Measuring', items: [
+    ['forge stats', 'Outcomes: first-pass, clean-run, per-milestone health.'],
+    ['forge usage [--baseline --label …]', 'Observed tokens and calls; baseline to measure a change.'],
+    ['forge trace [--refusals]', 'Flight recorder of every command and hook decision.'] ] },
+];
+
 function regenDashboard() {
   if (process.env.FORGE_DEFER_REGEN === '1') return; // v0.19.1: a change script regenerates once, at its end
   try { usageAutoRefresh(readJson(CONFIG_FILE, null)); } catch (_) { /* never block state ops */ }
@@ -1809,6 +1917,39 @@ function generateDashboard() {
     standardsBlock = st.map(x => `<div class="sysrow"><span class="bdg ${x.done ? 'ok' : x.kind === 'auto' ? 'bad' : 'warn'}">${x.done ? 'MET' : x.kind === 'auto' ? 'AUTO' : 'REVIEW'}</span><span class="n">${esc(x.id)} <span class="mut">${esc(x.since)}</span></span><span class="d">${esc(x.title)}${x.accepted ? ` · kept as-is: ${esc(x.accepted.reason)}` : ''}${x.findings.length ? `<br>${x.findings.slice(0, 3).map(esc).join('<br>')}` : ''}</span></div>`).join('');
   } catch (_) { /* never block the dashboard */ }
   const gcD = (() => { try { return gitCfg(cfg); } catch (_) { return null; } })();
+  // ---- v0.20.1: Configuration and Commands pages ------------------------------------
+  const cfgVal = key => {
+    if (key === 'verify.*') { const v = cfg.verify || {}; return Object.keys(v).length ? Object.entries(v).map(([k, x]) => `<div><b>${esc(k)}</b> <code>${esc(String(x))}</code></div>`).join('') : null; }
+    if (key === 'providers.*') { const v = cfg.providers || {}; return Object.keys(v).length ? Object.entries(v).filter(([k]) => !/key$/i.test(k) || k === 'keyEnv').map(([k, x]) => `<div><b>${esc(k)}</b> <code>${esc(String(x))}</code></div>`).join('') : null; }
+    const v = key.split('.').reduce((o, k) => (o == null ? undefined : o[k]), cfg);
+    if (v === undefined || v === null || v === '') return null;
+    const sv = String(v);
+    // comma / || lists read better one per line
+    const parts = sv.includes('||') ? sv.split('||') : (sv.length > 40 && sv.includes(',') ? sv.split(',') : [sv]);
+    return parts.map(x => `<code>${esc(x.trim())}</code>`).join('<br>');
+  };
+  const gsD = graphifyStatus(cfg);
+  const gpD = graphifyProblems(gsD);
+  const graphCard = `<div class="panel gcard"><h3>Graphify <span class="mut">— the code graph agents orient with instead of grep</span></h3>
+    <div class="kv">
+      <div class="row"><span class="k">Setting</span><span class="vl"><code>options.graphify = ${esc(gsD.choice)}</code></span></div>
+      <div class="row"><span class="k">Graph</span><span class="vl">${gsD.built ? `built <span data-since="${new Date(gsD.builtMs).toISOString()}" data-post=" ago"></span> · ${gsD.sizeKB} KB${gsD.stale ? ' · <span class="warn">older than the last commit</span>' : ''}` : '<span class="warn">not built</span>'}</span></div>
+      <div class="row"><span class="k">Kept current</span><span class="vl">${gsD.gitHook ? 'rebuilt after every commit (git hook)' : '<span class="mut">no git hook</span>'}</span></div>
+      <div class="row"><span class="k">Claude Code</span><span class="vl">${gsD.claudeMd && gsD.claudeHook ? 'told to use it (CLAUDE.md section + hooks)' : '<span class="mut">not told to use it</span>'}</span></div>
+      <div class="row"><span class="k">Git</span><span class="vl">${gsD.ignored === true ? 'graphify-out/ ignored' : gsD.ignored === false ? '<span class="warn">graphify-out/ not ignored</span>' : '<span class="mut">—</span>'}</span></div>
+    </div>
+    ${gsD.choice === 'use' ? (gpD.length ? `<p class="gfix"><b>To make it actually used</b>, run in the project folder:</p><pre><code>${gpD.map(x => esc(x.fix)).join('\n')}</code></pre><p class="footnote">${gpD.map(x => esc(x.what)).join(' · ')}. Restart the Claude session afterwards so it loads the hooks. Measure the effect: <code>forge usage --baseline --label graphify</code> before, compare after a few tasks.</p>` : '<p class="ok">In use: built, current, rebuilt on commit, and Claude Code is told to query it.</p>')
+      : gsD.choice === 'skip' ? '<p class="mut">Skipped by choice. Agents orient with explorer runs and grep.</p>' : '<p class="mut">No choice recorded. <code>forge config set options.graphify use</code> after installing it, or <code>skip</code>.</p>'}
+  </div>`;
+  const cfgGroups = [...new Set(CONFIG_DOCS.map(d => d.group))];
+  const configPage = `<div class="cfgintro panel"><p><b>How to change a setting:</b> run the command in the last column in a terminal, from the project folder — or ask the Claude session to run it. The CLI validates the value and records the decisions it needs (opting out of the git flow asks for a reason). Settings live in <code>forge/config.json</code>; change them through the CLI, not by editing the file. The dashboard refreshes on the next command.</p></div>
+    ${graphCard}
+    ${cfgGroups.map(gname => `<h3 class="h3s">${esc(gname)}</h3><div class="tblwrap"><table class="cfgt"><thead><tr><th>Setting</th><th>Now</th><th>Default</th><th>What it does</th><th>How to change</th></tr></thead><tbody>${
+      CONFIG_DOCS.filter(d => d.group === gname).map(d => { const v = cfgVal(d.key); return `<tr><td><code>${esc(d.key)}</code></td><td>${v || '<span class="mut">default</span>'}</td><td class="mut">${esc(d.def)}</td><td>${esc(d.what)}</td><td><code class="cmd">${esc(d.change)}</code></td></tr>`; }).join('')
+    }</tbody></table></div>`).join('')}`;
+  const commandsPage = `<div class="workbar"><input class="filter" id="cmdfilter" type="search" placeholder="Filter commands… (e.g. milestone, verify, autopilot)" aria-label="Filter commands"><span class="mut">every command is <code>node &lt;forge&gt;/bin/forge.js …</code> — in a Claude session just say what you want; <code>forge help</code> prints the full reference</span></div>
+    ${COMMAND_DOCS.map(g => `<section class="cmdgroup"><h3 class="h3s">${esc(g.group)}</h3><div class="tblwrap"><table class="cmdt"><tbody>${g.items.map(([c, wtxt]) => `<tr data-q="${esc((c + ' ' + wtxt).toLowerCase())}"><td><code class="cmd">${esc(c)}</code></td><td>${esc(wtxt)}</td></tr>`).join('')}</tbody></table></div></section>`).join('')}`;
+
   const configBlock = [
     ['Verify', Object.keys(cfg.verify || {}).length ? Object.entries(cfg.verify).map(([k, v]) => `${esc(k)}: <code>${esc(String(v))}</code>`).join('<br>') : 'not set'],
     ['Git flow', gcD ? (gcD.integration === 'per-milestone' ? `per-milestone · base <code>${esc(gcD.base || '?')}</code> · branch <code>${esc(gcD.pattern || '')}</code>` : 'manual (recorded opt-out)') : '—'],
@@ -2014,6 +2155,15 @@ button.cchip:hover{background:var(--accsoft);color:var(--accent)}
 .vlab{font-weight:700;color:var(--accent);margin-right:6px;font-variant-numeric:tabular-nums}
 .vlab i{font-style:normal;color:var(--ink3);margin-left:1px}
 .cdots{display:flex;gap:3px} .cdots i{width:6px;height:6px;border-radius:50%;display:block}
+/* ---- v0.20.1 configuration & commands ---- */
+.cfgintro p{font-size:13px;color:var(--ink2)}
+.gcard{margin:12px 0 18px} .gcard pre{background:#f4f3ef;border:1px solid var(--line);border-radius:9px;padding:10px 12px;overflow-x:auto} .gcard pre code{background:none;padding:0;font-size:12px}
+.gfix{font-size:13px}
+table.cfgt{table-layout:fixed} table.cfgt th:nth-child(1){width:19%} table.cfgt th:nth-child(2){width:20%} table.cfgt th:nth-child(3){width:10%} table.cfgt th:nth-child(5){width:21%}
+table.cfgt td{overflow-wrap:anywhere} table.cfgt td code{white-space:normal;word-break:break-word} table.cfgt td:nth-child(4){color:var(--ink2)} table.cfgt td div{margin:1px 0}
+code.cmd{white-space:pre-wrap;word-break:break-word}
+table.cmdt td:first-child{width:44%}
+.cmdgroup{margin-top:14px}
 /* ---- v0.19 pages ---- */
 .phase.ap{color:#9be3c4;border-color:#2b6b55;background:#0c8a7026}
 .pbar{height:6px;border-radius:99px;background:var(--line2);overflow:hidden;display:block}
@@ -2168,6 +2318,8 @@ tbody tr:hover{background:#faf9f5}
     <a href="#/usage" data-p="usage">Usage</a>
     <a href="#/journal" data-p="journal">Journal <span class="k">${decisions.length + discoveries.length}</span></a>
     <a href="#/specs" data-p="specs">Specs <span class="k">${specCount || ''}</span></a>
+    <a href="#/configuration" data-p="configuration">Configuration${gpD.length ? ' <span class="k warnk">graphify</span>' : ''}</a>
+    <a href="#/commands" data-p="commands">Commands</a>
     <a href="#/system" data-p="system">System${standardsAll && standardsMet < standardsAll ? ` <span class="k warnk">upgrade ${standardsMet}/${standardsAll}</span>` : ''}</a>
   </nav>
   <div class="sidefoot"><b>Generated projection.</b><br>State wins — never edit this file.<br>regenerated <span data-since="${new Date().toISOString()}" data-post=" ago">just now</span> · ${new Date().toISOString().slice(0, 16).replace('T', ' ')} UTC</div>
@@ -2232,6 +2384,16 @@ tbody tr:hover{background:#faf9f5}
   <div class="tblwrap"><table><thead><tr><th>File</th><th>Size</th><th>Modified</th></tr></thead><tbody>${changeRows}</tbody></table></div>` : ''}
 </section>
 
+<section class="page" data-page="configuration" id="configuration" hidden>
+  <div class="phead"><h2>Configuration</h2><span class="mut">how this project is set up, what each setting does, and how to change it</span></div>
+  ${configPage}
+</section>
+
+<section class="page" data-page="commands" id="commands" hidden>
+  <div class="phead"><h2>Commands</h2><span class="mut">Forge's commands and what each is for</span></div>
+  ${commandsPage}
+</section>
+
 <section class="page" data-page="system" id="system" hidden>
   <div class="phead"><h2>System</h2><span class="mut">plan standards · preflight · baseline · settings — the plumbing</span></div>
   ${standardsBlock ? `<h3 class="h3s">Plan standards <span class="mut">— ${standardsMet}/${standardsAll} met for Forge v${VERSION}${standardsMet < standardsAll ? ' · <code>forge upgrade</code> shows how to close the rest' : ''}</span></h3><div class="syscard">${standardsBlock}</div>` : ''}
@@ -2241,7 +2403,7 @@ tbody tr:hover{background:#faf9f5}
   <div><h3 class="h3s">Baseline ${base ? `<span class="mut">${esc(base.ts.slice(0, 16).replace('T', ' '))} · a recorded moment, not a live check</span>` : ''}</h3>
   <div class="syscard">${baseBlock}</div></div>
   </div>
-  <h3 class="h3s" style="margin-top:18px">Settings</h3><div class="syscard">${configBlock}</div>
+  <p class="mut" style="margin-top:18px">Settings and what they do: <a href="#/configuration">Configuration</a> · commands: <a href="#/commands">Commands</a></p>
 </section>
 
 </div></main>
@@ -2587,6 +2749,16 @@ tbody tr:hover{background:#faf9f5}
 })();
 
 (function(){
+  var f=document.getElementById('cmdfilter'); if(!f) return;
+  f.addEventListener('input',function(){
+    var q=f.value.toLowerCase();
+    [].forEach.call(document.querySelectorAll('.cmdgroup'),function(g){
+      var n=0; [].forEach.call(g.querySelectorAll('tr[data-q]'),function(r){ var hit=!q||r.getAttribute('data-q').indexOf(q)>=0; r.style.display=hit?'':'none'; if(hit)n++; });
+      g.style.display=n?'':'none';
+    });
+  });
+})();
+(function(){
   var f=document.getElementById('scrfilter'); if(!f) return;
   f.addEventListener('input',function(){
     var q=f.value.toLowerCase();
@@ -2745,7 +2917,7 @@ function briefLines(item, cfg) {
   lines.push('', `## Acceptance criteria (your work is verified against these — they are the definition of done)`);
   item.criteria.forEach((c, i) => lines.push(`${i + 1}. ${c.desc}${c.check ? `  — machine check: \`${c.check}\`` : '  — (no machine check; explain how you validated it)'}`));
   lines.push('', `## Scope`);
-  lines.push(`Allowed to modify: ${item.scope.allowed.length ? item.scope.allowed.join(', ') : '(orchestrator: derive from the dependency closure — use Graphify if available)'}`);
+  lines.push(`Allowed to modify: ${item.scope.allowed.length ? item.scope.allowed.join(', ') : '(orchestrator: derive from the dependency closure — graphify affected "<symbol>" / graphify query when the graph is built)'}`);
   lines.push(`Must NOT touch: ${item.scope.forbidden.length ? item.scope.forbidden.join(', ') : '(orchestrator: fill in)'}`);
   // v0.16: the file list, resolved now, so the worker reads instead of searching
   {
@@ -2763,6 +2935,8 @@ function briefLines(item, cfg) {
   lines.push('', `## How to work (this is what keeps the item cheap and fast)`,
     `- Read the files listed above FIRST. They are the working set.`,
     `- Do not search or scan the repository. If you believe you need a file that is not listed, STOP and report which one and why — that is a scope question for the orchestrator, not something to resolve by exploring.`,
+    ...(((cfg.options || {}).graphify === 'use' && fs.existsSync(path.join(PROJECT, 'graphify-out', 'graph.json')))
+      ? [`- The files above are your working set — read them directly. For a question about code OUTSIDE that set (who calls this, what does that depend on), ask the code graph instead of searching: \`graphify query "<question>"\`, \`graphify explain "<symbol>"\`, \`graphify path "<A>" "<B>"\`. Each answer is a small scoped subgraph.`] : []),
     `- Make the change, then run the verification commands below. Iterate on failures; do not re-read files you have already read.`,
     `- If you find yourself unsure what to do next, STOP and report. A question costs one message; guessing costs an hour.`);
   lines.push('', `## Project verification commands (will be run on your result)`);
@@ -3272,7 +3446,15 @@ const commands = {
       // graphify — optional enhancer with recorded user choice
       const g = run('graphify --version', { timeout: 15000 });
       const choice = (cfg.options || {}).graphify || 'unset';
-      if (g.exit === 0) check('graphify', true, `available (${g.tail.split('\n')[0]})`, 'optional');
+      if (g.exit === 0) {
+        check('graphify', true, `available (${g.tail.split('\n')[0]})`, 'optional');
+        // v0.20.1: installed is not used — the graph must exist, be current, ignored, and wired into Claude Code
+        if (choice === 'use') {
+          const gs = graphifyStatus(cfg);
+          const gp = graphifyProblems(gs);
+          check('graphify graph', !gp.length, gp.length ? gp.map(x => `${x.what} → ${x.fix}`).join(' | ') : `built ${new Date(gs.builtMs).toISOString().slice(0, 16).replace('T', ' ')} · ${gs.sizeKB} KB · rebuilt on commit · Claude Code integration in place`, 'warning');
+        }
+      }
       else if (choice === 'skip') check('graphify', true, 'not installed — user chose to proceed without (degraded orientation: Explorer agents)', 'optional');
       else if (choice === 'use') check('graphify', false, 'configured for use but not installed — install it, or run: forge config set options.graphify skip', 'warning');
       else check('graphify', false, 'ASK_USER: not installed and no choice recorded. Ask the user: install Graphify (recommended) or proceed without? Record with: forge config set options.graphify use|skip', 'decision');

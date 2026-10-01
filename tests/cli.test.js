@@ -2071,3 +2071,27 @@ test('autopilot: a thin next task is prepared, not treated as a dead end', () =>
   assert.match(h.out, /next task is .*P2/);
   assert.match(h.out, /still thin: write its acceptance criteria/);
 });
+
+test('v0.20.1: graphify "use" without a built graph is flagged with the fix; briefs point at the graph once built; Configuration and Commands pages', () => {
+  forge(['config', 'set', 'options.graphify', 'use']);
+  addItem('G1', ['--milestone', 'M1']);
+  let dash = fs.readFileSync(path.join(dir, 'forge', 'dashboard.html'), 'utf8');
+  assert.match(dash, /<section class="page" data-page="configuration"/);
+  assert.match(dash, /<section class="page" data-page="commands"/);
+  assert.match(dash, /data-p="configuration">Configuration <span class="k warnk">graphify<\/span>/);
+  assert.match(dash, /graphify update \./);
+  assert.match(dash, /graphify claude install/);
+  assert.match(dash, /<code>options\.concurrency<\/code><\/td><td><code>4<\/code>/);
+  assert.match(dash, /forge autopilot on \[--max-items N\]/);
+  assert.doesNotMatch(forge(['brief', 'G1']).out, /graphify query/);
+  // a built, ignored graph: the brief tells workers how to ask it
+  fs.mkdirSync(path.join(dir, 'graphify-out'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'graphify-out', 'graph.json'), '{}');
+  fs.writeFileSync(path.join(dir, '.gitignore'), 'graphify-out/\n');
+  assert.match(forge(['brief', 'G1']).out, /graphify query "<question>"/);
+  forge(['dashboard']);
+  dash = fs.readFileSync(path.join(dir, 'forge', 'dashboard.html'), 'utf8');
+  assert.match(dash, /graphify-out\/ ignored/);
+  assert.doesNotMatch(dash, /graphify update \./);         // built and fresh: no rebuild advice
+  assert.match(dash, /graphify claude install/);             // still not wired into Claude Code
+});

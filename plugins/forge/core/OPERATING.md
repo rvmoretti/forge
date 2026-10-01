@@ -68,8 +68,9 @@ from confirmed goals, milestone cut across everything. Then the same loop.
    `forge task start` with no id (v0.18). The plan's order is the work order: a
    different READY item needs `--reason`, or reorder deliberately with `forge task
    move`. Labels (`V0.3.2`) are how the user reads the plan; ids are what you cite. Before starting, derive
-   its allowed-files scope from the dependency closure (use Graphify when
-   available: query what depends on what — do not guess blast radius) and
+   its allowed-files scope from the dependency closure (when the code graph
+   exists — `graphify-out/graph.json` — use `graphify affected "<symbol>"` and `graphify query`:
+   what depends on what — do not guess blast radius) and
    **record it in state** (`forge task update <id> --allowed "..."`) — scope
    in brief prose is unenforceable; `start` refuses an unscoped item
    (genuinely whole-tree work: `start --whole-tree --reason`). Then start it

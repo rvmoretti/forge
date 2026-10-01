@@ -166,6 +166,20 @@ memory.
 
 ## Changelog
 
+### v0.20.1 — Graphify actually used; Configuration and Commands pages
+- **"Graphify: use" now means a graph the agents can query.** Field finding: projects had
+  `options.graphify use` and the CLI installed, but no graph was ever built, so every "query the
+  graph first" fell through to grep. Preflight now checks the graph (`graphify-out/graph.json`)
+  exists, is newer than the last commit, is git-ignored (a rebuild after each commit must not
+  dirty the tree Forge commits from), and that Claude Code is told to use it (Graphify's
+  `CLAUDE.md` section and hooks, and its post-commit rebuild hook) — each miss with the command
+  that fixes it. Briefs tell workers to ask the graph (`graphify query / explain / path`) for
+  code outside their file list once it exists; scope derivation uses `graphify affected`.
+- **Configuration page**: every setting, its current value, its default, what it does, and the
+  command that changes it — with a Graphify card showing whether the graph is really in use and
+  what to run if not.
+- **Commands page**: Forge's commands grouped by what you are doing, with a filter.
+
 ### v0.20.0 — autopilot: leave it running, it stops only for you
 - **`forge autopilot on [--max-items N] [--hours H]`** keeps the build loop going between the
   tasks of a milestone. A session cannot clear its own context, and does not need to: each task
