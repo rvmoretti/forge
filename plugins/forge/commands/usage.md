@@ -19,6 +19,9 @@ Claude Code session logs, never an estimate. Highlight, in order:
 3. **Drift** — output tokens spent since the last forge state change. If this
    is large, flag it plainly: tokens are burning while the work graph is
    frozen, which usually means work is happening outside the loop.
+4. **Per task, grouped** (v0.22) — calls and context per done task by Forge
+   version, orchestrator model and milestone, with first-pass beside each. A
+   group flagged with two orchestrator models cannot be compared; say so.
 
 Do not editorialize beyond that. If the user wants the raw report, they can
 run the same command in any terminal — it costs zero tokens.

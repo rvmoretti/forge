@@ -238,6 +238,51 @@ To follow from a phone: run the session with `claude --remote-control` (or `/rem
 run. `forge autopilot status` shows the run; `forge autopilot off` ends it. Claude Code overrides a
 Stop hook after eight consecutive blocks without progress (`CLAUDE_CODE_STOP_HOOK_BLOCK_CAP` raises it).
 
+## Where tasks come from, and what first-pass means (v0.22)
+
+A task added after its milestone started says where it came from: `forge task add … --origin
+split|review|discovery|human [--parent <id>]`. A split or a review fix names its parent and is
+placed right after it in the plan; the dashboard's overview shows planned · split · discovered, and
+the Plan page's outcomes strip shows the last seven days as done vs added. Review findings follow
+one rule: a BLOCKING finding fails the task (`forge task fail <id> --kind review --from-review
+<file>`); each NON-BLOCKING finding becomes one fix task under the parent (depth 1 — findings on a
+fix fold into it, never a chain). Findings sent to a still-running worker are recorded as a
+correction (`forge task dispatch <id> --kind message --findings`), so the task did not pass first
+time. First-pass therefore measures the brief; `forge stats` splits worker failures from review
+rejections and shows first-pass by review tier (an unreviewed task passes by construction).
+
+## Models (v0.22)
+
+The orchestrator is always the model your session runs on. Workers follow `options.modelRouting`:
+`fixed` (new projects) pins every role to a full model id in `options.models` — implementer,
+tester, reviewer, explorer, architect, security — printed in each brief, filled in or refused by
+`forge task dispatch` / `forge dispatch`, and enforced on the Agent call by the PreToolUse hook;
+`auto` (older projects) keeps the agent files' aliases and the contract's tiering. Change a role in
+one place — `forge config set options.models.explorer claude-sonnet-5-5` — at a milestone
+boundary. `forge doctor` lists the map; `forge upgrade` offers the `model-map` step to existing
+projects.
+
+## One fresh process per task — the runner (v0.22)
+
+A long session re-sends an ever-larger window on every call and there is no programmatic `/clear`.
+With `forge config set options.autopilotMode runner`, `forge autopilot run` starts a fresh
+`claude -p` process per task (`options.runnerArgs`, default `--permission-mode acceptEdits`, is
+appended; `--model <id>` pins the orchestrator model for the run); each process does one task and
+ends, and the runner stops exactly where autopilot stops — a question, an escalation, a gate,
+nothing startable, `--max-items` / `--hours`, or two consecutive processes that changed nothing
+(exit 3 when a human is needed). `--dry-run` prints the command. In runner mode the in-session Stop
+hook never nudges on; `session` mode (the default) is unchanged. While a dispatched worker is live
+(recorded launch newer than the last verify, within `options.workerMaxMinutes`), the Stop hook
+lets the turn end quietly in both modes and the dashboard shows the worker instead of a stop.
+
+## Measuring Forge itself (v0.22)
+
+Every DONE task is stamped with the Forge version, the orchestrator session and its model.
+`forge usage` and the dashboard's Usage page roll cost per task — the task's worker transcripts
+plus the orchestrator calls made while it was in progress — up by Forge version, orchestrator
+model, milestone and total, with first-pass beside each, and flag a group where two orchestrator
+models ran. Transcripts scanned before v0.22 carry no per-task cost until `forge usage --rescan`.
+
 ## Upgrading an existing project (v0.19)
 
 `forge upgrade` lists the plan standards of the installed Forge and which this project

@@ -125,13 +125,31 @@ function acquireWorkLock() {
   if (LOCK_HELD) return;
   try { fs.mkdirSync(STATE, { recursive: true }); } catch (_) { }
   const deadline = Date.now() + LOCK_WAIT_MS;
+  const claim = JSON.stringify({ pid: process.pid, ts: ts(), cmd: process.argv.slice(2).join(' ').slice(0, 160) });
   for (;;) {
     try {
-      fs.writeFileSync(WORK_LOCK, JSON.stringify({ pid: process.pid, ts: ts(), cmd: process.argv.slice(2).join(' ').slice(0, 160) }), { flag: 'wx' });
+      // v0.22: the lock file appears WITH its contents. `wx` creates an empty file first and writes
+      // after; a contender reading in that gap saw an unreadable holder, "broke" the fresh lock and
+      // both proceeded — 1–5 of 12 concurrent writes were lost on macOS. A hard link from a private
+      // temp file is atomic: the lock either exists complete or not at all.
+      const tmp = WORK_LOCK + '.' + process.pid + '.' + crypto.randomBytes(3).toString('hex');
+      let linked = false;
+      try { fs.writeFileSync(tmp, claim); fs.linkSync(tmp, WORK_LOCK); linked = true; }
+      catch (le) { if (le.code !== 'EEXIST') { try { fs.unlinkSync(tmp); } catch (_) { } fs.writeFileSync(WORK_LOCK, claim, { flag: 'wx' }); linked = true; } }
+      finally { try { fs.unlinkSync(tmp); } catch (_) { } }
+      if (!linked) { const err = new Error('EEXIST'); err.code = 'EEXIST'; throw err; }
       LOCK_HELD = true; return;
     } catch (e) {
       if (e.code !== 'EEXIST') { LOCK_HELD = true; return; } // fs oddity — fail open; never brick the CLI on its own guard
       let holder = null; try { holder = JSON.parse(fs.readFileSync(WORK_LOCK, 'utf8')); } catch (_) { }
+      // a lock that exists but cannot be read yet is young and held, not stale — never break it inside its first seconds
+      if (!holder) {
+        let mt = null; try { mt = fs.statSync(WORK_LOCK).mtimeMs; } catch (se) { if (se.code === 'ENOENT') continue; }
+        if (mt != null && Date.now() - mt < 5000) {
+          if (Date.now() >= deadline) die(`Refused: forge state is write-locked by another forge process (lock being written).\nWait for it to finish and retry.`);
+          sleepMs(50); continue;
+        }
+      }
       const age = holder && Number.isFinite(Date.parse(holder.ts)) ? Date.now() - Date.parse(holder.ts) : Infinity;
       if (!holder || holder.released || !pidAlive(holder.pid) || age > LOCK_STALE_MS) {
         if (!holder || !holder.released) traceWrite({ ts: new Date().toISOString(), v: VERSION, cmd: process.argv.slice(2).join(' ').slice(0, 300),
@@ -329,7 +347,7 @@ function usageFiles(dirs) {
 }
 
 function emptyUsageCache() {
-  return { v: 5, files: {}, models: {}, byType: {}, perItem: {}, byDay: {},
+  return { v: 6, files: {}, models: {}, byType: {}, perItem: {}, byDay: {}, itemMain: {}, mainUnattributed: { calls: 0, ctx: 0, out: 0 },
            dispatches: 0, tied: 0, firstTs: null, lastTs: null, bytes: 0, total: 0, complete: false };
 }
 
@@ -399,9 +417,15 @@ function consumeUsage(agg, text, side, knownIdRe, rec) {
       const tp = agg.models[prev.model][prev.thread];
       tp.in += cur.in - prev.in; tp.out += cur.out - prev.out; tp.cacheCreate += cur.cc - prev.cc; tp.cacheRead += cur.cr - prev.cr;
       if (prev.day) agg.byDay[prev.day] = (agg.byDay[prev.day] || 0) + cur.out - prev.out;
+      // v0.22: the same correction on the per-transcript and per-item accumulators
+      const dctx = (cur.cc + cur.cr + cur.in) - (prev.cc + prev.cr + prev.in), dout = cur.out - prev.out;
+      if (rec) { rec.ctx = (rec.ctx || 0) + dctx; rec.out = (rec.out || 0) + dout; }
+      if (prev.items && prev.items.length) for (const id of prev.items) { const im = agg.itemMain[id]; if (im) { im.ctx += dctx / prev.items.length; im.out += dout / prev.items.length; } }
+      else if (prev.thread === 'main' && agg.mainUnattributed) { agg.mainUnattributed.ctx += dctx; agg.mainUnattributed.out += dout; }
       holder.lastMsg = Object.assign({}, prev, cur);
     } else {
-    if (rec) { rec.calls = (rec.calls || 0) + 1; rec.model = model; }
+    const ctx1 = cur.cc + cur.cr + cur.in;
+    if (rec) { rec.calls = (rec.calls || 0) + 1; rec.model = model; rec.ctx = (rec.ctx || 0) + ctx1; rec.out = (rec.out || 0) + cur.out; }
     const external = rec ? !!rec.external : (/^sdk/i.test(String(d.entrypoint || '')) && !side);
     const thread = external ? 'external' : (side || d.isSidechain || (rec && rec.workerTop)) ? 'side' : 'main';
     const m = (agg.models[model] = agg.models[model] || {});
@@ -409,7 +433,17 @@ function consumeUsage(agg, text, side, knownIdRe, rec) {
     t.calls++; t.in += cur.in; t.out += cur.out; t.cacheCreate += cur.cc; t.cacheRead += cur.cr;
     const day = tsv ? tsv.slice(0, 10) : null;
     if (day) agg.byDay[day] = (agg.byDay[day] || 0) + cur.out;
-    holder.lastMsg = mid ? Object.assign({ id: mid, model, thread, day }, cur) : null;
+    // v0.22: an orchestrator call belongs to the task(s) in progress at that moment (split evenly when
+    // several run); calls between tasks (briefs, planning, gates) stay unattributed and are reported as such
+    let items = null;
+    if (thread === 'main' && tsv && agg.intervals && agg.intervals.length) {
+      const x = Date.parse(tsv);
+      items = agg.intervals.filter(iv => x >= iv.start && x < iv.end).map(iv => iv.id);
+      agg.itemMain = agg.itemMain || {};
+      if (items.length) for (const id of items) { const im = (agg.itemMain[id] = agg.itemMain[id] || { calls: 0, ctx: 0, out: 0 }); im.calls += 1 / items.length; im.ctx += ctx1 / items.length; im.out += cur.out / items.length; }
+      else { agg.mainUnattributed = agg.mainUnattributed || { calls: 0, ctx: 0, out: 0 }; agg.mainUnattributed.calls++; agg.mainUnattributed.ctx += ctx1; agg.mainUnattributed.out += cur.out; }
+    }
+    holder.lastMsg = mid ? Object.assign({ id: mid, model, thread, day, items }, cur) : null;
     }
     for (const ct of (Array.isArray(d.message.content) ? d.message.content : [])) {
       if (!ct || ct.type !== 'tool_use' || (ct.name !== 'Task' && ct.name !== 'Agent')) continue;
@@ -430,7 +464,7 @@ function collectUsage(opts = {}) {
   const budgetMs = opts.budgetMs || 0;
   const t0 = Date.now();
   let c = opts.rescan ? null : readJson(USAGE_CACHE, null);
-  if (!c || c.v !== 5) c = emptyUsageCache(); // v0.17.1: v4 separates external sessions · v0.21: v5 counts one call per message id
+  if (!c || c.v !== 6) c = emptyUsageCache(); // v0.17.1: v4 separates external sessions · v0.21: v5 counts one call per message id · v0.22: v6 attributes calls to tasks
   const dirs = usageDirs(opts.rescan ? null : c.dirs);
   if (!dirs) return null;
   c.dirs = dirs;
@@ -441,6 +475,22 @@ function collectUsage(opts = {}) {
       .sort((a, b) => b.length - a.length);   // longest first: T20f before T20
     if (ids.length) knownIdRe = new RegExp(`\\b(${ids.map(id => id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})\\b`);
   } catch (_) { /* no work graph → inline/path matching only */ }
+  // v0.22: when each task was in progress — orchestrator calls inside a window belong to that task.
+  // Not persisted: rebuilt from work.json on every scan (a task still running has an open end).
+  c.intervals = [];
+  try {
+    const wI = readJson(WORK_FILE, { items: {}, order: [] });
+    for (const id of wI.order) {
+      const at = wI.items[id].attempts || [];
+      for (let i = 0; i < at.length; i++) {
+        if (at[i].outcome !== 'started') continue;
+        const start = Date.parse(at[i].ts); if (!Number.isFinite(start)) continue;
+        const endA = at.slice(i + 1).find(a => a.outcome !== 'started');
+        const end = endA ? Date.parse(endA.ts) : (wI.items[id].status === 'IN_PROGRESS' || wI.items[id].status === 'BLOCKED' ? Infinity : Date.parse(wI.items[id].updated || 0) || Infinity);
+        c.intervals.push({ id, start, end: Number.isFinite(end) ? end : Infinity });
+      }
+    }
+  } catch (_) { }
 
   const files = usageFiles(dirs);
   // The running aggregate is a single total, so one rotated or rewritten file
@@ -474,7 +524,7 @@ function collectUsage(opts = {}) {
   c.bytes = scanned; c.total = Math.max(total, scanned);
   c.complete = !pending;
   c.sessions = Object.values(c.files).filter(x => x.session).length;
-  try { writeJson(USAGE_CACHE, c); } catch (_) { /* cache is an optimisation, not state */ }
+  try { const iv = c.intervals; delete c.intervals; writeJson(USAGE_CACHE, c); c.intervals = iv; } catch (_) { /* cache is an optimisation, not state */ }
 
   // A file's last line may have no trailing newline — either it is still being
   // written, or the writer simply never emits one. The persistent aggregate
@@ -496,7 +546,7 @@ function collectUsage(opts = {}) {
       } finally { fs.closeSync(fd); }
     } catch (_) { continue; }
     if (!tail.trim()) continue;
-    if (!cloned) { view = JSON.parse(JSON.stringify(c)); cloned = true; }
+    if (!cloned) { const iv = c.intervals; delete c.intervals; view = JSON.parse(JSON.stringify(c)); c.intervals = iv; view.intervals = iv; cloned = true; }
     consumeUsage(view, tail, side || !!(rec && rec.workerTop), knownIdRe, null);
     view.bytes += Buffer.byteLength(tail, 'utf8');
   }
@@ -637,6 +687,40 @@ function usageSince(m, base) {
   return d;
 }
 
+// v0.22: per-task cost (worker transcripts tied to the task + orchestrator calls made while it was in
+// progress) rolled up by Forge version, orchestrator model, milestone and in total. Each DONE item is
+// stamped at close (item.closed: forgeVersion, model) so the groups need no transcript archaeology.
+function usageRollup(c, w) {
+  const perItem = {};
+  const slot = id => (perItem[id] = perItem[id] || { worker: { calls: 0, ctx: 0, out: 0 }, main: { calls: 0, ctx: 0, out: 0 } });
+  for (const rec of Object.values((c || {}).files || {})) {
+    if (!rec.item || rec.external || !(rec.side || rec.workerTop)) continue;
+    const p = slot(rec.item).worker; p.calls += rec.calls || 0; p.ctx += rec.ctx || 0; p.out += rec.out || 0;
+  }
+  for (const [id, im] of Object.entries((c || {}).itemMain || {})) { const p = slot(id).main; p.calls += im.calls || 0; p.ctx += im.ctx || 0; p.out += im.out || 0; }
+  const groups = { version: {}, model: {}, milestone: {}, total: {} };
+  const add = (g, k, t, p) => {
+    const r = (groups[g][k] = groups[g][k] || { items: 0, fp: 0, calls: 0, ctx: 0, out: 0, mainCalls: 0, costed: 0, models: {}, versions: {} });
+    r.items++; if (firstPass(t)) r.fp++;
+    if (p) { r.costed++; r.calls += p.worker.calls + p.main.calls; r.ctx += p.worker.ctx + p.main.ctx; r.out += p.worker.out + p.main.out; r.mainCalls += p.main.calls; }
+    const mm = (t.closed || {}).model; if (mm) r.models[mm] = (r.models[mm] || 0) + 1;
+    const vv = (t.closed || {}).forgeVersion; if (vv) r.versions[vv] = (r.versions[vv] || 0) + 1;
+  };
+  for (const id of ((w || {}).order || [])) {
+    const t = w.items[id]; if (!t || t.status !== 'DONE') continue;
+    const p = perItem[id] || null;
+    add('version', (t.closed || {}).forgeVersion || 'pre-0.22', t, p);
+    add('model', (t.closed || {}).model || 'unknown', t, p);
+    add('milestone', t.milestone || '(none)', t, p);
+    add('total', 'all', t, p);
+  }
+  return { groups, unattributed: (c || {}).mainUnattributed || null };
+}
+function rollupRow(r) {
+  const n = r.costed || 0;
+  return { items: r.items, fp: r.items ? Math.round(100 * r.fp / r.items) : null, calls: n ? Math.round(r.calls / n) : null, ctx: n ? r.ctx / n : null, out: n ? r.out / n : null,
+    orchShare: r.calls ? Math.round(100 * r.mainCalls / r.calls) : null, mixed: Object.keys(r.models).length > 1, models: r.models, versions: r.versions, costed: n };
+}
 function M0ext(c) { return Object.values(c.models || {}).some(th => th.external); }
 function usageSnapshot(c) {
   let mainOut = 0, sideOut = 0;
@@ -647,10 +731,11 @@ function usageSnapshot(c) {
       return w2.order.filter(id => w2.items[id].status === 'DONE').length; } catch (_) { return 0; }
   })();
   const metrics = usageMetrics(c, doneCount);
+  let rollup = null; try { rollup = usageRollup(c, readJson(WORK_FILE, { items: {}, order: [] })); } catch (_) { }
   return { ts: ts(), models: c.models, dispatches: c.dispatches, byType: c.byType,
            mainOut, sideOut, complete: !!c.complete,
            scanPct: c.total ? Math.round(100 * c.bytes / c.total) : 100,
-           metrics, since: usageSince(metrics, readJson(USAGE_BASELINE, null)) };
+           metrics, since: usageSince(metrics, readJson(USAGE_BASELINE, null)), rollup };
 }
 
 // Called from the dashboard generator: keeps the token panel current without
@@ -1076,6 +1161,14 @@ const UPGRADE_STEPS = [
       else { const loose = seq.filter(m => !((w.milestones || {})[m] || {}).release); if (rels.length && loose.length) f.push(`${loose.length} milestone(s) in no release: ${loose.slice(0, 6).join(', ')}${loose.length > 6 ? '…' : ''}`); }
       return { done: !f.length, findings: f };
     } },
+  { id: 'model-map', since: '0.22.0', kind: 'review', title: 'Every worker role is pinned to a model id (options.modelRouting fixed + options.models)',
+    how: 'forge config set options.modelRouting fixed, then one forge config set options.models.<role> <model-id> per role (forge doctor lists them); change the map only at a milestone boundary',
+    check() {
+      const c = loadConfig() || {}; const f = [];
+      if (modelRouting(c) !== 'fixed') f.push(`options.modelRouting is ${modelRouting(c)} — workers run on whatever an alias resolves to`);
+      else { const map = (c.options || {}).models || {}; const miss = MODEL_ROLES.filter(r => !map[r]); if (miss.length) f.push(`options.models missing: ${miss.join(', ')} (defaults apply)`); }
+      return { done: !f.length, findings: f };
+    } },
   { id: 'architecture', since: '0.19.0', kind: 'review', title: 'The architecture is drafted from the repo, screens belong to their app, and you confirmed it',
     how: 'forge-brownfield skill, "Architecture draft": forge arch scan --write, a forge-explorer pass to name/split/link parts and assign screens, then your confirmation',
     check() {
@@ -1270,6 +1363,11 @@ const CONFIG_DOCS = [
   { key: 'options.requireTester', def: 'false', group: 'Delegation', what: 'high-risk: auth/data/payments/migrations/security tasks get a tester in parallel; done refuses without one. warn: warns when most criteria are tests.', change: 'forge config set options.requireTester high-risk', why: 'Independent tests written from the criteria catch what the implementer\'s own tests miss on risky code.', risk: 'test first' },
   { key: 'options.architectPrepass', def: 'false', group: 'Delegation', what: 'high-risk: before the first worker on a high-risk task, the architect (Opus) writes a short design note the brief carries.', change: 'forge config set options.architectPrepass high-risk', why: 'Gets the strongest model\'s thinking on failure classes before the first attempt, not after two failures.', risk: 'test first' },
   { key: 'options.delegateSpecSync', def: 'false', group: 'Delegation', what: 'true: at close the CTO decides what changed in the spec; a Haiku worker makes the edit.', change: 'forge config set options.delegateSpecSync true', why: 'Spec edits are mechanical once decided; a cheap worker makes them while the CTO decides what changed.', risk: 'low' },
+  { key: 'options.modelRouting', def: 'auto (existing) · fixed (new)', group: 'Models', what: 'fixed: every worker role runs on the model id in options.models — dispatch records refuse another, the PreToolUse hook denies an Agent call on another, briefs name it. auto: the agent files\' aliases and the contract\'s tiering decide (older behaviour). The orchestrator is always the session model.', change: 'forge config set options.modelRouting fixed', why: 'No silent old model versions; one place to change which model does what.', risk: 'low' },
+  { key: 'options.models.<role>', def: 'implementer/tester/reviewer: claude-sonnet-5-5 · explorer: claude-haiku-4-5-20251001 · architect/security: claude-opus-5-5', group: 'Models', what: 'The model id for each worker role (implementer, tester, reviewer, explorer, architect, security). Used when options.modelRouting is fixed. Full ids, not aliases — an alias can resolve to an older version.', change: 'forge config set options.models.explorer claude-sonnet-5-5', why: 'Change a role\'s model in one place — at a milestone boundary, so the segment\'s numbers stay comparable.', risk: 'low' },
+  { key: 'options.workerMaxMinutes', def: '90', group: 'Build loop', what: 'How long a dispatched worker counts as live. While a worker is live on an in-progress task, the Stop hook lets the turn end quietly and the dashboard shows the worker, not a stop.', change: 'forge config set options.workerMaxMinutes 120', why: 'Raise it for projects whose e2e lanes or long tasks regularly run past 90 minutes.', risk: 'low' },
+  { key: 'options.autopilotMode', def: 'session', group: 'Build loop', what: 'session: one Claude session takes task after task (the Stop hook keeps it going). runner: forge autopilot run starts a fresh claude -p process per task — context resets every task, no compaction; the in-session Stop hook never nudges on.', change: 'forge config set options.autopilotMode runner', why: 'A session carried across many tasks re-sends an ever-larger window on every call (measured: 975k tokens on the last call of a 541-call session).', risk: 'test first' },
+  { key: 'options.runnerArgs', def: '--permission-mode acceptEdits', group: 'Build loop', what: 'Extra arguments forge autopilot run passes to each claude -p process (permissions, model, allowed tools). Space-separated.', change: 'forge config set options.runnerArgs "--permission-mode acceptEdits --permission-prompts none"', why: 'An unattended process must not wait on a prompt: pre-approve what the build loop needs, deny the rest.', risk: 'low' },
   { key: 'phase', def: 'spec', group: 'Project', what: 'Where the project is: spec (shaping the product, no building) or build (the build loop runs).', change: 'forge config set phase build', why: 'Move to build once the spec has gated and the plan is cut.', risk: 'none' },
   { key: 'specDir', def: '—', group: 'Project', what: 'Folder holding the spec layers; the Specs page lists it and briefs cite it.', change: 'forge config set specDir spec', why: 'Point it at the folder holding the application spec, so briefs and the Specs page find it.', risk: 'none' },
   { key: 'verify.*', def: '—', group: 'Verification', what: 'Commands every task verification runs (test, lint, typecheck, security, build, e2e …). A task is DONE only when all pass on the current tree.', change: 'forge config set verify.test "npm test"', why: 'Without them nothing is machine-checked; set at least test and lint before building.', risk: 'none' },
@@ -1316,7 +1414,9 @@ const COMMAND_DOCS = [
     ['forge brief <id> --context', 'Print the explorer prompt that assembles the task\'s context pack (contextPack).'],
     ['forge context save <id> [--section design-note]', 'Record a context pack or design note (explorer / architect, from stdin).'],
     ['forge task add|update <id> --domain api,auth', 'Tag domains: the brief carries their rules; auth/data/payments/migrations/security are high-risk.'],
-    ['forge task fail <id> --from-review <file>', 'Fail with the reviewer\'s findings; the retry brief carries only the latest.'],
+    ['forge task fail <id> --from-review <file>', 'Fail with the reviewer\'s findings (kind review); the retry brief carries only the latest.'],
+    ['forge task dispatch <id> --kind message --findings --note "…"', 'v0.22: review findings sent to a running worker — the attempt no longer counts as first-pass.'],
+    ['forge task add … --origin split|review|discovery|human --parent <id>', 'v0.22: where a task came from; a review fix or a split names its parent and sits right after it.'],
     ['forge task done <id> --self --reason …', 'Close a trivial task without a worker (requireDispatch), counted in stats.'],
     ['forge task verify <id> [--no-wait]', 'Verifies run one at a time; a second waits (or refuses with --no-wait).'] ] },
   { group: 'Milestones and releases', items: [
@@ -1333,6 +1433,7 @@ const COMMAND_DOCS = [
     ['forge screen list | add | assign <app> --match …', 'Screens and mocks, per app.'] ] },
   { group: 'Running unattended', items: [
     ['forge autopilot on [--max-items N] [--hours H]', 'Keep building; stop only for you.'],
+    ['forge autopilot run [--max-items N] [--dry-run]', 'v0.22: one fresh claude -p process per task (options.autopilotMode runner) — context resets every task; stops where autopilot stops.'],
     ['forge autopilot status | off', 'See the run; turn it off.'] ] },
   { group: 'Keeping the plan current', items: [
     ['forge upgrade', 'Which standards of the installed Forge this plan meets.'],
@@ -1366,6 +1467,71 @@ function sw(cfg, k) {
   if (v === 'true' || v === true) return true;
   return v;
 }
+// ============================================================================
+// v0.22: where a task came from, which model each role runs on, whether a worker
+// is live, and what "first pass" means — shared by the CLI, the hooks and the dashboard
+// ============================================================================
+// Origin: plan (cut at planning), split (a planned item carved thinner — not new scope),
+// review (a reviewer's non-blocking finding), discovery (a fact found while building),
+// human (the product owner asked). The dashboard shows planned vs discovered from this.
+const ORIGINS = ['plan', 'split', 'review', 'discovery', 'human'];
+const DISCOVERED_ORIGINS = ['review', 'discovery', 'human'];
+function originOf(item) { return (item && item.origin) || 'plan'; }
+// Model roles: one entry per worker role; the orchestrator is the session model and has no entry.
+const MODEL_ROLES = ['implementer', 'tester', 'reviewer', 'explorer', 'architect', 'security'];
+const MODEL_DEFAULTS = { implementer: 'claude-sonnet-5-5', tester: 'claude-sonnet-5-5', reviewer: 'claude-sonnet-5-5',
+  explorer: 'claude-haiku-4-5-20251001', architect: 'claude-opus-5-5', security: 'claude-opus-5-5' };
+function modelRouting(cfg) { const v = (((cfg || {}).options) || {}).modelRouting; return v === 'fixed' ? 'fixed' : 'auto'; }
+// Which role an agent plays. forge-reviewer is 'security' on the milestone security pass, 'reviewer' otherwise.
+function roleOf(agent, purposeOrPrompt) {
+  const a = String(agent || '').replace(/^forge:/, '').toLowerCase();
+  const p = String(purposeOrPrompt || '').toLowerCase();
+  if (/implementer/.test(a)) return 'implementer';
+  if (/tester/.test(a)) return 'tester';
+  if (/explorer/.test(a)) return 'explorer';
+  if (/architect/.test(a)) return 'architect';
+  if (/reviewer/.test(a)) return (p === 'security' || /^\s*#\s*security brief/.test(p)) ? 'security' : 'reviewer';
+  return null;
+}
+function modelFor(cfg, role) {
+  if (!role) return null;
+  const map = (((cfg || {}).options) || {}).models || {};
+  return map[role] || MODEL_DEFAULTS[role] || null;
+}
+// A worker is live on an in-progress task when its last dispatch (launch or message) is newer than
+// the task's last verification and younger than options.workerMaxMinutes (default 90). The Stop hook
+// and the dashboard use this: an ended turn while a worker runs is waiting, not "no progress".
+function workerMaxMs(cfg) { const m = parseFloat((((cfg || {}).options) || {}).workerMaxMinutes); return (m > 0 ? m : 90) * 60 * 1000; }
+function liveWorkers(w, cfg, now) {
+  const res = []; const t0 = now || Date.now();
+  for (const id of (w.order || [])) {
+    const t = w.items[id]; if (!t || t.status !== 'IN_PROGRESS') continue;
+    const last = (t.dispatches || []).map(d => Date.parse(d.ts)).filter(Number.isFinite).sort((a, b) => a - b).pop();
+    if (!last) continue;
+    const lastVer = (t.verifications || []).map(v => Date.parse(v.ts)).filter(Number.isFinite).sort((a, b) => a - b).pop() || 0;
+    if (last > lastVer && t0 - last < workerMaxMs(cfg)) res.push({ id, since: last, agent: ((t.dispatches || []).filter(d => d.kind !== 'message').pop() || {}).agent || null });
+  }
+  return res;
+}
+// A question for the user is a block whose reason starts with "question:"; a dependency wait is not.
+function isQuestionBlock(item) { return !!item && item.status === 'BLOCKED' && /^\s*question\s*:/i.test(String(item.blockReason || '')); }
+// First pass: done with no failed attempt AND no attempt corrected mid-flight by review findings.
+// Clean run (unchanged): one start, no failed attempt, no failed verify run.
+function firstPass(item) {
+  const at = item.attempts || [];
+  return !at.some(a => a.outcome === 'failed') && !at.some(a => a.corrected);
+}
+// Review tier an item went through, from recorded review dispatches: 'none', or the model family of the reviewer.
+function reviewTier(w, item) {
+  const models = [];
+  for (const d of ((w || {}).dispatchLog || [])) if (d.item === item.id && d.purpose === 'review') models.push(String(d.model || 'unrecorded'));
+  for (const d of (item.dispatches || [])) if (d.kind !== 'message' && /reviewer/i.test(String(d.agent || ''))) models.push(String(d.model || 'unrecorded'));
+  if (!models.length) return 'none';
+  const fams = [...new Set(models.map(m => modelFamily(m) || (/^(opus|sonnet|haiku)$/.test(m) ? m : null)).filter(Boolean))];
+  return fams.includes('opus') ? 'opus' : fams.includes('sonnet') ? 'sonnet' : fams.includes('haiku') ? 'haiku' : 'unrecorded';
+}
+function autopilotMode(cfg) { return (((cfg || {}).options) || {}).autopilotMode === 'runner' ? 'runner' : 'session'; }
+
 // Task domains (--domain): which domain packs a brief carries, and whether the task is high-risk.
 const HIGH_RISK_DOMAINS = ['auth', 'data', 'payments', 'migrations', 'security'];
 const DOMAIN_PACKS = { api: 'backend.md', backend: 'backend.md', data: 'backend.md', migrations: 'backend.md',
@@ -1410,7 +1576,8 @@ function contextPackPrompt(item, cfg) {
     `Pipe the pack into Forge (it writes forge/context/${item.id}.md; nothing else may):`,
     `  node "${__filename}" context save ${item.id} <<'PACK'`, `  …the pack…`, `  PACK`,
     `Then reply with one line: the path and its size.`);
-  L.push('', `_Orchestrator: dispatch this to forge-explorer (haiku) and record it: forge dispatch --agent forge-explorer --purpose explore --item ${item.id} --model haiku._`);
+  { const xm = modelRouting(cfg) === 'fixed' ? modelFor(cfg, 'explorer') : 'haiku';
+    L.push('', `_Orchestrator: dispatch this to forge-explorer (${xm}) and record it: forge dispatch --agent forge-explorer --purpose explore --item ${item.id} --model ${xm}._`); }
   return L;
 }
 
@@ -1605,17 +1772,17 @@ function generateDashboard() {
         const agent = (disp.filter(d => d.kind !== 'message').pop() || {}).agent;
         meta = `${st0 ? `<span data-since="${new Date(st0).toISOString()}">${fmtD(Date.now() - st0)}</span>` : ''}${agent ? ` · ${esc(agent)}` : ''}`;
       } else if (stat === 'READY') meta = fails ? `${fails} failed attempt(s)` : (t.id === NEXT_ID ? 'next up' : 'ready');
-      else if (stat === 'BLOCKED') meta = 'needs your answer';
+      else if (stat === 'BLOCKED') meta = isQuestionBlock(t) ? 'needs your answer' : 'waiting on other work';
       else if (stat === 'CANCELLED') meta = 'superseded';
       else meta = t.criteria.length ? 'planned' : 'thin item';
       const noScope = !((t.scope || {}).allowed || []).length && !['DONE', 'CANCELLED'].includes(t.status) && (m === actM || m === '(no milestone)');
       const subline = t.status === 'BLOCKED' ? `<span class="sub">⛔ ${esc(t.blockReason || '')}</span>`
         : t.status === 'CANCELLED' ? `<span class="sub">✕ ${esc(t.cancelReason || '')}</span>`
         : noScope ? `<span class="warnv">⚠ no file scope — start will refuse (task update --allowed)</span>` : '';
-      return `<details class="icd" id="it-${esc(t.id)}" data-id="${esc(t.id)}" data-comp="${esc(t.component || '')}" data-arch="${esc(archOfTag(C, t.component) || '')}" data-s="${stat}" data-act="${m === actM || m === '(no milestone)' ? '1' : '0'}"><summary class="irow">
+      return `<details class="icd" id="it-${esc(t.id)}" data-id="${esc(t.id)}" data-comp="${esc(t.component || '')}" data-arch="${esc(archOfTag(C, t.component) || '')}" data-s="${stat}" data-act="${m === actM || m === '(no milestone)' ? '1' : '0'}" data-q="${isQuestionBlock(t) ? '1' : '0'}"><summary class="irow">
         <span class="stripe" style="background:${sVar}"></span>
         <span class="iid">${VL.item[t.id] ? `<b class="vlab" title="version label — ${t.label ? 'frozen when work started' : 'provisional: renumbers if the plan is reordered'}">${esc(VL.item[t.id])}${t.label ? '' : '<i>·</i>'}</b>` : ''}${esc(t.id || '')}</span>
-        <span class="itt">${stat === 'IN_PROGRESS' ? '<span class="dot-open"></span>' : ''}${esc(t.title)}${t.component ? compChip(t.component) : ''}${designStrip ? '<span class="cchip">🎨 mock</span>' : ''}${hasBrief ? `<button type="button" class="cchip docopen" data-doc="${esc(briefKey)}" title="Read the brief">📄 brief</button>` : ''}${subline}</span>
+        <span class="itt">${stat === 'IN_PROGRESS' ? '<span class="dot-open"></span>' : ''}${esc(t.title)}${t.component ? compChip(t.component) : ''}${t.origin && t.origin !== 'plan' ? `<span class="cchip origin-${esc(t.origin)}" title="${esc(t.origin)}${t.parent ? ` of ${esc(t.parent)}` : ''}">${t.origin === 'split' ? '⑂' : t.origin === 'review' ? '🔍' : t.origin === 'discovery' ? '💡' : '👤'} ${esc(t.origin)}${t.parent ? ` ↳ ${esc(t.parent)}` : ''}</span>` : ''}${designStrip ? '<span class="cchip">🎨 mock</span>' : ''}${hasBrief ? `<button type="button" class="cchip docopen" data-doc="${esc(briefKey)}" title="Read the brief">📄 brief</button>` : ''}${subline}</span>
         <span class="imeta"><span class="st ${sCls}">${stat === 'IN_PROGRESS' ? 'IN PROGRESS' : stat}</span>${meta ? `<span>${meta}</span>` : ''}</span>
       </summary><div class="icdb">
         ${designStrip}
@@ -1885,26 +2052,49 @@ function generateDashboard() {
         </div>`;
       }
     }
-    timePanelOut = timePanel; usagePanelOut = `<div class="telgrid one">${tokenPanel}</div>${effPanel}`;
+    // v0.22: cost per task by Forge version, orchestrator model and milestone — the evolution of Forge, measured
+    let rollupPanel = '';
+    if (usageSnap && usageSnap.rollup && usageSnap.rollup.groups) {
+      const G = usageSnap.rollup.groups;
+      const tbl = (title, entries, note) => entries.length ? `<div class="panel"><h3>${title}</h3><div class="tblwrap"><table class="cfgt"><thead><tr><th>Group</th><th>Done</th><th>First-pass</th><th>Calls / task</th><th>Context / task</th><th>Output / task</th><th>Orchestrator share</th><th></th></tr></thead><tbody>${
+        entries.map(([k, r]) => { const x = rollupRow(r); return `<tr><td><code>${esc(k)}</code></td><td>${x.items}</td><td>${x.fp == null ? '—' : x.fp + '%'}</td><td>${x.calls == null ? '—' : x.calls}</td><td>${esc(fmtBig(x.ctx))}</td><td>${esc(fmtBig(x.out))}</td><td>${x.orchShare == null ? '—' : x.orchShare + '%'}</td><td class="mut">${x.mixed ? `<span class="warn">⚠ ${Object.keys(x.models).length} orchestrator models — not comparable</span>` : ''}${x.costed < x.items ? ` ${x.items - x.costed} untied` : ''}</td></tr>`; }).join('')
+      }</tbody></table></div>${note ? `<div class="footnote">${note}</div>` : ''}</div>` : '';
+      const byNum = (a, b) => a[0].localeCompare(b[0], undefined, { numeric: true });
+      const msSeq = milestoneSeq(w);
+      rollupPanel = `<div class="telgrid one" style="margin-top:12px">${
+        tbl('Per task by Forge version', Object.entries(G.version).sort(byNum), 'Stamped when the task closes. <code>pre-0.22</code> is everything closed before stamps existed. A version that lowers calls and context per task while first-pass holds is a release that paid off.')}${
+        tbl('Per task by orchestrator model', Object.entries(G.model).sort((a, b) => b[1].items - a[1].items))}${
+        tbl('Per task by milestone', [...msSeq.filter(m => G.milestone[m]).map(m => [m, G.milestone[m]]), ...Object.entries(G.milestone).filter(([k]) => !msSeq.includes(k))])}${
+        tbl('Total', Object.entries(G.total), `A task's cost = its workers' transcripts + the orchestrator's calls while it was in progress (split evenly when several ran).${usageSnap.rollup.unattributed && usageSnap.rollup.unattributed.calls ? ` Between tasks the orchestrator made ${Math.round(usageSnap.rollup.unattributed.calls).toLocaleString()} more calls (${esc(fmtBig(usageSnap.rollup.unattributed.ctx))} context) — briefs, planning, gates.` : ''} Transcripts scanned before v0.22 carry no per-task cost until <code>forge usage --rescan</code> runs once.`)}</div>`;
+    }
+    timePanelOut = timePanel; usagePanelOut = `<div class="telgrid one">${tokenPanel}</div>${effPanel}${rollupPanel}`;
     telemetryBlock = `<details class="sec" open><summary>Telemetry <span class="mut">(time live from state · tokens re-read from session logs on every change)</span></summary><div class="telgrid">${timePanel}${tokenPanel}</div>${effPanel}</details>`;
   }
 
   // ---- v0.14: needs-you banner (deterministic, same priority as session guidance) ----
   // v0.21.2: an autopilot stop is current while the plan has not moved since it
   const apRun = readJson(AUTOPILOT_FILE, {});
-  const apStop = autopilotCfg(cfg).on && apRun.stopped && apRun.stopped.key && apRun.stopped.key === progressKey(w) && apRun.stopped.kind !== 'user' ? apRun.stopped : null;
+  // v0.22: a stop recorded while a worker is live is the session waiting on its worker — not on you.
+  // Only a question wins over work in flight; a dependency wait is shown as a wait, not as a question.
+  const liveW = liveWorkers(w, cfg);
+  const inProgNow = w.order.filter(id => w.items[id].status === 'IN_PROGRESS');
+  const apStopRaw = autopilotCfg(cfg).on && apRun.stopped && apRun.stopped.key && apRun.stopped.key === progressKey(w) && apRun.stopped.kind !== 'user' ? apRun.stopped : null;
+  const apStop = apStopRaw && !liveW.length ? apStopRaw : null;
   let bannerBlock = '';
   {
     const seqB = milestoneSeq(w);
     const awaiting = seqB.filter(m => milestoneComplete(w, m) && !(((w.gates || {})[m]) || {}).approved);
-    const inProgIds = w.order.filter(id => w.items[id].status === 'IN_PROGRESS');
+    const inProgIds = inProgNow;
     const blockedIds = w.order.filter(id => w.items[id].status === 'BLOCKED');
+    const questionIds = blockedIds.filter(id => isQuestionBlock(w.items[id]));
+    const waitIds = blockedIds.filter(id => !isQuestionBlock(w.items[id]));
     let g = '🔥', h = '', p = '';
     if (cfg.phase === 'spec') { g = '🎨'; h = 'Spec phase — the product is still being shaped'; p = 'Resume the interview in your Claude session; share any feature lists, notes, or mockups you have — they shape everything that follows.'; }
     else if (awaiting.length) { g = '👋'; h = `Milestone ${esc(awaiting[0])} is finished — your review is the next step`; p = 'Try the running slice, give your verdict, and say anything you want to change or add before the next milestone starts. Then Forge records the approval.'; }
+    else if (questionIds.length) { g = '⛔'; h = `${questionIds.length} item(s) are blocked and need your answer`; p = questionIds.map(id => `<code>${esc(id)}</code> — ${esc(w.items[id].blockReason || '')}`).join(' · ') + (inProgIds.length ? ` · meanwhile ${inProgIds.map(esc).join(', ')} keep${inProgIds.length === 1 ? 's' : ''} building` : ''); }
     else if (apStop) { g = '⏸️'; h = `Autopilot stopped — your session is waiting for you`; p = `${esc(apStop.reason)}. Answer in the Claude session; autopilot carries on by itself once work moves again.`; }
-    else if (blockedIds.length) { g = '⛔'; h = `${blockedIds.length} item(s) are blocked and need your answer`; p = blockedIds.map(id => `<code>${esc(id)}</code> — ${esc(w.items[id].blockReason || '')}`).join(' · '); }
-    else if (inProgIds.length) { g = '⚙️'; h = `Building — ${inProgIds.map(esc).join(', ')} in progress`; p = 'Nothing needs you right now. Forge stops for exactly three things: a product decision, a high-risk approval, a milestone review.'; }
+    else if (inProgIds.length) { g = '⚙️'; h = `Building — ${inProgIds.map(esc).join(', ')} in progress`; p = (liveW.length ? `${liveW.map(x => `<code>${esc(x.id)}</code> → ${esc(x.agent || 'worker')} running (<span data-since="${new Date(x.since).toISOString()}">${pace.fmtDur ? pace.fmtDur(Date.now() - x.since) : ''}</span>)`).join(' · ')}. ` : '') + (waitIds.length ? `${waitIds.map(esc).join(', ')} wait${waitIds.length === 1 ? 's' : ''} on other work. ` : '') + 'Nothing needs you right now. Forge stops for exactly three things: a product decision, a high-risk approval, a milestone review.'; }
+    else if (blockedIds.length) { g = '⛔'; h = `${blockedIds.length} item(s) are blocked`; p = blockedIds.map(id => `<code>${esc(id)}</code> — ${esc(w.items[id].blockReason || '')}`).join(' · ') + ' — not questions for you; the session resumes them when their wait ends.'; }
     else if (ready > 0) { g = '▶️'; h = `${ready} item(s) ready — say “continue” in your Claude session`; p = 'The next item is briefed, dispatched, verified, and reviewed automatically; you\'ll be interrupted only if a product question surfaces.'; }
     else if (total > 0 && counts.DONE + counts.CANCELLED === total) { g = '🏁'; h = 'All planned work is done'; p = 'Start the next thing: a bounded change or a new destination — Forge asks which door when you open a session.'; }
     if (h) bannerBlock = `<div class="needsyou"><div class="glyph">${g}</div><div><h3>${h}</h3><p>${p}</p></div></div>`;
@@ -1912,7 +2102,16 @@ function generateDashboard() {
 
   // ---- v0.14: KPI row ----
   const doneItems = w.order.map(id => w.items[id]).filter(t => t.status === 'DONE');
-  const fpRate = doneItems.length ? Math.round(100 * doneItems.filter(t => !t.attempts.some(a => a.outcome === 'failed')).length / doneItems.length) : null;
+  const fpRate = doneItems.length ? Math.round(100 * doneItems.filter(firstPass).length / doneItems.length) : null;
+  const questionCount = w.order.filter(id => isQuestionBlock(w.items[id])).length;
+  // v0.22: planned vs discovered — the plan's size at cut time against what building found
+  const originKpi = (() => {
+    const live = w.order.map(id => w.items[id]).filter(t => t.status !== 'CANCELLED');
+    const n = o => live.filter(t => originOf(t) === o).length;
+    const disc = live.filter(t => DISCOVERED_ORIGINS.includes(originOf(t))).length;
+    if (!live.length) return '&nbsp;';
+    return `${n('plan')} planned · ${n('split')} split · <b title="review ${n('review')} · discovery ${n('discovery')} · human ${n('human')}">${disc} discovered</b>`;
+  })();
   const ringDash = Math.round(188 * pct / 100);
   const kpiBlock = `<div class="kpis">
     <div class="kpi hero"><svg width="72" height="72" viewBox="0 0 74 74" role="img" aria-label="${pct} percent complete">
@@ -1921,9 +2120,9 @@ function generateDashboard() {
       <text x="37" y="42" text-anchor="middle" font-size="15" font-weight="700" fill="#1b1d24">${pct}%</text></svg>
       <div><div class="v">${counts.DONE}<small> / ${total}</small></div><div class="l">ITEMS DONE · WHOLE PROJECT</div>
       <div class="d">${milestoneSeq(w).filter(m => (((w.gates || {})[m]) || {}).approved).length} of ${milestoneSeq(w).length || '—'} milestones approved</div></div></div>
-    <div class="kpi"><div class="v" style="color:#0f766e">${ready}</div><div class="l">READY TO BUILD</div><div class="d">${counts.TODO - ready} more planned</div></div>
+    <div class="kpi"><div class="v" style="color:#0f766e">${ready}</div><div class="l">READY TO BUILD</div><div class="d">${counts.TODO - ready} more in the plan · ${originKpi}</div></div>
     <div class="kpi"><div class="v" style="color:#3b3f8f">${counts.IN_PROGRESS}</div><div class="l">IN PROGRESS</div><div class="d">${counts.CANCELLED ? counts.CANCELLED + ' cancelled' : '&nbsp;'}</div></div>
-    <div class="kpi"><div class="v" style="color:${counts.BLOCKED ? '#b91c1c' : '#8a8e9a'}">${counts.BLOCKED}</div><div class="l">BLOCKED · NEEDS YOU</div><div class="d">&nbsp;</div></div>
+    <div class="kpi"><div class="v" style="color:${questionCount ? '#b91c1c' : '#8a8e9a'}">${questionCount}</div><div class="l">QUESTIONS · NEED YOU</div><div class="d">${counts.BLOCKED - questionCount ? `${counts.BLOCKED - questionCount} blocked on other work` : '&nbsp;'}</div></div>
     <div class="kpi"><div class="v">${fpRate == null ? '—' : fpRate + '%'}</div><div class="l">FIRST-PASS RATE</div><div class="d">${pace.itemSpans && pace.itemSpans.length ? 'median item ' + pace.fmtDur(pace.med(pace.itemSpans)) : '&nbsp;'}</div></div>
   </div>`;
 
@@ -2015,17 +2214,34 @@ function generateDashboard() {
     const dn = w.order.map(id => w.items[id]).filter(t => t.status === 'DONE');
     if (dn.length) {
       const failsOf = t => t.attempts.filter(a => a.outcome === 'failed').length;
-      const fp = dn.filter(t => failsOf(t) === 0).length;
+      const fp = dn.filter(firstPass).length;
+      const corrected = dn.filter(t => failsOf(t) === 0 && !firstPass(t)).length;
       const cr = dn.filter(t => t.attempts.filter(a => a.outcome === 'started').length === 1 && failsOf(t) === 0 && !(t.verifications || []).some(v => v.passed === false)).length;
       const tf = dn.reduce((a, t) => a + failsOf(t), 0);
+      const rf = dn.reduce((a, t) => a + t.attempts.filter(x => x.outcome === 'failed' && x.kind === 'review').length, 0);
+      // v0.22: first-pass by review tier — unreviewed items pass by construction
+      const tiers = {};
+      for (const t of dn) { const k = reviewTier(w, t); tiers[k] = tiers[k] || { n: 0, fp: 0 }; tiers[k].n++; if (firstPass(t)) tiers[k].fp++; }
+      const tierOrder = ['none', 'haiku', 'sonnet', 'opus', 'unrecorded'];
+      const tierTxt = Object.keys(tiers).sort((a, b) => (tierOrder.indexOf(a) + 1 || 99) - (tierOrder.indexOf(b) + 1 || 99))
+        .map(k => `${k === 'none' ? 'unreviewed' : k === 'unrecorded' ? 'reviewed, model unrecorded' : esc(k)} ${Math.round(100 * tiers[k].fp / tiers[k].n)}% <i>(${tiers[k].n})</i>`).join(' · ');
+      // v0.22: net burn-down over the last 7 days — done vs added, so growth is visible beside progress
+      const wk = Date.now() - 7 * 86400000;
+      const doneWk = dn.filter(t => { const p = [...t.attempts].reverse().find(a => a.outcome === 'passed'); return p && Date.parse(p.ts) >= wk; }).length;
+      const addedWk = w.order.map(id => w.items[id]).filter(t => t.status !== 'CANCELLED' && Date.parse(t.created) >= wk).length;
+      const openNow = w.order.map(id => w.items[id]).filter(t => ['TODO', 'IN_PROGRESS', 'BLOCKED'].includes(t.status)).length;
       outcomesBlock = `<div class="pacestrip">
-        <div><div class="pk">FIRST-PASS</div><div class="pv">${Math.round(100 * fp / dn.length)}% <small>${fp}/${dn.length} done with no failed attempt</small></div></div>
+        <div><div class="pk">FIRST-PASS</div><div class="pv">${Math.round(100 * fp / dn.length)}% <small>${fp}/${dn.length} · no failed attempt, no mid-flight correction${corrected ? ` · ${corrected} corrected` : ''}</small></div></div>
+        <div class="pdiv"></div>
+        <div><div class="pk">BY REVIEW TIER</div><div class="pv" style="font-size:14px">${tierTxt}</div></div>
         <div class="pdiv"></div>
         <div><div class="pk">CLEAN RUN</div><div class="pv">${Math.round(100 * cr / dn.length)}% <small>one start, nothing failed</small></div></div>
         <div class="pdiv"></div>
-        <div><div class="pk">REWORK ABSORBED</div><div class="pv">${tf} <small>failed attempt(s) · ${(tf / dn.length).toFixed(2)} per item</small></div></div>
+        <div><div class="pk">REWORK ABSORBED</div><div class="pv">${tf} <small>failed attempt(s) · ${tf - rf} worker · ${rf} review</small></div></div>
+        <div class="pdiv"></div>
+        <div><div class="pk">LAST 7 DAYS</div><div class="pv">${doneWk} done <small>· ${addedWk} added · ${openNow} open now</small></div></div>
         ${pace.itemSpans && pace.itemSpans.length ? `<div class="pdiv"></div><div><div class="pk">MEDIAN ITEM</div><div class="pv">${pace.fmtDur(pace.med(pace.itemSpans))} <small>start → done</small></div></div>` : ''}
-        <div class="pnote">The gap between first-pass and clean-run is rework the plan did not show. <code>forge stats</code> prints the per-milestone table.</div>
+        <div class="pnote">First-pass measures the brief: a worker that needed a retry or a mid-flight fix did not get a complete brief. An unreviewed item passes by construction — compare reviewed with reviewed. Added ≥ done for a week means the milestone is growing faster than it closes. <code>forge stats</code> prints the per-milestone table.</div>
       </div>`;
     }
   }
@@ -2074,6 +2290,7 @@ function generateDashboard() {
   const cfgVal = key => {
     if (key === 'verify.*') { const v = cfg.verify || {}; return Object.keys(v).length ? Object.entries(v).map(([k, x]) => `<div><b>${esc(k)}</b> <code>${esc(String(x))}</code></div>`).join('') : null; }
     if (key === 'providers.*') { const v = cfg.providers || {}; return Object.keys(v).length ? Object.entries(v).filter(([k]) => !/key$/i.test(k) || k === 'keyEnv').map(([k, x]) => `<div><b>${esc(k)}</b> <code>${esc(String(x))}</code></div>`).join('') : null; }
+    if (key === 'options.models.<role>') { const v = ((cfg.options || {}).models) || {}; return Object.keys(v).length ? MODEL_ROLES.filter(r => v[r]).map(r => `<div><b>${esc(r)}</b> <code>${esc(String(v[r]))}</code></div>`).join('') : null; }
     const v = key.split('.').reduce((o, k) => (o == null ? undefined : o[k]), cfg);
     if (v === undefined || v === null || v === '') return null;
     const sv = String(v);
@@ -2478,7 +2695,7 @@ tbody tr:hover{background:#faf9f5}
   <div class="brand">
     <img src="data:image/png;base64,${LOGO_B64}" alt="FORGE">
     <div class="proj"><b>${esc(cfg.project)}</b>${esc(cfg.phase)} phase · v${VERSION}</div>
-    ${actM ? `<span class="phase">${esc(actM)} active</span>` : ''}${autopilotCfg(cfg).on ? (apStop ? ` <span class="phase apstop" title="${esc(apStop.reason)}">autopilot stopped</span>` : ` <span class="phase ap" title="forge autopilot status">autopilot on</span>`) : ''}
+    ${actM ? `<span class="phase">${esc(actM)} active</span>` : ''}${autopilotCfg(cfg).on ? (apStop ? ` <span class="phase apstop" title="${esc(apStop.reason)}">autopilot stopped</span>` : ` <span class="phase ap" title="forge autopilot status">autopilot on${autopilotMode(cfg) === 'runner' ? ' · runner' : ''}${liveW.length ? ` · ${liveW.length} worker${liveW.length > 1 ? 's' : ''} running` : ''}</span>`) : ''}
   </div>
   <nav id="snav">
     <a href="#/overview" data-p="overview">Overview</a>
@@ -2625,14 +2842,14 @@ tbody tr:hover{background:#faf9f5}
   function matches(r, gate){
     var s=r.getAttribute('data-s')||'';
     if(mode==='all') return true;
-    if(mode==='needs') return s==='BLOCKED'||gate==='awaiting';
+    if(mode==='needs') return (s==='BLOCKED'&&r.getAttribute('data-q')==='1')||gate==='awaiting';
     if(mode==='active') return s==='IN_PROGRESS'||s==='READY'||
       (r.getAttribute('data-act')==='1'&&s!=='DONE'&&s!=='CANCELLED');
     if(mode==='done') return s==='DONE';
     return true;
   }
   var EMPTY={
-    needs:'Nothing needs you right now — no item is blocked and no milestone is waiting for your review.',
+    needs:'Nothing needs you right now — no item is blocked on a question for you and no milestone is waiting for your review.',
     active:'No work is in flight — nothing is in progress and nothing is open in the current milestone.',
     done:'Nothing is finished yet.',
     all:'No work items yet.'
@@ -3168,6 +3385,11 @@ function briefLines(item, cfg) {
   lines.push('', sw(cfg, 'contextPack')
     ? `_Orchestrator: say WHAT must be true and how it is checked. Investigation goes in the context pack (forge brief ${item.id} --context); no line numbers or code-level fix lists here._`
     : `_Orchestrator: prepend relevant spec excerpts, decisions, and the applicable domain pack before dispatching._`);
+  // v0.22: fixed model routing — the brief names the model each role runs on, so the dispatch has no choice to make
+  if (modelRouting(cfg) === 'fixed') {
+    const risky = isHighRisk(item);
+    lines.push(`_Models (options.modelRouting fixed): implementer → ${modelFor(cfg, 'implementer')} · tester → ${modelFor(cfg, 'tester')} · review → ${modelFor(cfg, risky ? 'security' : 'reviewer')}${risky ? ' (high-risk task: security tier)' : ''} · explorer → ${modelFor(cfg, 'explorer')} · architect → ${modelFor(cfg, 'architect')}. Pass the model on every Agent call; the dispatch record and the PreToolUse hook refuse any other._`);
+  }
   return lines;
 }
 
@@ -3543,7 +3765,8 @@ const commands = {
         phase: 'spec',                       // 'spec' until METHOD Step 7 sets verify commands
         specDir: opt('spec-dir') || null,    // discovered/declared later
         verify: {},                          // e.g. { test: "npm test", lint: "...", typecheck: "..." }
-        options: Object.assign({ graphify: 'unset', web: 'unset', concurrency: 4 }, SWITCH_ON) // v0.20: 4 in parallel · v0.21: delegation switches on for new projects
+        options: Object.assign({ graphify: 'unset', web: 'unset', concurrency: 4 }, SWITCH_ON, // v0.20: 4 in parallel · v0.21: delegation switches on for new projects
+          { modelRouting: 'fixed', models: Object.assign({}, MODEL_DEFAULTS), autopilotMode: 'session' }) // v0.22: every worker role pinned to a model id; the orchestrator is the session model
       });
       out('Initialized forge/config.json (phase: spec).');
     } else out('forge/config.json already exists — left untouched (init is idempotent).');
@@ -3716,6 +3939,21 @@ const commands = {
       }
       if (!item.id) die('Work item needs an --id');
       if (w.items[item.id]) die(`Work item '${item.id}' already exists (add is not an update).`);
+      // v0.22: where the task came from. A planned item needs nothing; a split, a review finding,
+      // a discovery or a human request is tagged, and splits/review fixes name their parent.
+      const origin = opt('origin') || item.origin || null;
+      const parentId = opt('parent') || item.parent || null;
+      if (origin && !ORIGINS.includes(origin)) die(`--origin must be one of ${ORIGINS.join('|')}.`);
+      let parent = null;
+      if (parentId) {
+        parent = w.items[parentId];
+        if (!parent) die(`--parent '${parentId}' is not a work item.`);
+        if (!origin) die(`--parent needs --origin split|review|discovery|human (what made this task necessary).`);
+        // depth 1: a fix task's own findings fold into it — they do not spawn grandchildren
+        if (origin === 'review' && parent.origin === 'review' && parent.parent)
+          die(`Refused: '${parentId}' is itself a review fix for '${parent.parent}'. Findings on a fix task fold INTO it (forge task update ${parentId} --criterion-add "…::check" --reason "review finding") or, when it is already DONE, into one consolidated hardening task for the milestone — never a chain of fixes.`);
+      }
+      if (['split', 'review'].includes(origin || '') && !parentId) die(`--origin ${origin} needs --parent <id> (the task it was carved from, or whose review found it).`);
       w.items[item.id] = Object.assign({
         title: '', objective: '', milestone: null, deps: [], criteria: [],
         scope: { allowed: [], forbidden: [] },
@@ -3725,8 +3963,23 @@ const commands = {
         status: 'TODO', attempts: [], verifications: [], history: [],
         preState: null, startTree: null,
         blockReason: null, cancelReason: null, created: ts(), updated: ts()
-      }, item, { status: 'TODO' });
+      }, item, { status: 'TODO', origin: origin || undefined, parent: parentId || undefined });
       w.order.push(item.id);
+      // v0.22: a child task sits right after its parent (and the parent's earlier children) in the plan,
+      // unless the caller gave its own position later with task move
+      let placed = null;
+      if (parent && w.items[item.id].milestone && parent.milestone === w.items[item.id].milestone) {
+        ensureMilestones(w); ensureTaskOrder(w, parent.milestone);
+        const mr = w.milestones[parent.milestone];
+        const ord = mr.taskOrder.filter(x => x !== item.id);
+        let at = ord.indexOf(parent.id);
+        if (at >= 0) {
+          while (at + 1 < ord.length && w.items[ord[at + 1]] && w.items[ord[at + 1]].parent === parent.id) at++;
+          ord.splice(at + 1, 0, item.id);
+          mr.taskOrder = ord; placed = ord[at];
+          (w.items[item.id].history = w.items[item.id].history || []).push({ ts: ts(), change: `task order: after ${placed}`, reason: `${origin} of ${parent.id}` });
+        }
+      }
       saveWork(w);
       // v0.10: auto-register unknown components so the map never lies by omission
       // v0.19: an unknown tag becomes a plain tag — screens and architecture parts are declared on purpose
@@ -3738,7 +3991,14 @@ const commands = {
           regenDashboard();
         }
       }
-      out(`Created ${item.id}: ${item.title}`);
+      out(`Created ${item.id}: ${item.title}${origin ? `  [origin: ${origin}${parentId ? ` of ${parentId}` : ''}${placed ? `, placed after ${placed}` : ''}]` : ''}`);
+      // v0.22: a task added to a milestone that has already started is new work the plan did not show —
+      // say where it came from, so planned vs discovered stays honest
+      if (!origin) {
+        const mAdd = w.items[item.id].milestone;
+        if (mAdd && w.order.some(id2 => id2 !== item.id && w.items[id2].milestone === mAdd && itemStarted(w.items[id2])))
+          out(`ORIGIN WARNING: '${item.id}' joins a milestone that has already started with no --origin. Tag it (split|review|discovery|human, with --parent for a split or a review fix): forge task update ${item.id} --origin <o> [--parent <id>]`);
+      }
       {
         const mr = (w.milestones || {})[w.items[item.id].milestone];
         if (mr && mr.unnamed && !w.order.some(id2 => id2 !== item.id && w.items[id2].milestone === mr.id))
@@ -3766,6 +4026,7 @@ const commands = {
         const actM = activeMilestone(w);
         const warnScope = noScope && !['DONE', 'CANCELLED'].includes(t.status) && (!t.milestone || t.milestone === actM);
         out(`${t.status.padEnd(11)} ${(labs.item[id] || '').padEnd(9)} ${id.padEnd(8)} ${t.title}${ready ? '  [READY]' : ''}` +
+            (t.origin && t.origin !== 'plan' ? `  [${t.origin}${t.parent ? ` of ${t.parent}` : ''}]` : '') +
             (warnScope ? '  [NO SCOPE — start will refuse]' : '') +
             (t.deps.length ? `  deps: ${t.deps.join(',')}` : '') +
             (failedAttempts(t) ? `  failed-attempts: ${failedAttempts(t)}` : ''));
@@ -3905,7 +4166,8 @@ const commands = {
       // v0.21 (C9): a high-risk task gets an architect's design note BEFORE its first worker dispatch
       if (sw(loadConfig(), 'architectPrepass') === 'high-risk' && isHighRisk(item)
           && !launchesOf(item, /architect/i).length && !(w.dispatchLog || []).some(d => d.item === item.id && /architect/i.test(d.agent || ''))) {
-        out(`\nHIGH-RISK TASK (${itemDomains(item).filter(d => HIGH_RISK_DOMAINS.includes(d)).join(', ')}) — options.architectPrepass: dispatch forge-architect (opus) for a design note BEFORE the implementer. Prompt:\n`);
+        const am = modelRouting(loadConfig()) === 'fixed' ? modelFor(loadConfig(), 'architect') : 'opus';
+        out(`\nHIGH-RISK TASK (${itemDomains(item).filter(d => HIGH_RISK_DOMAINS.includes(d)).join(', ')}) — options.architectPrepass: dispatch forge-architect (${am}) for a design note BEFORE the implementer. Prompt:\n`);
         out([`# Design brief — ${item.id}: ${item.title}`, '',
           `Write a SHORT design note for the implementer (Sonnet) of this high-risk task. Advise; do not implement.`,
           `Objective: ${item.objective || '(see criteria)'}`, `Criteria:`, ...item.criteria.map((c, i) => `${i + 1}. ${c.desc}`),
@@ -3914,7 +4176,7 @@ const commands = {
           `Record it (Forge writes it into the task's context pack; the next brief includes it):`,
           `  node "${__filename}" context save ${item.id} --section design-note <<'NOTE'`, `  …the note…`, `  NOTE`,
           `Reply with one line: saved.`].join('\n'));
-        out(`\nRecord the dispatch: forge task dispatch ${item.id} --agent forge-architect --model opus`);
+        out(`\nRecord the dispatch: forge task dispatch ${item.id} --agent forge-architect --model ${am}`);
       }
       for (const wmsg of itemShapeWarnings(item)) out(`ITEM-SHAPE WARNING: ${wmsg}`);
       if (alreadyGreen.length)
@@ -3999,7 +4261,7 @@ const commands = {
         if (!(flag('self') && opt('reason')))
           die(`Refused: '${item.id}' has no implementer or tester dispatch recorded (options.requireDispatch).\n` +
               `If a worker did the work, record its launch (this also fixes the record for workers that ran unrecorded):\n` +
-              `  forge task dispatch ${item.id} --agent forge-implementer --model sonnet\n` +
+              `  forge task dispatch ${item.id} --agent forge-implementer --model ${modelRouting(cfgSw) === 'fixed' ? modelFor(cfgSw, 'implementer') : 'sonnet'}\n` +
               `If you did it yourself because it was trivial: forge task done ${item.id} --self --reason "<why trivial>"  (counted in forge stats)`);
         selfClosed = { ts: ts(), reason: opt('reason') };
       }
@@ -4010,7 +4272,7 @@ const commands = {
         if (!opt('reason'))
           die(`Refused: '${item.id}' is high-risk (${itemDomains(item).filter(d => HIGH_RISK_DOMAINS.includes(d)).join(', ')}) and no forge-tester was dispatched (options.requireTester=high-risk).\n` +
               `Dispatch forge-tester alongside the implementer — it writes the tests from the criteria, red first — and record it:\n` +
-              `  forge task dispatch ${item.id} --agent forge-tester --model sonnet\n` +
+              `  forge task dispatch ${item.id} --agent forge-tester --model ${modelRouting(cfgSw) === 'fixed' ? modelFor(cfgSw, 'tester') : 'sonnet'}\n` +
               `Or close without one, recorded: forge task done ${item.id} --reason "<why no tester>"`);
         testerWaived = opt('reason');
       }
@@ -4062,6 +4324,18 @@ const commands = {
       if (testerWaived) item.testerWaived = { ts: ts(), reason: testerWaived }; // v0.21 (C8)
       item.status = 'DONE';
       item.attempts.push({ ts: ts(), outcome: 'passed', note: opt('note') || null });
+      // v0.22: stamp what closed it — the Forge version, the orchestrator session and its model — so
+      // usage and outcomes can be grouped by version, model and milestone without transcript archaeology
+      {
+        const lk = loadLock();
+        const sid = lk && lk.sessionId ? String(lk.sessionId) : null;
+        let model = null;
+        try {
+          const uc = readJson(USAGE_CACHE, null);
+          if (sid && uc && uc.files) for (const [f, rec] of Object.entries(uc.files)) if (f.includes(sid) && rec.session && !rec.side && rec.model) { model = rec.model; break; }
+        } catch (_) { }
+        item.closed = { ts: ts(), forgeVersion: VERSION, session: sid, model };
+      }
       // v0.16.2: the commits that landed while this item was in flight. Forge does not
       // commit; if the work is still uncommitted at DONE the range is empty and the
       // item's changes will surface in the milestone range instead.
@@ -4119,9 +4393,12 @@ const commands = {
       if (item.status !== 'IN_PROGRESS') die(`'${item.id}' is not IN_PROGRESS.`);
       // v0.15: provider-failure taxonomy — a rate limit / outage / timeout is not
       // a failed approach and must not burn the escalation ladder.
-      const fkind = opt('kind') || null;
-      if (fkind && !['provider', 'worker'].includes(fkind))
-        die(`--kind must be 'provider' (rate limit / outage / timeout — does not count toward escalation) or 'worker' (the approach failed — counts).`);
+      // v0.22: --kind review — the machine checks passed but a reviewer rejected the work. Counts toward
+      // escalation like a worker failure; stats separate "worker failed verify" from "reviewer rejected".
+      let fkind = opt('kind') || null;
+      if (fkind && !['provider', 'worker', 'review'].includes(fkind))
+        die(`--kind must be 'provider' (rate limit / outage / timeout — does not count toward escalation), 'worker' (the approach failed — counts) or 'review' (checks passed, the reviewer rejected — counts).`);
+      if (!fkind && opt('from-review')) fkind = 'review';
       // v0.21 (C3): --from-review stores the reviewer's findings; a retry brief carries only the latest ones
       let review;
       if (opt('from-review')) {
@@ -4217,17 +4494,20 @@ const commands = {
       if (['DONE', 'CANCELLED'].includes(item.status)) {
         // v0.16.3: a component tag is a label for the map, not part of the work — it may be
         // set on a closed item (audited). Everything else on a closed item stays frozen.
+        // v0.22: origin and parent are labels too — a closed task can be tagged with where it came from
         const flagsUsed = argv.slice(3).filter(a => a.startsWith('--')).map(a => a.slice(2));
-        if (flagsUsed.length && flagsUsed.every(f => ['component', 'reason'].includes(f)) && opt('component') !== null) {
-          const was = item.component || null;
-          item.component = opt('component') || null;
-          (item.history = item.history || []).push({ ts: ts(), change: `component = ${item.component} (was ${was}; item ${item.status})`, reason: opt('reason') || null });
+        if (flagsUsed.length && flagsUsed.every(f => ['component', 'reason', 'origin', 'parent'].includes(f)) && (opt('component') !== null || opt('origin') !== null || opt('parent') !== null)) {
+          const ch = [];
+          if (opt('component') !== null) { const was = item.component || null; item.component = opt('component') || null; ch.push(`component = ${item.component} (was ${was})`); }
+          if (opt('origin') !== null) { if (!ORIGINS.includes(opt('origin'))) die(`--origin must be one of ${ORIGINS.join('|')}.`); item.origin = opt('origin'); ch.push(`origin = ${item.origin}`); }
+          if (opt('parent') !== null) { const p = opt('parent') ? getItem(w, opt('parent')) : null; if (p && p.id === item.id) die('A task cannot be its own parent.'); item.parent = p ? p.id : undefined; ch.push(`parent = ${item.parent || 'none'}`); }
+          (item.history = item.history || []).push({ ts: ts(), change: `${ch.join('; ')} (item ${item.status})`, reason: opt('reason') || null });
           saveWork(w);
-          out(`${item.id} (${item.status}) component → ${item.component}`);
+          out(`${item.id} (${item.status}) ${ch.join(' · ')}`);
           return;
         }
         die(`'${item.id}' is ${item.status} — closed items are not edited; create a new item that supersedes it.\n` +
-            `(Only a component tag may be set on a closed item: forge task update ${item.id} --component <c> [--reason ".."])`);
+            `(Only labels may be set on a closed item: forge task update ${item.id} --component <c> | --origin <o> --parent <id> [--reason ".."])`);
       }
       const changes = [];
       const touchingCriteria = optAll('criterion-add').length > 0 || optAll('criterion-remove').length > 0;
@@ -4249,6 +4529,18 @@ const commands = {
       if (opt('component') !== null) { item.component = opt('component') || null; changes.push('component = ' + item.component); }
       if (opt('domain') !== null) { item.domains = String(opt('domain')).split(',').map(x => x.trim().toLowerCase()).filter(Boolean); changes.push('domains = ' + item.domains.join(',')); }
       if (opt('mock') !== null) { item.mock = opt('mock') || null; changes.push('mock = ' + item.mock); }
+      // v0.22: origin and parent may be set after the fact (tagging an untagged task)
+      if (opt('origin') !== null) {
+        if (!ORIGINS.includes(opt('origin'))) die(`--origin must be one of ${ORIGINS.join('|')}.`);
+        item.origin = opt('origin'); changes.push('origin = ' + item.origin);
+      }
+      if (opt('parent') !== null) {
+        const p = opt('parent') ? getItem(w, opt('parent')) : null;
+        if (p && p.id === item.id) die(`A task cannot be its own parent.`);
+        if (p && (item.origin || opt('origin')) === 'review' && p.origin === 'review' && p.parent)
+          die(`Refused: '${p.id}' is itself a review fix for '${p.parent}' — findings on a fix task fold into it, they do not chain (depth 1).`);
+        item.parent = p ? p.id : undefined; changes.push('parent = ' + (item.parent || 'none'));
+      }
       for (const idx of optAll('criterion-remove').map(Number).sort((a, b) => b - a)) {
         if (!item.criteria[idx]) die(`No criterion at index ${idx} (use: forge task show ${item.id}).`);
         changes.push(`criterion removed: '${item.criteria[idx].desc}'`);
@@ -4342,11 +4634,35 @@ const commands = {
             `  forge task dispatch ${item.id} --agent forge-implementer --note "<what it was handed>"`
           : `Refused: no launch on '${item.id}' to attach this message to (and no --agent given).\n` +
             `Record the launch first, or name the worker: forge task dispatch ${item.id} --kind message --agent <worker> --note "..."`);
-      item.dispatches.push({ ts: ts(), agent, kind, inherited: inherited || undefined, model: opt('model') || undefined, note: opt('note') || null });
+      // v0.22: fixed model routing — the model comes from options.models, by role; a launch that names another one is refused
+      const cfgM = loadConfig() || {};
+      let model = opt('model') || undefined, modelOverride;
+      if (kind === 'launch' && modelRouting(cfgM) === 'fixed') {
+        const want = modelFor(cfgM, roleOf(agent));
+        if (want) {
+          if (!model) model = want;
+          else if (model !== want) {
+            if (!opt('reason')) die(`Refused: options.modelRouting is fixed — ${agent} runs on ${want} (options.models.${roleOf(agent)}), not '${model}'.\n` +
+              `  forge task dispatch ${item.id} --agent ${agent} --model ${want}\n` +
+              `Change the map: forge config set options.models.${roleOf(agent)} <model-id>   · one-off: add --reason "…" (recorded)`);
+            modelOverride = opt('reason');
+          }
+        }
+      }
+      // v0.22: a mid-flight message that carries review findings corrects the attempt — the item is
+      // fixed before 'done', but it did not pass first time. Recorded on the running attempt.
+      let corrected = false;
+      if (kind === 'message' && (flag('findings') || opt('from-review'))) {
+        const cur = [...item.attempts].reverse().find(a => a.outcome === 'started');
+        if (cur) { cur.corrected = true; cur.correctedTs = ts(); cur.correctedFrom = opt('from-review') || 'findings'; corrected = true; }
+      }
+      item.dispatches.push({ ts: ts(), agent, kind, inherited: inherited || undefined, model, modelOverride, findings: corrected || undefined, note: opt('note') || null });
       item.updated = ts();
       saveWork(w);
-      if (kind === 'launch' && !opt('model')) out(`NOTE: no --model recorded. Record the model the worker runs on (e.g. --model sonnet) — "which model did this item" is otherwise unanswerable.`);
-      out(`${item.id} dispatch recorded → ${agent}${opt('model') ? ` [${opt('model')}]` : ''}${inherited ? ' (inherited from the last launch)' : ''}${kind === 'message' ? ' (mid-flight message)' : ''} (${item.dispatches.length} total on this item)`);
+      if (kind === 'launch' && !model) out(`NOTE: no --model recorded. Record the model the worker runs on (e.g. --model sonnet) — "which model did this item" is otherwise unanswerable.`);
+      out(`${item.id} dispatch recorded → ${agent}${model ? ` [${model}]` : ''}${inherited ? ' (inherited from the last launch)' : ''}${kind === 'message' ? ' (mid-flight message)' : ''}${corrected ? ' — review findings sent to the running worker: this attempt no longer counts as first-pass' : ''} (${item.dispatches.length} total on this item)`);
+      if (kind === 'message' && !corrected && /\b(review|finding|F\d\b|blocker)/i.test(String(opt('note') || '')))
+        out(`NOTE: this message looks like review findings. If it is, record it as such so first-pass stays honest: --findings (or --from-review <file>).`);
 
     } else die('Usage: forge task add|list|show|next|start|move|dispatch|verify|done|fail|block|cancel|update ...');
   },
@@ -4856,14 +5172,72 @@ const commands = {
       traceEvent({ outcome: 'autopilot-off', reason: opt('reason') || null });
       regenDashboard();
       out('Autopilot OFF — the session stops after each task again.');
+    } else if (sub === 'run') {
+      // v0.22: the runner — one fresh `claude -p` process per task. Context resets by construction;
+      // the child session's Stop hook (runner mode) settles its one task and never nudges on. Stops
+      // exactly where in-session autopilot stops: a question, an escalation, a gate, nothing startable,
+      // a run limit — plus two consecutive processes that changed nothing.
+      if (autopilotMode(cfg) !== 'runner')
+        die(`Refused: options.autopilotMode is '${autopilotMode(cfg)}'. The runner drives the build loop from outside the session, so in-session autopilot must stand down:\n` +
+            `  forge config set options.autopilotMode runner\n` +
+            `(back to one long session: forge config set options.autopilotMode session)`);
+      const maxItems = parseInt(opt('max-items'), 10) || autopilotCfg(cfg).maxItems || 0;
+      const maxHours = parseFloat(opt('hours')) || autopilotCfg(cfg).maxHours || 0;
+      const dry = flag('dry-run');
+      const claudeBin = process.env.FORGE_CLAUDE || 'claude';
+      const extra = String(opt('args') || (cfg.options || {}).runnerArgs || '--permission-mode acceptEdits').split(/\s+/).filter(Boolean);
+      if (opt('model')) extra.push('--model', opt('model'));
+      const l0 = loadLock();
+      if (l0 && !l0.released && lockFresh(l0) && !dry)
+        die(`Refused: an orchestrator session is active in this project (${String(l0.sessionId).slice(0, 8)}…, last wrote ${lockAge(l0)}). Close it first — two orchestrators on one tree is the edit war the lock exists to prevent.`);
+      const run = { since: ts(), startDone: doneCount(w), continues: 0, nudges: 0, mode: 'runner', sessions: 0 };
+      if (!dry) writeJson(AUTOPILOT_FILE, run);
+      traceEvent({ outcome: 'runner-start', maxItems, maxHours, dry });
+      const q = a => /[\s"'$`\\]/.test(a) ? `'${a.replace(/'/g, `'\\''`)}'` : a;
+      let noProgress = 0, stop = null;
+      for (;;) {
+        const cfgN = loadConfig() || cfg;
+        if (autopilotMode(cfgN) !== 'runner' || (cfgN.options || {}).autopilot === 'off' && run.sessions) { stop = { kind: 'user', reason: 'autopilot turned off (forge autopilot off / options.autopilotMode)' }; break; }
+        const wN = readJson(WORK_FILE, { items: {}, order: [] }); try { ensureMilestones(wN); } catch (_) { }
+        const d = autopilotDecision(wN, cfgN, Object.assign({}, run, { since: run.since }));
+        const did = doneCount(wN) - run.startDone;
+        if (maxItems && did >= maxItems) { stop = { kind: 'limit', reason: `run limit reached: ${did} task(s) done this run (max ${maxItems})`, ask: 'Restart the runner when you are ready.' }; break; }
+        if (maxHours && Date.now() - Date.parse(run.since) >= maxHours * 3600000) { stop = { kind: 'limit', reason: `run limit reached: ${maxHours}h since the runner started`, ask: 'Restart the runner when you are ready.' }; break; }
+        if (!d.go) { stop = d; break; }
+        const prompt = [`AUTOPILOT RUNNER — this session does exactly ONE task, then ends.`,
+          `Task: ${d.label} — ${d.next.title}.`,
+          d.prepare ? `It is still thin: write its acceptance criteria from the spec and its file scope first (forge task update ${d.next.id} --criterion-add "…::check" --allowed "…")${sw(cfgN, 'itemShape') === 'refuse' ? ', at most 6 criteria (split side by side into sibling tasks with --origin split --parent if it needs more)' : ''}.` : '',
+          `Run the build loop for it: forge task start ${d.next.id} → brief → dispatch (record every launch) → verify → review → forge task done ${d.next.id}. No progress summary in between.`,
+          `If a product question comes up: forge task block ${d.next.id} --reason "question: …" and end your turn with that question as the first line — the runner stops and shows it.`,
+          `When the task is DONE (or blocked, or failed with a diagnosis), end your turn with one line. Do NOT start another task; the runner starts the next one in a fresh process.`].filter(Boolean).join('\n');
+        const args = ['-p', prompt, ...extra];
+        if (dry) { out(`Would run (${d.label} — ${d.next.title}):\n  ${q(claudeBin)} ${args.map(q).join(' ')}`); stop = { kind: 'dry-run', reason: 'dry run — nothing started' }; break; }
+        const key0 = progressKey(wN);
+        out(`\n▶ ${d.label} — ${d.next.title}\n  ${claudeBin} -p … ${extra.join(' ')}  (fresh process, ${run.sessions + 1}${run.sessions === 0 ? 'st' : run.sessions === 1 ? 'nd' : run.sessions === 2 ? 'rd' : 'th'} of this run)`);
+        const r = spawnSync(claudeBin, args, { cwd: PROJECT, stdio: 'inherit', env: process.env });
+        run.sessions++;
+        if (r.error) { stop = { kind: 'error', reason: `could not start '${claudeBin}': ${r.error.message}`, ask: 'Is Claude Code installed and on PATH? Set FORGE_CLAUDE=<path> otherwise.' }; break; }
+        const wA = readJson(WORK_FILE, { items: {}, order: [] }); try { ensureMilestones(wA); } catch (_) { }
+        if (progressKey(wA) === key0) {
+          noProgress++;
+          out(`  (exit ${r.status}; the plan did not move${noProgress > 1 ? ' — second time in a row' : ''})`);
+          if (noProgress >= 2) { stop = { kind: 'no-progress', reason: `two consecutive processes changed nothing in the plan (last exit ${r.status})`, ask: 'Open a session in this project and read what the last one said; the cause is usually a permission prompt or a verify that cannot run unattended.' }; break; }
+        } else { noProgress = 0; run.continues++; }
+        run.stopped = undefined;
+        writeJson(AUTOPILOT_FILE, run);
+      }
+      if (!dry) { writeJson(AUTOPILOT_FILE, Object.assign(run, { stopped: { kind: stop.kind, reason: stop.reason, ts: ts(), key: progressKey(readJson(WORK_FILE, { items: {}, order: [] })) } })); regenDashboard(); }
+      traceEvent({ outcome: 'runner-stop', kind: stop.kind, sessions: run.sessions, done: doneCount(readJson(WORK_FILE, { items: {}, order: [] })) - run.startDone });
+      out(`\nRUNNER STOPS: ${stop.reason}${stop.ask ? `\n${stop.ask}` : ''}\n${run.sessions} process(es) · ${doneCount(readJson(WORK_FILE, { items: {}, order: [] })) - run.startDone} task(s) done this run.`);
+      if (['question', 'escalation', 'gate', 'stuck', 'boundary'].includes(stop.kind)) process.exit(3);
     } else if (sub === 'status') {
       const ap = autopilotCfg(cfg); const run = readJson(AUTOPILOT_FILE, {});
-      out(`Autopilot: ${ap.on ? 'ON' : 'off'}${ap.maxItems ? ` · max ${ap.maxItems} task(s)` : ''}${ap.maxHours ? ` · max ${ap.maxHours}h` : ''}`);
+      out(`Autopilot: ${ap.on ? 'ON' : 'off'}${ap.maxItems ? ` · max ${ap.maxItems} task(s)` : ''}${ap.maxHours ? ` · max ${ap.maxHours}h` : ''}${autopilotMode(cfg) === 'runner' ? ' · mode: runner (forge autopilot run)' : ''}`);
       if (run.since) out(`  run since ${run.since.slice(0, 16).replace('T', ' ')} · ${doneCount(w) - (run.startDone || 0)} task(s) done · ${run.continues || 0} continue(s)`);
       if (run.stopped) out(`  last stop: ${run.stopped.kind} — ${run.stopped.reason} (${String(run.stopped.ts).slice(0, 16).replace('T', ' ')})`);
       const d = autopilotDecision(w, cfg, run);
       out(d.go ? `  now: would continue with ${d.label} — ${d.next.title}` : `  now: would stop — ${d.reason}`);
-    } else die('Usage: forge autopilot on [--max-items N] [--hours H] | off [--reason ..] | status');
+    } else die('Usage: forge autopilot on [--max-items N] [--hours H] | off [--reason ..] | status | run [--max-items N] [--hours H] [--dry-run] [--model <id>] [--args "…"]');
   },
 
   // -- upgrade (v0.19) — bring this plan to the installed Forge's standards --------
@@ -5169,6 +5543,20 @@ const commands = {
           check(`switch ${k}`, true, `${JSON.stringify(sw(c, k))}${raw === undefined ? ' (not set — off; new projects start with ' + JSON.stringify(SWITCH_ON[k]) + ': forge config set options.' + k + ' ' + SWITCH_ON[k] + ')' : ''}`);
         }
       } catch (_) { }
+      // v0.22: model routing — one line per role, and the orchestrator reminder
+      try {
+        const c = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
+        const rt = modelRouting(c);
+        check('model routing', true, `${rt}${rt === 'auto' ? ' — agent aliases decide (sonnet/haiku/inherit); fixed pins every role: forge config set options.modelRouting fixed' : ''} · orchestrator = the session model`);
+        if (rt === 'fixed') {
+          const map = (c.options || {}).models || {};
+          for (const r of MODEL_ROLES) {
+            const v = map[r];
+            check(`model ${r}`, !!v, v ? `${v}${/^claude-[a-z]+-\d/.test(v) ? '' : ' — an alias, not a full id: it can resolve to an older version'}` : `not set — default ${MODEL_DEFAULTS[r]} applies: forge config set options.models.${r} ${MODEL_DEFAULTS[r]}`, !v);
+          }
+        }
+        check('autopilot mode', true, `${autopilotMode(c)}${autopilotMode(c) === 'runner' ? ` · forge autopilot run · args: ${(c.options || {}).runnerArgs || '--permission-mode acceptEdits'}` : ''} · worker live window ${workerMaxMs(c) / 60000} min`);
+      } catch (_) { }
       // v0.21 (C6): parallel tasks + a shared local database: verifies are serialised by the verify lock
       try {
         const c = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
@@ -5217,13 +5605,37 @@ const commands = {
     out(`# Forge stats — derived from forge/state/work.json (zero tokens, no estimates)`);
     out(`Items: ${items.length} — ` + Object.entries(by).map(([k, v]) => `${k}:${v}`).join(' · '));
 
+    // v0.22: where the work came from — planned at cut time vs discovered while building
+    {
+      const live = items.filter(i => i.status !== 'CANCELLED');
+      const byO = {}; for (const i of live) { const o = originOf(i); byO[o] = (byO[o] || 0) + 1; }
+      const discovered = live.filter(i => DISCOVERED_ORIGINS.includes(originOf(i))).length;
+      out(`Origin: ${ORIGINS.filter(o => byO[o]).map(o => `${o}:${byO[o]}`).join(' · ') || 'untagged'}` +
+          (discovered ? ` — ${discovered} task(s) (${Math.round(100 * discovered / live.length)}%) were not in the plan when their milestone was cut` : '') +
+          `${byO.split ? ` · splits carve planned work thinner, they are not new scope` : ''}`);
+    }
+
     const done = items.filter(i => i.status === 'DONE');
     const failsOf = i => i.attempts.filter(a => a.outcome === 'failed').length;
     if (done.length) {
-      const firstPass = done.filter(i => failsOf(i) === 0).length;
+      const fpItems = done.filter(firstPass);
+      const firstPassN = fpItems.length;
       const totalFails = done.reduce((a, i) => a + failsOf(i), 0);
+      const corrected = done.filter(i => failsOf(i) === 0 && !firstPass(i)).length;
+      const reviewFails = done.reduce((a, i) => a + i.attempts.filter(x => x.outcome === 'failed' && x.kind === 'review').length, 0);
       out(`\n## Outcomes (${done.length} DONE)`);
-      out(`  First-pass rate: ${firstPass}/${done.length} (${Math.round(100 * firstPass / done.length)}%) — done with zero failed attempts`);
+      out(`  First-pass rate: ${firstPassN}/${done.length} (${Math.round(100 * firstPassN / done.length)}%) — done with zero failed attempts and no mid-flight correction from review findings` +
+          (corrected ? ` (${corrected} corrected mid-flight)` : ''));
+      if (totalFails) out(`  Failed attempts by kind: ${totalFails - reviewFails} worker (verify/stall) · ${reviewFails} review (checks passed, reviewer rejected)`);
+      // v0.22: first-pass only compares like with like — split by the review tier the item went through
+      {
+        const tiers = {};
+        for (const i of done) { const t = reviewTier(w, i); tiers[t] = tiers[t] || { n: 0, fp: 0 }; tiers[t].n++; if (firstPass(i)) tiers[t].fp++; }
+        const order = ['none', 'haiku', 'sonnet', 'opus', 'unrecorded'];
+        out(`  First-pass by review tier: ` + Object.keys(tiers).sort((a, b) => (order.indexOf(a) + 1 || 99) - (order.indexOf(b) + 1 || 99))
+          .map(t => `${t === 'none' ? 'unreviewed' : t === 'unrecorded' ? 'reviewed (model not recorded)' : t + '-reviewed'} ${tiers[t].fp}/${tiers[t].n} (${Math.round(100 * tiers[t].fp / tiers[t].n)}%)`).join(' · ') +
+          (tiers.none && tiers.none.n > done.length / 4 ? `\n    (an unreviewed item passes first time by construction — nobody judged it; compare reviewed with reviewed)` : ''));
+      }
       // v0.16: first-pass forgives a re-start or a failed verify run; clean-run does not.
       // The spread between them is rework the process was not recording.
       const cleanRun = done.filter(i =>
@@ -5434,6 +5846,26 @@ const commands = {
       out(`\n## Since baseline${base0.label ? ` '${base0.label}'` : ''}: no items completed yet — the comparison appears after the first DONE.`);
     }
 
+    // v0.22: cost per done task by Forge version, orchestrator model, milestone and in total
+    try {
+      const wR = readJson(WORK_FILE, { items: {}, order: [] });
+      const R = usageRollup(c, wR);
+      const line = (k, r) => { const x = rollupRow(r); return `    ${String(k).slice(0, 26).padEnd(26)}${String(x.items).padStart(5)} done · first-pass ${x.fp == null ? '—' : String(x.fp + '%').padStart(4)} · ${x.calls == null ? '   —' : String(x.calls).padStart(4)} calls/task · ${fmtBig(x.ctx).padStart(7)} ctx/task · ${fmtBig(x.out).padStart(6)} out/task · orch ${x.orchShare == null ? '—' : x.orchShare + '%'}${x.costed < x.items ? ` · ${x.items - x.costed} task(s) with no transcript tie` : ''}${x.mixed ? `  ⚠ ${Object.keys(x.models).length} orchestrator models (${Object.entries(x.models).map(([m, n]) => `${m}×${n}`).join(', ')}) — not comparable` : ''}`; };
+      out(`\n## Per task, grouped — what each change to Forge or to the models actually cost`);
+      out(`  By Forge version (stamped at task done; 'pre-0.22' = closed before stamps existed):`);
+      for (const [k, r] of Object.entries(R.groups.version).sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true }))) out(line(k, r));
+      out(`  By orchestrator model:`);
+      for (const [k, r] of Object.entries(R.groups.model).sort((a, b) => b[1].items - a[1].items)) out(line(k, r));
+      out(`  By milestone:`);
+      for (const m of milestoneSeq(wR)) if (R.groups.milestone[m]) out(line(m, R.groups.milestone[m]));
+      for (const [k, r] of Object.entries(R.groups.milestone)) if (!milestoneSeq(wR).includes(k)) out(line(k, r));
+      out(`  Total:`);
+      for (const [k, r] of Object.entries(R.groups.total)) out(line(k, r));
+      if (R.unattributed && R.unattributed.calls)
+        out(`  Orchestrator calls made between tasks (briefs, planning, gates, reviews outside any task window): ${Math.round(R.unattributed.calls).toLocaleString()} calls · ${fmtBig(R.unattributed.ctx)} context — not in any task's cost above`);
+      out(`  A task's cost = its workers' transcripts + the orchestrator calls made while it was in progress (split evenly when several ran). A group with two orchestrator models is a model change and a Forge change entangled — change one thing per segment.`);
+    } catch (_) { }
+
     if (flag('baseline')) {
       const snap = Object.assign({ ts: ts(), label: opt('label') || null }, M);
       writeJson(USAGE_BASELINE, snap);
@@ -5449,6 +5881,7 @@ const commands = {
     // v0.15.2: the snapshot the dashboard reads is refreshed automatically on
     // every regen — writing it here just makes the manual run authoritative too.
     writeJson(USAGE_FILE, usageSnapshot(c));
+    regenDashboard(); // v0.22: the Usage page shows the roll-ups from this snapshot
     out(`\nSnapshot updated: forge/state/usage.json (the dashboard also refreshes this by itself — ${flag('write') ? '--write is no longer required' : 'no --write needed'}).`);
   },
 
@@ -5463,10 +5896,25 @@ const commands = {
       die(`Usage: forge dispatch --agent <worker> --purpose ${PURPOSES.join('|')} [--model <m>] [--item <id>] [--milestone <m>] [--note "..."]\n` +
           `(A launch that implements a work item is 'forge task dispatch <id>' instead.)`);
     if (opt('item') && !w.items[opt('item')]) die(`No work item '${opt('item')}'.`);
+    // v0.22: fixed model routing applies here too (reviews, explorations, the security pass)
+    const cfgM = loadConfig() || {};
+    let model = opt('model') || undefined, modelOverride;
+    if (modelRouting(cfgM) === 'fixed') {
+      const role = roleOf(agent, purpose), want = modelFor(cfgM, role);
+      if (want) {
+        if (!model) model = want;
+        else if (model !== want) {
+          if (!opt('reason')) die(`Refused: options.modelRouting is fixed — ${agent} for '${purpose}' runs on ${want} (options.models.${role}), not '${model}'.\n` +
+            `  forge dispatch --agent ${agent} --purpose ${purpose} --model ${want}${opt('item') ? ` --item ${opt('item')}` : ''}\n` +
+            `Change the map: forge config set options.models.${role} <model-id>   · one-off: add --reason "…" (recorded)`);
+          modelOverride = opt('reason');
+        }
+      }
+    }
     w.dispatchLog = w.dispatchLog || [];
-    w.dispatchLog.push({ ts: ts(), agent, purpose, model: opt('model') || undefined, item: opt('item') || undefined, milestone: opt('milestone') || undefined, note: opt('note') || null });
+    w.dispatchLog.push({ ts: ts(), agent, purpose, model, modelOverride, item: opt('item') || undefined, milestone: opt('milestone') || undefined, note: opt('note') || null });
     saveWork(w);
-    out(`Dispatch recorded → ${agent}${opt('model') ? ` [${opt('model')}]` : ''} (${purpose})${opt('item') ? ` about ${opt('item')}` : ''} — ${w.dispatchLog.length} item-less dispatch(es) in this project.`);
+    out(`Dispatch recorded → ${agent}${model ? ` [${model}]` : ''} (${purpose})${opt('item') ? ` about ${opt('item')}` : ''} — ${w.dispatchLog.length} item-less dispatch(es) in this project.`);
   },
 
   // -- releases (v0.18) — the version level above milestones: V0 (MVP), V1, V2 … ---
@@ -6015,6 +6463,27 @@ const commands = {
 
     } else if (which === 'pretooluse') {
       const tool = input.tool_name || '';
+      // v0.22: fixed model routing is enforced at the Agent call, not only in the record. A forge
+      // worker launched on a model other than its role's entry in options.models is denied with the
+      // model it should run on. Never crashes; without a config or in auto mode it stays silent.
+      if (tool === 'Agent' || tool === 'Task') {
+        try {
+          const cfgA = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
+          const ti = input.tool_input || {};
+          const role = roleOf(ti.subagent_type || '', String(ti.prompt || '').split('\n')[0]);
+          if (modelRouting(cfgA) === 'fixed' && role) {
+            const want = modelFor(cfgA, role);
+            const given = ti.model ? String(ti.model) : null;
+            if (want && given !== want) {
+              traceEvent({ outcome: 'block', hook: 'pretooluse', reason: 'model-routing', agent: ti.subagent_type, role, given, want });
+              out(JSON.stringify({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny',
+                permissionDecisionReason: `Forge model routing is fixed: ${ti.subagent_type} (${role}) runs on ${want} — ${given ? `not '${given}'` : 'the call named no model'}. Launch it again with model: "${want}", and record it: forge ${role === 'implementer' || role === 'tester' ? 'task dispatch <id>' : 'dispatch --purpose <p>'} --agent ${String(ti.subagent_type || '').replace(/^forge:/, '')} --model ${want}. To change the map: forge config set options.models.${role} <model-id>` } }));
+              process.exit(0);
+            }
+          }
+        } catch (_) { /* no project / bad config: nothing to enforce */ }
+        process.exit(0);
+      }
       if (!['Write', 'Edit', 'MultiEdit', 'NotebookEdit'].includes(tool)) process.exit(0);
       const fp = (input.tool_input || {}).file_path || (input.tool_input || {}).notebook_path || '';
       if (!fp) process.exit(0);
@@ -6152,6 +6621,9 @@ const commands = {
       };
       let cfgS = null; try { cfgS = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')); } catch (_) { }
       const ap = autopilotCfg(cfgS);
+      // v0.22 runner mode: each task runs in its own claude process; this session does ONE task and
+      // ends. In here that means: the dangling-work guard applies, nothing nudges on to the next task.
+      if (autopilotMode(cfgS) === 'runner') ap.on = false;
       if (input.stop_hook_active && !ap.on) { releaseLock(); process.exit(0); } // never loop
       let w = null;
       try { w = JSON.parse(fs.readFileSync(WORK_FILE, 'utf8')); } catch (_) { releaseLock(); process.exit(0); } // P4: never crash a hook on bad state
@@ -6163,6 +6635,18 @@ const commands = {
         const t = w.items[id];
         return t.status === 'TODO' && t.attempts.some(a => a.outcome === 'failed');
       });
+      // ---- v0.22: a worker is live on an in-progress task — the turn ended to wait for it. Not dangling
+      // work, not a stall, not "no progress": let the turn end quietly; the worker's result re-enters
+      // the session. Field evidence (cisc, 3 Oct): dispatch 22:15:43 → Stop 22:15:50 nudged → 22:15:57
+      // recorded "no-progress" → verify 22:29. Seventeen such nudges in one run, each an orchestrator turn.
+      // A worker older than options.workerMaxMinutes (default 90) no longer counts as live.
+      {
+        const live = liveWorkers(w, cfgS);
+        if (live.length && !failedTodo.length && inProg.every(id => live.some(x => x.id === id))) {
+          traceEvent({ outcome: 'ok', hook: 'stop', autopilot: 'worker-live', inProgress: inProg, workers: live.map(x => x.id) });
+          releaseLock(); process.exit(0);
+        }
+      }
       if (!ap.on) {
         if (!inProg.length && !failedTodo.length) { releaseLock(); process.exit(0); }
         let msg = '';
@@ -6229,6 +6713,7 @@ const commands = {
   config get [path] | set <path> <val>   read/write forge config
   task add --id T1 --title .. --objective .. [--milestone M1] [--deps A,B]
            [--criterion "desc::check-cmd"]... [--allowed glob,..] [--forbidden glob,..] [--mock spec/mocks/x.png]
+           [--origin plan|split|review|discovery|human --parent <id>]   (v0.22: where the task came from)
            (or: task add --json '{...}')
   task list [--status S] | show <id>
   task start <id> [--agent forge-implementer] [--escalate strategy --note why] [--whole-tree --reason r]
@@ -6245,12 +6730,15 @@ const commands = {
   task done <id>                         refuses: no passing verification, tree changed since verification,
                                          checks that were green before work with an unchanged tree
   task fail <id> --note "diagnosis"      record failed attempt (2 failures ⇒ escalation required)
-  task update <id> [--title|--objective|--milestone|--deps|--allowed|--forbidden|--mock]
+           [--kind worker|review|provider]  v0.22: review = checks passed, the reviewer rejected (counts; stats split it)
+  task update <id> [--title|--objective|--milestone|--deps|--allowed|--forbidden|--mock|--origin|--parent]
                    [--criterion-add "d::cmd"]... [--criterion-remove i]... [--reason r]
                                          audited edits; criteria changes after failures require --reason
-  task dispatch <id> --agent <worker> [--model <m>] [--kind launch|message] [--note]
+  task dispatch <id> --agent <worker> [--model <m>] [--kind launch|message] [--note] [--findings|--from-review <f>]
                                          --agent is required on a launch; a --kind message inherits
-                                         the agent of the launch it follows
+                                         the agent of the launch it follows; --findings marks a message that
+                                         carries review findings (the attempt is then not first-pass);
+                                         options.modelRouting fixed fills/refuses --model by role
   task block <id> --reason | unblock <id> [--note "answer"] | cancel <id> --reason [--dependents drop|cancel]
   milestone add <m> --name "<feature it enables>" [--demo "<how to try it>"] [--before|--after <M>]
   milestone update <m> [--name ..] [--demo ..] [--reason ..]
@@ -6320,6 +6808,8 @@ const commands = {
   task verify <id> [--no-wait]           verifies run one at a time (forge/state/verify.lock)
   milestone security <M> --brief         ready-to-dispatch security-pass prompt (writes nothing)
   autopilot on [--max-items N] [--hours H] | off | status
+  autopilot run [--max-items N] [--hours H] [--dry-run] [--model <id>] [--args "…"]
+                                         v0.22: one fresh claude -p process per task (options.autopilotMode runner)
                                          v0.20: keep taking the next task of the current milestone; stop only
                                          for a human (milestone ready to test, a question, an escalation,
                                          nothing startable, a run limit, no progress). Enforced by the Stop hook.

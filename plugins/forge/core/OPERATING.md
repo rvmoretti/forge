@@ -42,7 +42,13 @@ then its items; later milestones as thin items (id, title,
 objective, `--milestone`, `--deps`; criteria and scope are added via
 `task update` when their milestone approaches). A backlog parked in a
 document instead of the graph is a spec-drift bug: invisible to every gate,
-stat, and view. Seed the architecture and screens in the same step — every
+stat, and view. **Every task added after its milestone started says where it
+came from** (v0.22): `--origin split --parent <id>` when a planned task is carved
+thinner (not new scope), `--origin review --parent <id>` for a reviewer's
+non-blocking finding, `--origin discovery` for a fact found while building,
+`--origin human` when the product owner asked. The dashboard shows planned vs
+discovered and the week's done-vs-added from these tags; an untagged add to a
+started milestone is warned. Seed the architecture and screens in the same step — every
 runtime part becomes `forge arch add <id> --kind .. --runs-on ..` (links: `forge arch
 link`), every screen `forge screen add <id> --app <part> --mock ..` — BEFORE items are
 created, and every item carries `--component` (screen, part, or plain tag). On an
@@ -59,6 +65,18 @@ theirs, supply a credential: block the task with that request, never just end th
 in progress. When they have answered, `forge task unblock <id> --note "…"` resumes it — a task
 blocked mid-work keeps its attempt and verification, so it goes straight back to `task done`. The user may be on their phone: the message that ends a stop is short and
 its first line says what you need from them.
+**A running worker is not a stop** (v0.22): when you have dispatched a worker in the background
+and end your turn to wait for it, the Stop hook sees the live dispatch (newer than the task's last
+verification, younger than `options.workerMaxMinutes`) and lets the turn end quietly — no nudge, no
+"no progress". Record every launch (`forge task dispatch`) *before* ending the turn, or the hook
+cannot tell waiting from stalling. Only a block whose reason starts with `question:` is a question
+for the user; a dependency wait (`--reason "waiting on …"`) is shown as a wait.
+**Runner mode** (`options.autopilotMode = runner`, v0.22): the user drives the loop from outside
+with `forge autopilot run`, which starts a fresh `claude -p` process per task. In that mode you are
+one such process: do exactly the one task the prompt names, settle it (done / block with a
+question / fail with a diagnosis), end your turn with one line, and never start another task — the
+runner starts the next one in a clean context. The Stop hook in runner mode keeps only the
+dangling-work guard.
 
 **Plan standards**: when session start reports open `forge upgrade` steps, tell the
 user once, in one line, and move on. Never run a judgement step (a change script)
@@ -157,6 +175,23 @@ from confirmed goals, milestone cut across everything. Then the same loop.
      that. Brownfield projects additionally tag provenance
      ([CONFIRMED]/[OBSERVED]/_TBD_ — see forge-brownfield §6). Sync any other
      affected docs. Then move on.
+   - **Review findings** (v0.22) — the reviewer tags every finding BLOCKING or
+     NON-BLOCKING. Any blocking finding fails the task: `forge task fail <id> --kind
+     review --from-review <file>` (checks passed, the reviewer rejected — it counts
+     toward escalation and `forge stats` reports it apart from worker failures); the
+     retry brief carries the findings. Non-blocking findings never stay in a chat
+     message: each becomes ONE fix task that names its parent — `forge task add --id
+     <parent>-fix1 --origin review --parent <parent> …` — placed right after the parent
+     in the plan, with its own scope and criteria; add `--deps` on a later planned task
+     only when that task genuinely needs the fix. Fix tasks are depth 1: a finding on a
+     fix task folds into it (`task update --criterion-add`) or, if it is already DONE,
+     into one consolidated hardening task for the milestone — never a chain of fixes.
+     An accepted risk is a decision (`forge decision add`), not a silent omission.
+     Sending findings to the *running* worker is allowed when the task is still open,
+     but it is recorded as a correction — `forge task dispatch <id> --kind message
+     --findings --note "…"` — and the task then did not pass first time. First-pass
+     measures the brief: a worker that needed a retry or a mid-flight fix did not get a
+     complete one.
    - Fail → `forge task fail <id> --note "<root-cause diagnosis>"`. Diagnose
      BEFORE retrying. Retry = fresh worker + brief + your diagnosis. Never
      resume a failed worker's context; never redispatch the same brief
@@ -299,6 +334,12 @@ outside it). Field evidence for the change: pre-solving the work in the brief mo
 investigation into your window (orchestrator ~5% → ~64% of calls on one project,
 briefs 9.6 KB → 25 KB) without raising first-pass.
 
+**Every DONE task is stamped** (v0.22) with the Forge version, the orchestrator
+session and its model; `forge usage` and the dashboard's Usage page roll cost per
+task up by Forge version, orchestrator model, milestone and total, and flag a group
+where two orchestrator models ran. That is how a Forge release or a model change is
+judged: calls and context per task down while first-pass holds.
+
 **One change per measured segment.** A baseline plus a delta only attributes a
 change if exactly one thing changed. Shipping a Forge release and switching the
 orchestrator model in the same segment produces a number that belongs to
@@ -414,10 +455,20 @@ older projects have them off until the user turns them on, one per measured segm
 Tag a task's domains when you cut it (`forge task add/update … --domain api,auth`): the
 brief then carries those domain packs' rules, and the high-risk rules above apply.
 
-**Model routing.** You (the session model) stay the CTO. `forge-architect`, high-risk
-review (auth, data access, payments, migrations) and the milestone security pass run on
-Opus (they inherit your model). `forge-implementer`, `forge-tester` and routine review run
-on Sonnet. `forge-explorer` (context packs) and spec/doc sync edits run on Haiku.
+**Model routing.** You (the session model) stay the CTO — always; Forge never sets your
+model. Two modes (v0.22, `options.modelRouting`):
+- `fixed` (new projects): every worker role runs on the model id in `options.models` —
+  `implementer`, `tester`, `reviewer`, `explorer`, `architect`, `security` (the milestone
+  security pass and high-risk review). The brief prints the map; pass that `model` on every
+  Agent call; `forge task dispatch` / `forge dispatch` fill it in when omitted and refuse
+  another one (a recorded `--reason` overrides once); the PreToolUse hook denies an Agent
+  call on another model. Change a role in one place — `forge config set options.models.<role>
+  <full-model-id>` — and only at a milestone boundary, so the segment's numbers stay
+  comparable. Full ids, never aliases: an alias can resolve to an older version.
+- `auto` (projects older than v0.22): `forge-architect`, high-risk review (auth, data
+  access, payments, migrations) and the milestone security pass inherit your model;
+  `forge-implementer`, `forge-tester` and routine review run on Sonnet; `forge-explorer`
+  (context packs) and spec/doc sync edits run on Haiku.
 Deterministic scanning (`verify.security`) runs on no model. The security pass prompt:
 `forge milestone security <M> --brief`.
 

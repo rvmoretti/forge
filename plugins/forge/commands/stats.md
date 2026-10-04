@@ -11,11 +11,15 @@ node "${CLAUDE_PLUGIN_ROOT}/bin/forge.js" stats
 Relay it faithfully — it is derived arithmetic from `forge/state/work.json`,
 never an estimate. Highlight what is actionable:
 
-1. **First-pass rate** falling over time means briefs or criteria are
+1. **First-pass rate** (no failed attempt, no mid-flight correction) falling over time means briefs or criteria are
    degrading — look at the most-retried items for the pattern.
 2. **Escalations** clustered in one area usually mean the work is decomposed
    wrong or the cheaper tier isn't reliable for that kind of task.
 3. **Milestone health** shows where a gate is waiting on the human.
+4. **Origin** (v0.22) — how many tasks were not in the plan when their
+   milestone was cut (review fixes, discoveries, human requests); splits are
+   decomposition, not new scope. **Review tier** — compare reviewed with
+   reviewed: an unreviewed task passes first time by construction.
 
 Elapsed times are wall-clock spans between state transitions — they include
 review, gates, and idle time, so present them as elapsed, never as effort.

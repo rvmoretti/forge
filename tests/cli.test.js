@@ -48,6 +48,9 @@ function freshProject() {
   const cf = path.join(dir, 'forge', 'config.json');
   const c = JSON.parse(fs.readFileSync(cf, 'utf8'));
   for (const k of ['itemShape', 'workerExplore', 'contextPack', 'briefLimit', 'retryFromReview', 'requireDispatch', 'requireTester', 'architectPrepass', 'delegateSpecSync']) delete c.options[k];
+  // v0.22: new projects also start with fixed model routing and runner-capable autopilot settings;
+  // the legacy tests exercise an existing project (auto routing). v0.22 tests opt back in.
+  for (const k of ['modelRouting', 'models', 'autopilotMode']) delete c.options[k];
   fs.writeFileSync(cf, JSON.stringify(c, null, 2));
 }
 function switchOn(k, v) { forge(['config', 'set', 'options.' + k, String(v)]); }
@@ -2417,4 +2420,297 @@ test('v0.21.2: a blocked task is shown as needing you even while others are in p
   forge(['task', 'block', 'B', '--reason', 'question: which?']);
   const dash = fs.readFileSync(path.join(dir, 'forge', 'dashboard.html'), 'utf8');
   assert.match(dash, /1 item\(s\) are blocked and need your answer/);
+});
+
+// --- v0.22 -------------------------------------------------------------------
+
+test('v0.22: task origin — a review fix names its parent and sits right after it; splits need a parent; fixes do not chain; stats and dashboard show planned vs discovered', () => {
+  addItem('P1', ['--milestone', 'M1']); addItem('P2', ['--milestone', 'M1', '--deps', 'P1']);
+  let r = forge(['task', 'add', '--id', 'S1', '--title', 'split', '--milestone', 'M1', '--origin', 'split', '--criterion', 'ok::true']);
+  assert.notStrictEqual(r.code, 0); assert.match(r.out, /needs --parent/);
+  r = forge(['task', 'add', '--id', 'X1', '--title', 'x', '--milestone', 'M1', '--origin', 'nonsense']);
+  assert.notStrictEqual(r.code, 0); assert.match(r.out, /--origin must be one of/);
+  r = forge(['task', 'add', '--id', 'F1', '--title', 'fix a', '--milestone', 'M1', '--origin', 'review', '--parent', 'P1', '--criterion', 'ok::true', '--allowed', 'src/']);
+  assert.strictEqual(r.code, 0); assert.match(r.out, /origin: review of P1, placed after P1/);
+  r = forge(['task', 'add', '--id', 'F1b', '--title', 'fix b', '--milestone', 'M1', '--origin', 'review', '--parent', 'P1', '--criterion', 'ok::true', '--allowed', 'src/']);
+  assert.match(r.out, /placed after F1/);                                            // after the parent's earlier children
+  const w = JSON.parse(fs.readFileSync(path.join(dir, 'forge', 'state', 'work.json'), 'utf8'));
+  assert.deepStrictEqual(w.milestones.M1.taskOrder, ['P1', 'F1', 'F1b', 'P2']);
+  assert.strictEqual(w.items.F1.origin, 'review'); assert.strictEqual(w.items.F1.parent, 'P1');
+  // depth 1: a finding on a fix task folds into it
+  r = forge(['task', 'add', '--id', 'F2', '--title', 'fix of a fix', '--milestone', 'M1', '--origin', 'review', '--parent', 'F1']);
+  assert.notStrictEqual(r.code, 0); assert.match(r.out, /fold INTO it/);
+  // an untagged add to a started milestone is warned, and can be tagged after the fact
+  forge(['task', 'start', 'P1']);
+  r = forge(['task', 'add', '--id', 'D1', '--title', 'found', '--milestone', 'M1', '--criterion', 'ok::true']);
+  assert.match(r.out, /ORIGIN WARNING/);
+  r = forge(['task', 'update', 'D1', '--origin', 'discovery']);
+  assert.match(r.out, /origin = discovery/);
+  assert.match(forge(['task', 'list']).out, /F1 .*\[review of P1\]/);
+  // a closed task can still be tagged with its origin (a label, like the component tag)
+  touch('p1.txt'); forge(['task', 'verify', 'P1']); forge(['task', 'done', 'P1']);
+  r = forge(['task', 'update', 'P1', '--origin', 'human', '--reason', 'asked on 30 Sep']);
+  assert.strictEqual(r.code, 0); assert.match(r.out, /\(DONE\) origin = human/);
+  assert.notStrictEqual(forge(['task', 'update', 'P1', '--title', 'nope']).code, 0);
+  const st = forge(['stats']).out;
+  assert.match(st, /Origin: plan:1 · review:2 · discovery:1 · human:1/);
+  assert.match(st, /4 task\(s\) \(80%\) were not in the plan/);
+  const dash = fs.readFileSync(path.join(dir, 'forge', 'dashboard.html'), 'utf8');
+  assert.match(dash, /1 planned · 0 split · <b title="review 2 · discovery 1 · human 1">4 discovered<\/b>/);
+  assert.match(dash, /origin-review/);
+});
+
+test('v0.22: first-pass — a review rejection is a failed attempt of kind review, and findings sent to a running worker correct the attempt; stats split both out', () => {
+  addItem('R1'); addItem('R2'); addItem('R3');
+  // R1: reviewer rejected after green checks → fail --kind review → retry → done
+  forge(['task', 'start', 'R1']); touch('r1.txt'); forge(['task', 'verify', 'R1']);
+  let r = forge(['task', 'fail', 'R1', '--kind', 'review', '--note', 'B1 race']);
+  assert.strictEqual(r.code, 0);
+  forge(['task', 'start', 'R1']); touch('r1b.txt'); forge(['task', 'verify', 'R1']); forge(['task', 'done', 'R1']);
+  // R2: findings messaged to the running worker — fixed before done, but not first pass
+  forge(['task', 'start', 'R2']);
+  forge(['task', 'dispatch', 'R2', '--agent', 'forge-implementer', '--model', 'sonnet']);
+  r = forge(['task', 'dispatch', 'R2', '--kind', 'message', '--findings', '--note', 'review F1 F2']);
+  assert.match(r.out, /no longer counts as first-pass/);
+  touch('r2.txt'); forge(['task', 'verify', 'R2']); forge(['task', 'done', 'R2']);
+  // R3: clean
+  forge(['task', 'start', 'R3']); touch('r3.txt'); forge(['task', 'verify', 'R3']); forge(['task', 'done', 'R3']);
+  const w = JSON.parse(fs.readFileSync(path.join(dir, 'forge', 'state', 'work.json'), 'utf8'));
+  assert.strictEqual(w.items.R1.attempts.find(a => a.outcome === 'failed').kind, 'review');
+  assert.strictEqual(w.items.R2.attempts.find(a => a.outcome === 'started').corrected, true);
+  assert.strictEqual(w.items.R3.closed.forgeVersion, JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'plugins', 'forge', '.claude-plugin', 'plugin.json'), 'utf8')).version);
+  const st = forge(['stats']).out;
+  assert.match(st, /First-pass rate: 1\/3 \(33%\)/);
+  assert.match(st, /\(1 corrected mid-flight\)/);
+  assert.match(st, /Failed attempts by kind: 0 worker \(verify\/stall\) · 1 review/);
+  assert.match(st, /First-pass by review tier: unreviewed 1\/3/);
+  const dash = fs.readFileSync(path.join(dir, 'forge', 'dashboard.html'), 'utf8');
+  assert.match(dash, /1\/3 · no failed attempt, no mid-flight correction · 1 corrected/);
+  assert.match(dash, /failed attempt\(s\) · 0 worker · 1 review/);
+  assert.match(dash, /LAST 7 DAYS<\/div><div class="pv">3 done <small>· 3 added/);
+  // a message that looks like findings but is not flagged gets a note, not a correction
+  addItem('R4'); forge(['task', 'start', 'R4']); forge(['task', 'dispatch', 'R4', '--agent', 'forge-implementer', '--model', 'sonnet']);
+  r = forge(['task', 'dispatch', 'R4', '--kind', 'message', '--note', 'review F3: fix the import']);
+  assert.match(r.out, /looks like review findings/);
+});
+
+test('v0.22: the Stop hook lets a turn end quietly while a worker is live — no nudge, no no-progress stop — and nudges again once the worker window has passed', () => {
+  addItem('W1', ['--milestone', 'M1']);
+  forge(['autopilot', 'on']);
+  forge(['task', 'start', 'W1']);
+  forge(['task', 'dispatch', 'W1', '--agent', 'forge-implementer', '--model', 'sonnet']);
+  let h = hook('stop', { session_id: 's' });
+  assert.strictEqual(h.code, 0, h.out);                                                      // worker live: quiet
+  assert.doesNotMatch(h.out, /AUTOPILOT/);
+  h = hook('stop', { session_id: 's', stop_hook_active: true });
+  assert.strictEqual(h.code, 0);
+  const run = JSON.parse(fs.readFileSync(path.join(dir, 'forge', 'state', 'autopilot.json'), 'utf8'));
+  assert.ok(!run.stopped, 'no stop recorded while the worker runs');
+  assert.match(fs.readFileSync(path.join(dir, 'forge', 'state', 'trace.jsonl'), 'utf8'), /"autopilot":"worker-live"/);
+  // dashboard: building, with the worker named — not "stopped"
+  forge(['dashboard']);
+  let dash = fs.readFileSync(path.join(dir, 'forge', 'dashboard.html'), 'utf8');
+  assert.match(dash, /<h3>Building — W1 in progress<\/h3>/);
+  assert.match(dash, /W1<\/code> → forge-implementer running/);
+  assert.match(dash, /1 worker running/);
+  // a verify after the dispatch means the worker reported back: the hook nudges again
+  touch('w.txt'); forge(['task', 'verify', 'W1']);
+  h = hook('stop', { session_id: 's' });
+  assert.strictEqual(h.code, 2); assert.match(h.out, /AUTOPILOT is on and W1 is still IN_PROGRESS/);
+  // a worker older than options.workerMaxMinutes is no longer live
+  forge(['task', 'dispatch', 'W1', '--agent', 'forge-implementer', '--kind', 'message', '--note', 'go on']);
+  assert.strictEqual(hook('stop', { session_id: 's' }).code, 0);
+  forge(['config', 'set', 'options.workerMaxMinutes', '0.00001']);
+  assert.strictEqual(hook('stop', { session_id: 's' }).code, 2);
+  // without autopilot the same rule applies to the dangling-work guard
+  forge(['autopilot', 'off']); forge(['config', 'set', 'options.workerMaxMinutes', '90']);
+  forge(['task', 'dispatch', 'W1', '--agent', 'forge-implementer', '--kind', 'message', '--note', 'go on']);
+  assert.strictEqual(hook('stop', { session_id: 's' }).code, 0);
+});
+
+test('v0.22: the banner — a question always wins; a dependency block while others build is a wait, not a question; a stale autopilot stop hides while a worker is live', () => {
+  addItem('A', ['--milestone', 'M1', '--allowed', 'a/']); addItem('B', ['--milestone', 'M1', '--allowed', 'b/']); addItem('C', ['--milestone', 'M1', '--allowed', 'c/']);
+  forge(['config', 'set', 'options.concurrency', '3']);
+  forge(['task', 'start', 'A']); forge(['task', 'start', 'B']);
+  forge(['task', 'block', 'B', '--reason', 'waiting on A (deferred release)']);
+  let dash = fs.readFileSync(path.join(dir, 'forge', 'dashboard.html'), 'utf8');
+  assert.match(dash, /<h3>Building — A in progress<\/h3>/);
+  assert.match(dash, /B waits on other work/);
+  assert.doesNotMatch(dash, /need your answer/);
+  assert.match(dash, /QUESTIONS · NEED YOU<\/div><div class="d">1 blocked on other work/);
+  assert.match(dash, /data-s="BLOCKED" data-act="1" data-q="0"/);
+  forge(['task', 'start', 'C']); forge(['task', 'block', 'C', '--reason', 'question: which currency?']);
+  dash = fs.readFileSync(path.join(dir, 'forge', 'dashboard.html'), 'utf8');
+  assert.match(dash, /1 item\(s\) are blocked and need your answer/);
+  assert.match(dash, /meanwhile A keeps building/);
+  assert.match(dash, /data-s="BLOCKED" data-act="1" data-q="1"/);
+  // a stop recorded before a dispatch does not outlive the worker it did not know about
+  forge(['task', 'unblock', 'C']); forge(['task', 'unblock', 'B']);
+  forge(['autopilot', 'on']);
+  assert.strictEqual(hook('stop', { session_id: 's' }).code, 2);
+  assert.strictEqual(hook('stop', { session_id: 's', stop_hook_active: true }).code, 0);
+  forge(['dashboard']);
+  dash = fs.readFileSync(path.join(dir, 'forge', 'dashboard.html'), 'utf8');
+  assert.match(dash, /Autopilot stopped — your session is waiting for you/);
+  forge(['task', 'dispatch', 'A', '--agent', 'forge-implementer', '--model', 'sonnet']);
+  dash = fs.readFileSync(path.join(dir, 'forge', 'dashboard.html'), 'utf8');
+  assert.doesNotMatch(dash, /Autopilot stopped/);
+  assert.match(dash, /A<\/code> → forge-implementer running/);
+});
+
+test('v0.22: fixed model routing — new projects start fixed with a full id per role; dispatch fills or refuses the model; the Agent call is denied on another model; auto stays silent', () => {
+  const cf = path.join(dir, 'forge', 'config.json');
+  // what forge init wrote (the fixture removed it to emulate an existing project): put it back
+  const fresh = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-init-'));
+  spawnSync('git', ['init', '-q'], { cwd: fresh });
+  spawnSync(process.execPath, [CLI, 'init'], { cwd: fresh, encoding: 'utf8', env: Object.assign({}, process.env, { CLAUDE_PROJECT_DIR: fresh }) });
+  const initCfg = JSON.parse(fs.readFileSync(path.join(fresh, 'forge', 'config.json'), 'utf8'));
+  assert.strictEqual(initCfg.options.modelRouting, 'fixed');
+  assert.strictEqual(initCfg.options.models.implementer, 'claude-sonnet-5-5');
+  assert.strictEqual(initCfg.options.models.explorer, 'claude-haiku-4-5-20251001');
+  assert.strictEqual(initCfg.options.models.security, 'claude-opus-5-5');
+  assert.strictEqual(initCfg.options.autopilotMode, 'session');
+  // auto (existing project): nothing changes
+  addItem('M1i'); forge(['task', 'start', 'M1i']);
+  let r = forge(['task', 'dispatch', 'M1i', '--agent', 'forge-implementer', '--model', 'sonnet']);
+  assert.strictEqual(r.code, 0);
+  let h = hook('pretooluse', { session_id: 's', tool_name: 'Agent', tool_input: { subagent_type: 'forge:forge-implementer', model: 'sonnet', prompt: '# Work brief — M1i: x' } });
+  assert.strictEqual(h.code, 0); assert.doesNotMatch(h.out, /deny/);
+  // fixed
+  forge(['config', 'set', 'options.modelRouting', 'fixed']);
+  forge(['config', 'set', 'options.models.explorer', 'claude-sonnet-5-5']);           // haiku fell short: one value
+  r = forge(['task', 'dispatch', 'M1i', '--agent', 'forge-tester', '--model', 'sonnet']);
+  assert.notStrictEqual(r.code, 0); assert.match(r.out, /runs on claude-sonnet-5-5 \(options.models.tester\), not 'sonnet'/);
+  r = forge(['task', 'dispatch', 'M1i', '--agent', 'forge-tester']);
+  assert.strictEqual(r.code, 0); assert.match(r.out, /\[claude-sonnet-5-5\]/);          // filled from the map
+  r = forge(['task', 'dispatch', 'M1i', '--agent', 'forge-tester', '--model', 'claude-sonnet-5', '--reason', 'comparing versions']);
+  assert.strictEqual(r.code, 0);                                                        // recorded override
+  r = forge(['dispatch', '--agent', 'forge-reviewer', '--purpose', 'review', '--item', 'M1i', '--model', 'opus']);
+  assert.notStrictEqual(r.code, 0); assert.match(r.out, /options.models.reviewer/);
+  r = forge(['dispatch', '--agent', 'forge-reviewer', '--purpose', 'security', '--model', 'claude-opus-5-5']);
+  assert.strictEqual(r.code, 0);                                                        // the security pass is the security role
+  r = forge(['dispatch', '--agent', 'forge-explorer', '--purpose', 'explore']);
+  assert.match(r.out, /\[claude-sonnet-5-5\]/);
+  // the Agent call itself
+  h = hook('pretooluse', { session_id: 's', tool_name: 'Agent', tool_input: { subagent_type: 'forge:forge-implementer', model: 'sonnet', prompt: '# Work brief — M1i: x' } });
+  assert.strictEqual(h.code, 0);
+  const deny = JSON.parse(h.out.trim().split('\n').pop());
+  assert.strictEqual(deny.hookSpecificOutput.permissionDecision, 'deny');
+  assert.match(deny.hookSpecificOutput.permissionDecisionReason, /runs on claude-sonnet-5-5 — not 'sonnet'/);
+  h = hook('pretooluse', { session_id: 's', tool_name: 'Agent', tool_input: { subagent_type: 'forge-reviewer', prompt: '# Security brief — M1: pass' } });
+  assert.match(h.out, /the call named no model/); assert.match(h.out, /claude-opus-5-5/);
+  h = hook('pretooluse', { session_id: 's', tool_name: 'Agent', tool_input: { subagent_type: 'forge-implementer', model: 'claude-sonnet-5-5', prompt: '# Work brief — M1i: x' } });
+  assert.strictEqual(h.out.trim(), '');                                                  // allowed: silent
+  h = hook('pretooluse', { session_id: 's', tool_name: 'Agent', tool_input: { subagent_type: 'general-purpose', model: 'opus', prompt: 'anything' } });
+  assert.strictEqual(h.out.trim(), '');                                                  // not a forge role: not Forge's call
+  assert.match(fs.readFileSync(path.join(dir, 'forge', 'state', 'trace.jsonl'), 'utf8'), /"reason":"model-routing"/);
+  // the brief names the models; doctor lists them; the dashboard documents the map
+  assert.match(forge(['brief', 'M1i']).out, /Models \(options.modelRouting fixed\): implementer → claude-sonnet-5-5 · tester → claude-sonnet-5-5 · review → claude-sonnet-5-5 · explorer → claude-sonnet-5-5 · architect → claude-opus-5-5/);
+  const doc = forge(['doctor']).out;
+  assert.match(doc, /model routing: fixed/); assert.match(doc, /PASS  model explorer: claude-sonnet-5-5/);
+  assert.match(doc, /WARN  model implementer: not set — default claude-sonnet-5-5 applies/);
+  assert.match(fs.readFileSync(path.join(dir, 'forge', 'dashboard.html'), 'utf8'), /options.models.&lt;role&gt;/);
+  assert.match(forge(['upgrade']).out, /model-map/);
+});
+
+test('v0.22: the runner — refused in session mode; dry-run prints the command; one fresh process per task, stops at the limit; the in-session Stop hook never nudges on in runner mode', () => {
+  addItem('K1', ['--milestone', 'M1']); addItem('K2', ['--milestone', 'M1', '--deps', 'K1']);
+  let r = forge(['autopilot', 'run', '--dry-run']);
+  assert.notStrictEqual(r.code, 0); assert.match(r.out, /options.autopilotMode is 'session'/);
+  forge(['config', 'set', 'options.autopilotMode', 'runner']);
+  r = forge(['autopilot', 'run', '--dry-run']);
+  assert.strictEqual(r.code, 0);
+  assert.match(r.out, /Would run \(V0\.1\.1 K1 — K1\)/);
+  assert.match(r.out, /claude -p 'AUTOPILOT RUNNER — this session does exactly ONE task, then ends\./);
+  assert.match(r.out, /forge task start K1/);
+  assert.match(r.out, /--permission-mode acceptEdits/);
+  // a fake `claude` that does the task through the CLI, as a real session would
+  const fake = path.join(dir, 'fake-claude');
+  fs.writeFileSync(fake, `#!/usr/bin/env node
+    const { spawnSync } = require('child_process'); const fs = require('fs'); const path = require('path');
+    const prompt = process.argv[process.argv.indexOf('-p') + 1];
+    const id = (prompt.match(/forge task start (\\S+)/) || [])[1];
+    const f = a => spawnSync(process.execPath, [${JSON.stringify(CLI)}, ...a], { cwd: process.cwd(), encoding: 'utf8', env: process.env });
+    fs.appendFileSync(path.join(process.cwd(), 'runner.log'), process.argv.slice(2).join(' ') + '\\n');
+    f(['task', 'start', id]); fs.writeFileSync(path.join(process.cwd(), id + '.txt'), 'x');
+    f(['task', 'dispatch', id, '--agent', 'forge-implementer', '--model', 'sonnet']);
+    f(['task', 'verify', id]); const d = f(['task', 'done', id]); process.stdout.write(d.stdout);
+  `);
+  fs.chmodSync(fake, 0o755);
+  r = forge(['autopilot', 'run', '--max-items', '1'], { env: { FORGE_CLAUDE: fake } });
+  assert.strictEqual(r.code, 0, r.out);
+  assert.match(r.out, /▶ V0\.1\.1 K1 — K1/);
+  assert.match(r.out, /RUNNER STOPS: run limit reached: 1 task\(s\) done this run \(max 1\)/);
+  assert.match(r.out, /1 process\(es\) · 1 task\(s\) done this run/);
+  const w = JSON.parse(fs.readFileSync(path.join(dir, 'forge', 'state', 'work.json'), 'utf8'));
+  assert.strictEqual(w.items.K1.status, 'DONE'); assert.strictEqual(w.items.K2.status, 'TODO');
+  assert.match(fs.readFileSync(path.join(dir, 'runner.log'), 'utf8'), /-p AUTOPILOT RUNNER/);
+  const run = JSON.parse(fs.readFileSync(path.join(dir, 'forge', 'state', 'autopilot.json'), 'utf8'));
+  assert.strictEqual(run.mode, 'runner'); assert.strictEqual(run.sessions, 1); assert.strictEqual(run.stopped.kind, 'limit');
+  // no limit: K2 runs too, then the milestone gate stops the runner with exit 3 (a human is needed)
+  r = forge(['autopilot', 'run'], { env: { FORGE_CLAUDE: fake } });
+  assert.strictEqual(r.code, 3, r.out);
+  assert.match(r.out, /RUNNER STOPS: milestone .*M1 is complete and waiting for your testing/);
+  // in runner mode the child session's Stop hook keeps the dangling-work guard and never nudges on
+  addItem('K3', ['--milestone', 'M2']); forge(['config', 'set', 'options.autopilot', 'on']);
+  assert.strictEqual(hook('stop', { session_id: 's' }).code, 0);                          // nothing in progress → nothing to say
+  forge(['milestone', 'security', 'M1', '--agent', 'forge-reviewer', '--note', 'clean']); forge(['milestone', 'approve', 'M1', '--note', 'ok']);
+  forge(['task', 'start', 'K3']);
+  const h = hook('stop', { session_id: 's' });
+  assert.strictEqual(h.code, 2); assert.match(h.out, /Open work items are still IN_PROGRESS: K3/); assert.doesNotMatch(h.out, /AUTOPILOT/);
+  // a running orchestrator session refuses the runner
+  forge(['autopilot', 'on']);
+  hook('session-start', { session_id: 'live-session' });
+  r = forge(['autopilot', 'run', '--dry-run']);
+  assert.strictEqual(r.code, 0);                                                           // dry-run is allowed
+  r = forge(['autopilot', 'run'], { env: { FORGE_CLAUDE: fake } });
+  assert.notStrictEqual(r.code, 0); assert.match(r.out, /an orchestrator session is active/);
+});
+
+test('v0.22: usage attributes cost to tasks and rolls it up by Forge version, orchestrator model, milestone and total; task done stamps the version and model', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-logs-'));
+  const projDir = path.join(root, dir.replace(/[^a-zA-Z0-9]/g, '-'));
+  const subs = path.join(projDir, 'sess-main', 'subagents');
+  fs.mkdirSync(subs, { recursive: true });
+  addItem('U1', ['--milestone', 'M1']); addItem('U2', ['--milestone', 'M1', '--allowed', 'u2/']);
+  const asstL = (t, out, model, id) => JSON.stringify({ type: 'assistant', timestamp: t, message: { id: id || ('m' + Math.random()), model: model || 'claude-opus-5-5', usage: { output_tokens: out, input_tokens: 10, cache_read_input_tokens: 1000 } } });
+  const userL = (t, txt) => JSON.stringify({ type: 'user', timestamp: t, message: { content: txt } });
+  hook('session-start', { session_id: 'sess-main' });                                    // the orchestrator session this test "is"
+  // U1 runs 10:00 → 10:10; U2 10:20 → 10:30 (the start/pass timestamps come from the clock, so we
+  // write the main transcript AFTER the items ran, around their real timestamps)
+  forge(['task', 'start', 'U1']); touch('u1.txt'); forge(['task', 'verify', 'U1']);
+  // one worker transcript for U1
+  fs.writeFileSync(path.join(subs, 'w1.jsonl'), [userL(new Date().toISOString(), '# Work brief — U1: one'), asstL(new Date().toISOString(), 50, 'claude-sonnet-5-5'), asstL(new Date().toISOString(), 50, 'claude-sonnet-5-5')].join('\n') + '\n');
+  // main transcript: 4 calls while U1 is in progress
+  const now = () => new Date().toISOString();
+  fs.writeFileSync(path.join(projDir, 'sess-main.jsonl'), [asstL(now(), 100), asstL(now(), 100), asstL(now(), 100), asstL(now(), 100)].join('\n') + '\n');
+  forge(['usage'], { env: { FORGE_CLAUDE_PROJECTS: root } });                             // cache now knows sess-main's model
+  let r = forge(['task', 'done', 'U1'], { env: { FORGE_CLAUDE_PROJECTS: root } });
+  assert.strictEqual(r.code, 0, r.out);
+  const w1 = JSON.parse(fs.readFileSync(path.join(dir, 'forge', 'state', 'work.json'), 'utf8'));
+  assert.strictEqual(w1.items.U1.closed.model, 'claude-opus-5-5');
+  assert.strictEqual(w1.items.U1.closed.session, 'sess-main');
+  assert.ok(/^\d+\.\d+\.\d+$/.test(w1.items.U1.closed.forgeVersion));
+  // U2: no worker transcript, 2 main calls
+  forge(['task', 'start', 'U2']); touch('u2.txt'); forge(['task', 'verify', 'U2']);
+  fs.appendFileSync(path.join(projDir, 'sess-main.jsonl'), [asstL(now(), 100), asstL(now(), 100)].join('\n') + '\n');
+  forge(['task', 'done', 'U2'], { env: { FORGE_CLAUDE_PROJECTS: root } });
+  r = forge(['usage'], { env: { FORGE_CLAUDE_PROJECTS: root } });
+  assert.strictEqual(r.code, 0, r.out);
+  assert.match(r.out, /## Per task, grouped/);
+  assert.match(r.out, /By Forge version/);
+  assert.match(r.out, new RegExp(w1.items.U1.closed.forgeVersion.replace(/\./g, '\\.') + '\\s+2 done · first-pass 100%'));
+  assert.match(r.out, /claude-opus-5-5\s+2 done/);
+  assert.match(r.out, /M1\s+2 done/);
+  assert.match(r.out, /all\s+2 done/);
+  // cost: U1 = 2 worker calls + 4 main; U2 = 2 main → 4 calls/task on average
+  assert.match(r.out, /all\s+2 done · first-pass 100% ·\s+4 calls\/task/);
+  const snap = JSON.parse(fs.readFileSync(path.join(dir, 'forge', 'state', 'usage.json'), 'utf8'));
+  assert.strictEqual(snap.rollup.groups.total.all.items, 2);
+  assert.strictEqual(Math.round(snap.rollup.groups.total.all.calls), 8);
+  assert.strictEqual(Math.round(snap.rollup.groups.total.all.mainCalls), 6);
+  const dash = fs.readFileSync(path.join(dir, 'forge', 'dashboard.html'), 'utf8');
+  assert.match(dash, /Per task by Forge version/);
+  assert.match(dash, /Per task by orchestrator model/);
+  assert.match(dash, /Per task by milestone/);
 });
