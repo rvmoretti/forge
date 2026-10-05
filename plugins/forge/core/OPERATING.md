@@ -68,7 +68,8 @@ its first line says what you need from them.
 **A running worker is not a stop** (v0.22): when you have dispatched a worker in the background
 and end your turn to wait for it, the Stop hook sees the live dispatch (newer than the task's last
 verification, younger than `options.workerMaxMinutes`) and lets the turn end quietly — no nudge, no
-"no progress". Record every launch (`forge task dispatch`) *before* ending the turn, or the hook
+"no progress". Any live worker counts, including a review or exploration recorded with
+`forge dispatch --item <id>`; a task waiting on another task's worker waits with it. Record every launch (`forge task dispatch`) *before* ending the turn, or the hook
 cannot tell waiting from stalling. Only a block whose reason starts with `question:` is a question
 for the user; a dependency wait (`--reason "waiting on …"`) is shown as a wait.
 **Runner mode** (`options.autopilotMode = runner`, v0.22): the user drives the loop from outside
@@ -140,7 +141,22 @@ from confirmed goals, milestone cut across everything. Then the same loop.
    worker is never resumed through chat; that path is retry-by-fresh-brief,
    nothing else.
 4. **Verify**: `forge task verify <id>` — machine evidence, not the worker's
-   claim. **Then dispatch the review — by default, not by exception** (v0.17):
+   claim. **Two tiers** (v0.22.1): `verify.*` runs on every task — the fast lanes
+   (lint, typecheck, unit tests, build, security scan) plus the task's own criteria,
+   which for UI work are *that task's* spec files, never the whole suite. `gate.*`
+   holds the slow lanes (the whole e2e suite, the database suite) and runs at the
+   milestone gate (`forge milestone verify <M>`), after a high-risk task, every
+   `options.fullVerifyEvery`-th task, and on demand (`task verify --full`). CI runs the
+   whole suite on every task push when the workflow listens to the milestone branches —
+   a red run there is a regression to handle first (session start reports it;
+   `milestone ship` refuses on it). **A failing check that is not the task's own** —
+   a gate lane, or CI red on an earlier commit — is a regression somewhere in the
+   milestone, not a reason to fail this task: record a discovery, find the task whose
+   commit broke it (one commit per task), open the fix under it (`--origin discovery
+   --parent <that task>`). Never open a "reproduce the flake" task before re-running
+   the single failing spec once; a spec that passes alone and fails under load while
+   siblings edit the tree is the dev server changing under the suite, not a bug to hunt
+   (run the gate lanes against a frozen build if it recurs). **Then dispatch the review — by default, not by exception** (v0.17):
    routine items to `forge-reviewer` with a model override to `sonnet`,
    high-risk items (auth, data access, payments, migrations, security) to
    `forge-reviewer` as defined — it inherits YOUR model, the newest Opus you run
@@ -207,7 +223,11 @@ from confirmed goals, milestone cut across everything. Then the same loop.
      stalled attempt's time; an unchanged retry has never worked.
 
 6. **Milestone gate** (when `options.gates` is `per-milestone`, the default):
-   when the last item of a milestone goes DONE, stop. First run the
+   when the last item of a milestone goes DONE, stop. First the **gate run** when
+   `gate.*` lanes exist: `forge milestone verify <M>` — every lane over the finished
+   slice, recorded on the gate; `approve` refuses without a passing one for the current
+   tree (`--skip-gate --reason` is a recorded decision). A red lane is a regression in
+   the milestone: bisect the task commits, fix as a task, run again. Then the
    **security pass**: dispatch `forge-reviewer` in a fresh context with the
    security domain pack over the milestone's cumulative diff; its findings
    become work items in this milestone (fix before the gate) or explicit
@@ -255,7 +275,10 @@ from confirmed goals, milestone cut across everything. Then the same loop.
 - An item with no acceptance criteria cannot start. Write criteria first —
   and write them red-first: `start` records each check's pre-work result,
   and `done` refuses when checks that were green before any work are still
-  the only evidence. A check that cannot fail proves nothing.
+  the only evidence. A check that cannot fail proves nothing. Each check at
+  start is capped (`options.redFirstTimeoutSec`, 120 s): a check cut by the cap
+  is recorded as not run, never as green — so a criterion that is a whole test
+  lane proves nothing red-first; name the task's own spec instead.
 - Brownfield: capture the baseline before the first change
   (`forge baseline capture` — it also advances the phase to build). From
   then on `task verify` includes the baseline automatically; a regression

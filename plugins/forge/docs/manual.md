@@ -275,6 +275,21 @@ hook never nudges on; `session` mode (the default) is unchanged. While a dispatc
 (recorded launch newer than the last verify, within `options.workerMaxMinutes`), the Stop hook
 lets the turn end quietly in both modes and the dashboard shows the worker instead of a stop.
 
+## Two verification tiers and CI per push (v0.22.1)
+
+`verify.*` is what every task runs — the fast lanes plus the task's own criteria. `gate.*` holds
+the slow lanes (the whole e2e suite, the database suite): `forge config set gate.e2e "npm run
+test:e2e"` and `forge config unset verify.e2e`. They run at the milestone gate (`forge milestone
+verify <M>`, which `approve` requires when gate lanes exist), after a high-risk task, every
+`options.fullVerifyEvery`-th task, and on demand (`forge task verify <id> --full`); the baseline
+covers them and compares them on those runs only. Red-first checks at `task start` are capped by
+`options.redFirstTimeoutSec` (120 s) — a cut check is "not run", never green. Since `task done`
+pushes the milestone branch after every task, a CI workflow that listens to `milestone/**` runs the
+whole suite per task on GitHub's machines: session start reports a red run as the first thing to
+fix, and `milestone ship` refuses while the latest run is red. Field evidence: with the e2e suite in
+`verify.*`, one two-hour stretch ran it nine times (67 minutes) and three runs failed on specs that
+were not the task's own.
+
 ## Measuring Forge itself (v0.22)
 
 Every DONE task is stamped with the Forge version, the orchestrator session and its model.

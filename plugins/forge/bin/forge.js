@@ -106,7 +106,7 @@ const MUTATING = (() => {
   const c = process.argv[2] || '', s = process.argv[3] || '';
   if (c === 'init') return true;
   if (c === 'task') return !['list', 'show', 'next', ''].includes(s);
-  if (c === 'milestone') return ['security', 'approve', 'reopen', 'add', 'update', 'move', 'remove', 'ship'].includes(s) && !(s === 'security' && process.argv.includes('--brief'));
+  if (c === 'milestone') return ['security', 'approve', 'reopen', 'add', 'update', 'move', 'remove', 'ship', 'verify'].includes(s) && !(s === 'security' && process.argv.includes('--brief'));
   if (c === 'dispatch') return true;
   if (c === 'release') return ['add', 'update', 'move', 'remove', 'freeze', 'tag'].includes(s);
   if (c === 'component') return ['add', 'update'].includes(s);
@@ -347,7 +347,7 @@ function usageFiles(dirs) {
 }
 
 function emptyUsageCache() {
-  return { v: 6, files: {}, models: {}, byType: {}, perItem: {}, byDay: {}, itemMain: {}, mainUnattributed: { calls: 0, ctx: 0, out: 0 },
+  return { v: 7, files: {}, models: {}, byType: {}, perItem: {}, byDay: {}, itemMain: {}, mainUnattributed: { calls: 0, ctx: 0, out: 0 },
            dispatches: 0, tied: 0, firstTs: null, lastTs: null, bytes: 0, total: 0, complete: false };
 }
 
@@ -440,7 +440,7 @@ function consumeUsage(agg, text, side, knownIdRe, rec) {
       const x = Date.parse(tsv);
       items = agg.intervals.filter(iv => x >= iv.start && x < iv.end).map(iv => iv.id);
       agg.itemMain = agg.itemMain || {};
-      if (items.length) for (const id of items) { const im = (agg.itemMain[id] = agg.itemMain[id] || { calls: 0, ctx: 0, out: 0 }); im.calls += 1 / items.length; im.ctx += ctx1 / items.length; im.out += cur.out / items.length; }
+      if (items.length) for (const id of items) { const im = (agg.itemMain[id] = agg.itemMain[id] || { calls: 0, ctx: 0, out: 0, byModel: {} }); im.calls += 1 / items.length; im.ctx += ctx1 / items.length; im.out += cur.out / items.length; im.byModel = im.byModel || {}; im.byModel[model] = (im.byModel[model] || 0) + 1 / items.length; }
       else { agg.mainUnattributed = agg.mainUnattributed || { calls: 0, ctx: 0, out: 0 }; agg.mainUnattributed.calls++; agg.mainUnattributed.ctx += ctx1; agg.mainUnattributed.out += cur.out; }
     }
     holder.lastMsg = mid ? Object.assign({ id: mid, model, thread, day, items }, cur) : null;
@@ -464,7 +464,7 @@ function collectUsage(opts = {}) {
   const budgetMs = opts.budgetMs || 0;
   const t0 = Date.now();
   let c = opts.rescan ? null : readJson(USAGE_CACHE, null);
-  if (!c || c.v !== 6) c = emptyUsageCache(); // v0.17.1: v4 separates external sessions · v0.21: v5 counts one call per message id · v0.22: v6 attributes calls to tasks
+  if (!c || c.v !== 7) c = emptyUsageCache(); // v0.17.1: v4 separates external sessions · v0.21: v5 counts one call per message id · v0.22: v6 attributes calls to tasks · v0.22.1: v7 keeps the orchestrator model per task
   const dirs = usageDirs(opts.rescan ? null : c.dirs);
   if (!dirs) return null;
   c.dirs = dirs;
@@ -697,7 +697,8 @@ function usageRollup(c, w) {
     if (!rec.item || rec.external || !(rec.side || rec.workerTop)) continue;
     const p = slot(rec.item).worker; p.calls += rec.calls || 0; p.ctx += rec.ctx || 0; p.out += rec.out || 0;
   }
-  for (const [id, im] of Object.entries((c || {}).itemMain || {})) { const p = slot(id).main; p.calls += im.calls || 0; p.ctx += im.ctx || 0; p.out += im.out || 0; }
+  for (const [id, im] of Object.entries((c || {}).itemMain || {})) { const p = slot(id).main; p.calls += im.calls || 0; p.ctx += im.ctx || 0; p.out += im.out || 0;
+    const bm = Object.entries(im.byModel || {}).sort((a, b) => b[1] - a[1]); if (bm.length) perItem[id].observedModel = bm[0][0]; }
   const groups = { version: {}, model: {}, milestone: {}, total: {} };
   const add = (g, k, t, p) => {
     const r = (groups[g][k] = groups[g][k] || { items: 0, fp: 0, calls: 0, ctx: 0, out: 0, mainCalls: 0, costed: 0, models: {}, versions: {} });
@@ -710,7 +711,8 @@ function usageRollup(c, w) {
     const t = w.items[id]; if (!t || t.status !== 'DONE') continue;
     const p = perItem[id] || null;
     add('version', (t.closed || {}).forgeVersion || 'pre-0.22', t, p);
-    add('model', (t.closed || {}).model || 'unknown', t, p);
+    // stamped at close since v0.22; older tasks take the orchestrator model observed during their window
+    add('model', (t.closed || {}).model || (p && p.observedModel ? p.observedModel + ' (observed)' : 'unknown'), t, p);
     add('milestone', t.milestone || '(none)', t, p);
     add('total', 'all', t, p);
   }
@@ -1284,7 +1286,7 @@ function autopilotDecision(w, cfg, run) {
   for (const m of milestoneSeq(w)) {
     if ((((w.gates || {})[m]) || {}).approved) continue;
     if (milestoneComplete(w, m)) return { go: false, kind: 'gate', reason: `milestone ${L.milestone[m] ? L.milestone[m] + ' ' : ''}${m} is complete and waiting for your testing`,
-      ask: `Tell the user the milestone is ready to test: how to run or see it, what to try, and what you need back (approve / change requests). Do not start the next milestone.` };
+      ask: `${Object.keys(gateCmds(cfg)).length ? `Run the gate verification first (forge milestone verify ${m}) and the security pass; then t` : 'T'}ell the user the milestone is ready to test: how to run or see it, what to try, and what you need back (approve / change requests). Do not start the next milestone.` };
     break;
   }
   const actM = activeMilestone(w);
@@ -1371,6 +1373,10 @@ const CONFIG_DOCS = [
   { key: 'phase', def: 'spec', group: 'Project', what: 'Where the project is: spec (shaping the product, no building) or build (the build loop runs).', change: 'forge config set phase build', why: 'Move to build once the spec has gated and the plan is cut.', risk: 'none' },
   { key: 'specDir', def: '—', group: 'Project', what: 'Folder holding the spec layers; the Specs page lists it and briefs cite it.', change: 'forge config set specDir spec', why: 'Point it at the folder holding the application spec, so briefs and the Specs page find it.', risk: 'none' },
   { key: 'verify.*', def: '—', group: 'Verification', what: 'Commands every task verification runs (test, lint, typecheck, security, build, e2e …). A task is DONE only when all pass on the current tree.', change: 'forge config set verify.test "npm test"', why: 'Without them nothing is machine-checked; set at least test and lint before building.', risk: 'none' },
+  { key: 'gate.*', def: '—', group: 'Verification', what: 'The slow lanes (the whole e2e suite, the database suite). Not run on every task: at the milestone gate (forge milestone verify), on forge task verify --full, after a high-risk task, and every options.fullVerifyEvery-th task. The baseline covers them too.', change: 'forge config set gate.e2e "npm run test:e2e"   ·   forge config unset verify.e2e', why: 'A suite that takes minutes ran on every task — most of a session\'s wall-clock — and failed on specs that were not the task\'s own. Keep verify.* fast; let CI run the suite on every push.', risk: 'low' },
+  { key: 'options.fullVerifyEvery', def: '0 (gate only)', group: 'Verification', what: 'Run the gate lanes inside task verify every Nth task closed in the milestone (plus after any high-risk task).', change: 'forge config set options.fullVerifyEvery 3', why: 'Catch a cross-task regression before the gate without paying the suite on every task. Lower it for tightly coupled milestones.', risk: 'low' },
+  { key: 'options.fullVerifyHighRisk', def: 'true', group: 'Verification', what: 'A task tagged auth/data/payments/migrations/security runs the gate lanes in its verify.', change: 'forge config set options.fullVerifyHighRisk false', why: 'Turn off only when the gate lanes are irrelevant to the risky domains.', risk: 'low' },
+  { key: 'options.redFirstTimeoutSec', def: '120', group: 'Verification', what: 'Cap for each criterion check run at task start (the red-first proof). A check cut by the cap is recorded as not run, never as green.', change: 'forge config set options.redFirstTimeoutSec 60', why: 'A criterion that is a whole test lane took minutes before any work started.', risk: 'low' },
   { key: 'options.verifyVerbose', def: 'false', group: 'Verification', what: 'Print every check\'s full output on verify (default: one line per passing check; the full tail is always kept in state).', change: 'forge config set options.verifyVerbose true', why: 'When you are debugging a check and want its full output on screen.', risk: 'none' },
   { key: 'options.security', def: 'on', group: 'Verification', what: 'Security gate before a milestone is approved and a preflight warning when no verify.security scanner is set. "off" disables both.', change: 'forge config set options.security off', why: 'Leave on; turn off only for throwaway prototypes.', risk: 'none' },
   { key: 'options.gates', def: 'per-milestone', group: 'Gates', what: 'per-milestone: each milestone waits for your approval before the next starts. end-only: one review at the end.', change: 'forge config set options.gates end-only', why: 'end-only for short or low-stakes projects where a review per milestone is overhead.', risk: 'low' },
@@ -1414,6 +1420,9 @@ const COMMAND_DOCS = [
     ['forge brief <id> --context', 'Print the explorer prompt that assembles the task\'s context pack (contextPack).'],
     ['forge context save <id> [--section design-note]', 'Record a context pack or design note (explorer / architect, from stdin).'],
     ['forge task add|update <id> --domain api,auth', 'Tag domains: the brief carries their rules; auth/data/payments/migrations/security are high-risk.'],
+    ['forge task verify <id> --full', 'v0.22.1: the gate lanes too (gate.*), on demand.'],
+    ['forge milestone verify <M>', 'v0.22.1: every lane over the finished milestone, recorded on the gate; approve needs it when gate.* is set.'],
+    ['forge config unset <path>', 'v0.22.1: remove a config key (e.g. move verify.e2e to gate.e2e).'],
     ['forge task fail <id> --from-review <file>', 'Fail with the reviewer\'s findings (kind review); the retry brief carries only the latest.'],
     ['forge task dispatch <id> --kind message --findings --note "…"', 'v0.22: review findings sent to a running worker — the attempt no longer counts as first-pass.'],
     ['forge task add … --origin split|review|discovery|human --parent <id>', 'v0.22: where a task came from; a review fix or a split names its parent and sits right after it.'],
@@ -1506,10 +1515,17 @@ function liveWorkers(w, cfg, now) {
   const res = []; const t0 = now || Date.now();
   for (const id of (w.order || [])) {
     const t = w.items[id]; if (!t || t.status !== 'IN_PROGRESS') continue;
-    const last = (t.dispatches || []).map(d => Date.parse(d.ts)).filter(Number.isFinite).sort((a, b) => a - b).pop();
+    const ts2 = (t.dispatches || []).map(d => Date.parse(d.ts));
+    for (const d of (w.dispatchLog || [])) if (d.item === id) ts2.push(Date.parse(d.ts)); // a review or exploration about this task counts too
+    const last = ts2.filter(Number.isFinite).sort((a, b) => a - b).pop();
     if (!last) continue;
     const lastVer = (t.verifications || []).map(v => Date.parse(v.ts)).filter(Number.isFinite).sort((a, b) => a - b).pop() || 0;
-    if (last > lastVer && t0 - last < workerMaxMs(cfg)) res.push({ id, since: last, agent: ((t.dispatches || []).filter(d => d.kind !== 'message').pop() || {}).agent || null });
+    if (last > lastVer && t0 - last < workerMaxMs(cfg)) {
+      const lastLaunch = (t.dispatches || []).filter(d => d.kind !== 'message').pop();
+      const lastLog = (w.dispatchLog || []).filter(d => d.item === id).pop();
+      const agent = (lastLog && (!lastLaunch || Date.parse(lastLog.ts) > Date.parse(lastLaunch.ts))) ? lastLog.agent : (lastLaunch || {}).agent;
+      res.push({ id, since: last, agent: agent || null });
+    }
   }
   return res;
 }
@@ -1521,6 +1537,12 @@ function firstPass(item) {
   const at = item.attempts || [];
   return !at.some(a => a.outcome === 'failed') && !at.some(a => a.corrected);
 }
+// The kind of a failed attempt. Records older than v0.22 carry no kind; their diagnosis note says
+// whether a reviewer rejected green checks ("Review (opus) REJECT", "fresh-context review: request-changes").
+function failKind(a) {
+  if (a.kind) return a.kind;
+  return /\breview(er|s)?\b[^\n]{0,80}\b(reject|request[- ]changes|block)/i.test(String(a.note || '')) ? 'review' : 'worker';
+}
 // Review tier an item went through, from recorded review dispatches: 'none', or the model family of the reviewer.
 function reviewTier(w, item) {
   const models = [];
@@ -1531,6 +1553,47 @@ function reviewTier(w, item) {
   return fams.includes('opus') ? 'opus' : fams.includes('sonnet') ? 'sonnet' : fams.includes('haiku') ? 'haiku' : 'unrecorded';
 }
 function autopilotMode(cfg) { return (((cfg || {}).options) || {}).autopilotMode === 'runner' ? 'runner' : 'session'; }
+// v0.22.1: two verification tiers. verify.* runs on every task; gate.* (the slow lanes — the whole
+// e2e suite, the database suite) runs at the milestone gate, on demand with task verify --full,
+// after a high-risk task, and every options.fullVerifyEvery-th task. Field evidence (cisc, 4 Oct):
+// the e2e suite in verify.* ran nine times in two hours — 67 of 131 minutes — and three of those
+// runs failed on specs that were not the task's own.
+function gateCmds(cfg) { return ((cfg || {}).gate) || {}; }
+function fullVerifyEvery(cfg) { const n = parseInt((((cfg || {}).options) || {}).fullVerifyEvery, 10); return n > 0 ? n : 0; }
+function redFirstTimeoutMs(cfg) { const n = parseFloat((((cfg || {}).options) || {}).redFirstTimeoutSec); return (n > 0 ? n : 120) * 1000; }
+// Why this verify should run the gate tier too — null when it should not.
+function fullVerifyReason(w, cfg, item, forced) {
+  if (!Object.keys(gateCmds(cfg)).length) return null;
+  if (forced) return 'requested (--full)';
+  if (isHighRisk(item) && (((cfg || {}).options) || {}).fullVerifyHighRisk !== false) return `high-risk task (${itemDomains(item).filter(d => HIGH_RISK_DOMAINS.includes(d)).join(', ')})`;
+  const n = fullVerifyEvery(cfg);
+  if (!n) return null;
+  // tasks of this milestone closed since the last full verification
+  const since = [];
+  let lastFull = 0;
+  for (const id of w.order) { const t = w.items[id]; for (const v of (t.verifications || [])) if (v.full && v.passed) { const x = Date.parse(v.ts); if (x > lastFull) lastFull = x; } }
+  for (const id of w.order) { const t = w.items[id]; if (t.milestone !== item.milestone || t.status !== 'DONE') continue; const pz = [...(t.attempts || [])].reverse().find(a => a.outcome === 'passed'); if (pz && Date.parse(pz.ts) > lastFull) since.push(id); }
+  return since.length >= n ? `${since.length} task(s) closed since the last full verification (options.fullVerifyEvery ${n})` : null;
+}
+// v0.22.1: the latest CI run on a branch, through the GitHub CLI; null when gh or the branch is unavailable.
+function ciStatus(branch) {
+  if (!branch) return null;
+  try {
+    const r = spawnSync(process.env.FORGE_GH || 'gh', ['run', 'list', '--branch', branch, '--limit', '1', '--json', 'status,conclusion,headSha,url,name,createdAt'], { cwd: PROJECT, encoding: 'utf8', timeout: 15000 });
+    if (r.status !== 0) return null;
+    const arr = JSON.parse(r.stdout || '[]');
+    if (!arr.length) return { branch, none: true };
+    const x = arr[0];
+    return { branch, status: x.status, conclusion: x.conclusion || null, sha: x.headSha || null, url: x.url || null, name: x.name || null, ts: x.createdAt || null };
+  } catch (_) { return null; }
+}
+function ciLine(c) {
+  if (!c) return null;
+  if (c.none) return `CI: no run on ${c.branch} yet`;
+  const who = c.sha ? ` (${c.sha.slice(0, 7)})` : '';
+  if (c.status !== 'completed') return `CI: ${c.status} on ${c.branch}${who}`;
+  return `CI: ${c.conclusion || 'completed'} on ${c.branch}${who}${c.url ? ` — ${c.url}` : ''}`;
+}
 
 // Task domains (--domain): which domain packs a brief carries, and whether the task is high-risk.
 const HIGH_RISK_DOMAINS = ['auth', 'data', 'payments', 'migrations', 'security'];
@@ -2218,7 +2281,7 @@ function generateDashboard() {
       const corrected = dn.filter(t => failsOf(t) === 0 && !firstPass(t)).length;
       const cr = dn.filter(t => t.attempts.filter(a => a.outcome === 'started').length === 1 && failsOf(t) === 0 && !(t.verifications || []).some(v => v.passed === false)).length;
       const tf = dn.reduce((a, t) => a + failsOf(t), 0);
-      const rf = dn.reduce((a, t) => a + t.attempts.filter(x => x.outcome === 'failed' && x.kind === 'review').length, 0);
+      const rf = dn.reduce((a, t) => a + t.attempts.filter(x => x.outcome === 'failed' && failKind(x) === 'review').length, 0);
       // v0.22: first-pass by review tier — unreviewed items pass by construction
       const tiers = {};
       for (const t of dn) { const k = reviewTier(w, t); tiers[k] = tiers[k] || { n: 0, fp: 0 }; tiers[k].n++; if (firstPass(t)) tiers[k].fp++; }
@@ -3205,12 +3268,15 @@ function treeState() {
 }
 
 // F4/3.4: baseline comparison as data — used by `task verify` and `baseline check`
-function baselineCompare(cfg) {
+function baselineCompare(cfg, full) {
   const base = readJson(BASELINE_FILE, null);
   if (!base) return [];
   const results = [];
   for (const b of base.results) {
-    const currentCmd = (cfg.verify || {})[b.kind];
+    // v0.22.1: a baseline row that belongs to a gate lane is compared only on a full verify
+    const inGate = !!gateCmds(cfg)[b.kind] && !(cfg.verify || {})[b.kind];
+    if (inGate && !full) continue;
+    const currentCmd = (cfg.verify || {})[b.kind] || gateCmds(cfg)[b.kind];
     if (currentCmd && currentCmd !== b.cmd) {
       // 3.4: command changed since capture — comparison would be meaningless
       results.push({ kind: `baseline:${b.kind}`, cmd: currentCmd, exit: 1,
@@ -3805,7 +3871,19 @@ const commands = {
       writeJson(CONFIG_FILE, cfg);
       regenDashboard();
       out(`Set ${keyPath} = ${value}`);
-    } else die('Usage: forge config get [path] | forge config set <path> <value>');
+    } else if (action === 'unset') {
+      // v0.22.1: remove a key (moving a lane from verify.* to gate.* needs it)
+      const keyPath = argv[2];
+      if (!keyPath) die('Usage: forge config unset <dot.path>');
+      const keys = keyPath.split('.');
+      let node = cfg;
+      for (const k of keys.slice(0, -1)) { node = node ? node[k] : undefined; }
+      if (!node || !(keys[keys.length - 1] in node)) die(`'${keyPath}' is not set.`);
+      delete node[keys[keys.length - 1]];
+      writeJson(CONFIG_FILE, cfg);
+      regenDashboard();
+      out(`Unset ${keyPath}`);
+    } else die('Usage: forge config get [path] | forge config set <path> <value> | forge config unset <path>');
   },
 
   // -- preflight --------------------------------------------------------------
@@ -4151,11 +4229,14 @@ const commands = {
         appendMd(DECISIONS_FILE, '# Decisions log (append-only, via forge CLI)',
           `\n### ${ts()} — '${item.id}' built on its own branch\n- Authority: human\n- Decision: ${ownBranchStart.branch}, cut from ${ownBranchStart.from}; merges back into ${ownBranchStart.from} (never straight into the base branch)\n- Why: ${ownBranchStart.reason}\n`);
       }
-      item.preState = item.criteria.map(c => c.check ? { desc: c.desc, exit: run(c.check).exit } : null);
+      // v0.22.1: red-first checks are capped (options.redFirstTimeoutSec, default 120) — a criterion that is
+      // the whole e2e lane took 3.5 minutes before any work started; a timed-out check is 'not run', never green
+      item.preState = item.criteria.map(c => { if (!c.check) return null; const r = run(c.check, { timeout: redFirstTimeoutMs(loadConfig()) }); return { desc: c.desc, exit: r.exit === -1 ? null : r.exit, timedOut: r.exit === -1 || undefined }; });
       item.startTree = treeState();
       // v0.16.2: HEAD at the first start — the lower bound of this item's commit range
       if (!item.commitBase) item.commitBase = gitHead();
       const alreadyGreen = item.preState.filter(p => p && p.exit === 0);
+      const slowChecks = item.preState.filter(p => p && p.timedOut);
       item.status = 'IN_PROGRESS';
       item.blockReason = null;
       item.attempts.push({ ts: ts(), outcome: 'started', escalation: opt('escalate') || null, note: opt('note') || null, agent: opt('agent') || null, outOfOrder: (!pickedNext && opt('reason')) ? opt('reason') : undefined, shapeReason: shapeReason || undefined });
@@ -4179,6 +4260,8 @@ const commands = {
         out(`\nRecord the dispatch: forge task dispatch ${item.id} --agent forge-architect --model ${am}`);
       }
       for (const wmsg of itemShapeWarnings(item)) out(`ITEM-SHAPE WARNING: ${wmsg}`);
+      if (slowChecks.length)
+        out(`NOTE: ${slowChecks.length} criterion check(s) ran past ${redFirstTimeoutMs(loadConfig()) / 1000}s at start and were cut (options.redFirstTimeoutSec) — recorded as not run, not as green:\n` + slowChecks.map(p => `  - ${p.desc}`).join('\n'));
       if (alreadyGreen.length)
         out(`WARNING: ${alreadyGreen.length} criterion check(s) ALREADY PASS before any work:\n` +
             alreadyGreen.map(p => `  - ${p.desc}`).join('\n') +
@@ -4191,7 +4274,10 @@ const commands = {
       releaseWorkLock();
       acquireVerifyLock(item.id, flag('no-wait'));
       const results = [];
+      // v0.22.1: verify.* every time; gate.* when --full, after a high-risk task, or every Nth task
+      const fullWhy = fullVerifyReason(w, cfg, item, flag('full'));
       for (const [k, cmd] of Object.entries(cfg.verify || {})) results.push(Object.assign({ kind: `project:${k}` }, run(cmd)));
+      if (fullWhy) for (const [k, cmd] of Object.entries(gateCmds(cfg))) results.push(Object.assign({ kind: `gate:${k}` }, run(cmd)));
       for (const c of item.criteria) if (c.check) results.push(Object.assign({ kind: `criterion: ${c.desc}` }, run(c.check)));
       if (results.length === 0)
         die(`Nothing executable to verify for '${item.id}': no project verify commands and no criterion checks.\n` +
@@ -4203,7 +4289,7 @@ const commands = {
           if (!opt('reason')) die('--skip-baseline requires --reason "..." (the reason is recorded in the verification evidence).');
           skippedBaseline = opt('reason');
         } else {
-          for (const r of baselineCompare(cfg)) results.push(r);
+          for (const r of baselineCompare(cfg, !!fullWhy)) results.push(r);
         }
       }
       const passed = results.every(r => r.exit === 0);
@@ -4219,6 +4305,7 @@ const commands = {
       const wNow = readJson(WORK_FILE, w);
       item = wNow.items[item.id] || item;
       item.verifications.push({ ts: ts(), passed, results, tree, skippedBaseline, artifacts: artifacts.length ? artifacts : undefined,
+        full: fullWhy ? true : undefined, fullWhy: fullWhy || undefined,
         durationMs: results.reduce((a, r) => a + (r.ms || 0), 0) });
       item.updated = ts();
       saveWork(wNow);
@@ -4231,7 +4318,7 @@ const commands = {
       if (verbose) {
         for (const r of results) out(`${r.exit === 0 ? 'PASS' : 'FAIL'}  [${r.kind}] ${r.cmd}${r.note ? `  (${r.note})` : ''}${r.exit !== 0 ? '\n' + r.tail : ''}`);
       } else {
-        out(`VERIFY ${item.id} — ${passed ? 'PASS' : 'FAIL'} ${results.length - failed.length}/${results.length}`);
+        out(`VERIFY ${item.id} — ${passed ? 'PASS' : 'FAIL'} ${results.length - failed.length}/${results.length}${fullWhy ? ` · FULL (gate lanes included: ${fullWhy})` : Object.keys(gateCmds(cfg)).length ? ` · gate lanes (${Object.keys(gateCmds(cfg)).join(', ')}) run at the milestone gate — forge task verify ${item.id} --full to run them now` : ''}`);
         for (const r of results) {
           if (r.exit === 0) { out(`  ✓ ${r.kind}${r.note ? ` (${r.note})` : ''}`); continue; }
           out(`  ✗ ${r.kind} — exit ${r.exit}${r.note ? ` (${r.note})` : ''}\n${String(r.tail || '').split('\n').slice(-20).map(l => '    ' + l).join('\n')}`);
@@ -4239,6 +4326,9 @@ const commands = {
         if (!failed.length) out(`  (full output of every check is recorded in work.json — options.verifyVerbose true prints it here)`);
       }
       if (skippedBaseline) out(`NOTE: baseline check SKIPPED — reason recorded: ${skippedBaseline}`);
+      const gateOnly = r => String(r.kind).startsWith('gate:') || (String(r.kind).startsWith('baseline:') && !!gateCmds(cfg)[String(r.kind).slice(9)] && !(cfg.verify || {})[String(r.kind).slice(9)]);
+      if (!passed && failed.every(gateOnly))
+        out(`NOTE: only gate lane(s) failed (${failed.map(r => r.kind).join(', ')}). The task's own checks are green: this is a regression somewhere in the milestone, not necessarily this task — record a discovery, find the task that broke it (the lane passed at the last full verify), fix it there.`);
       out(passed ? `\n${item.id}: verification PASSED` : `\n${item.id}: verification FAILED`);
       if (!passed) process.exit(1);
 
@@ -4280,7 +4370,7 @@ const commands = {
       if ((testerRule === 'warn' || testerRule === 'high-risk') && !hasTester && !testerWaived && (item.criteria || []).length && testLane * 2 > item.criteria.length)
         out(`TESTER WARNING: most of '${item.id}''s criteria are tests, and no forge-tester was dispatched (options.requireTester=${testerRule}). Turn off: forge config set options.requireTester false`);
       // 1.2/F5: red-first — green-before, green-after, nothing changed ⇒ the checks proved nothing
-      const checked = (item.preState || []).filter(Boolean);
+      const checked = (item.preState || []).filter(p => p && p.exit !== null && p.exit !== undefined); // v0.22.1: a check cut at start proves nothing either way
       if (checked.length && checked.every(p => p.exit === 0) && item.startTree && now && item.startTree === now)
         die(`Refused: every criterion check already passed BEFORE work started, and the tree is unchanged since start.\n` +
             `These checks prove nothing about this item. Either the item was already satisfied (forge task cancel ${item.id} --reason "already satisfied")\n` +
@@ -4333,6 +4423,7 @@ const commands = {
         try {
           const uc = readJson(USAGE_CACHE, null);
           if (sid && uc && uc.files) for (const [f, rec] of Object.entries(uc.files)) if (f.includes(sid) && rec.session && !rec.side && rec.model) { model = rec.model; break; }
+          if (!model && uc && uc.itemMain && uc.itemMain[item.id] && uc.itemMain[item.id].byModel) { const bm = Object.entries(uc.itemMain[item.id].byModel).sort((a, b) => b[1] - a[1]); if (bm.length) model = bm[0][0]; }
         } catch (_) { }
         item.closed = { ts: ts(), forgeVersion: VERSION, session: sid, model };
       }
@@ -4383,6 +4474,7 @@ const commands = {
       if (item.milestone && milestoneComplete(w, item.milestone) && !((w.gates || {})[item.milestone] || {}).approved
           && ((loadConfig() || {}).options || {}).gates !== 'end-only')
         out(`\nMILESTONE '${milestoneLabel(w, item.milestone)}' IS COMPLETE and now awaits human review.\n` +
+            (Object.keys(gateCmds(loadConfig() || {})).length ? `First the gate run — every lane over the finished slice: forge milestone verify ${item.milestone}   (approve refuses without it)\n` : '') +
             `Demo it to the user, collect their verdict, AND ask: "anything you want to change or add before the next milestone?"\n` +
             `— their answer becomes decisions + work-graph updates. Then: forge milestone approve ${item.milestone} --note "..."\n` +
             `Items in later milestones will refuse to start until then.\n` +
@@ -5407,9 +5499,10 @@ const commands = {
   baseline() {
     const cfg = loadConfig();
     if (!cfg || !Object.keys(cfg.verify || {}).length) die('Baseline needs verify commands in forge/config.json.');
+    const allCmds = Object.assign({}, cfg.verify, gateCmds(cfg)); // v0.22.1: gate lanes are part of the baseline too
     const sub = argv[1];
     if (sub === 'capture') {
-      const results = Object.entries(cfg.verify).map(([k, cmd]) => Object.assign({ kind: k }, run(cmd)));
+      const results = Object.entries(allCmds).map(([k, cmd]) => Object.assign({ kind: k }, run(cmd)));
       writeJson(BASELINE_FILE, { ts: ts(), results });
       // P3: brownfield projects that skip the spec phase must still get build-phase gates
       if (cfg.phase === 'spec') {
@@ -5622,11 +5715,11 @@ const commands = {
       const firstPassN = fpItems.length;
       const totalFails = done.reduce((a, i) => a + failsOf(i), 0);
       const corrected = done.filter(i => failsOf(i) === 0 && !firstPass(i)).length;
-      const reviewFails = done.reduce((a, i) => a + i.attempts.filter(x => x.outcome === 'failed' && x.kind === 'review').length, 0);
+      const reviewFails = done.reduce((a, i) => a + i.attempts.filter(x => x.outcome === 'failed' && failKind(x) === 'review').length, 0);
       out(`\n## Outcomes (${done.length} DONE)`);
       out(`  First-pass rate: ${firstPassN}/${done.length} (${Math.round(100 * firstPassN / done.length)}%) — done with zero failed attempts and no mid-flight correction from review findings` +
           (corrected ? ` (${corrected} corrected mid-flight)` : ''));
-      if (totalFails) out(`  Failed attempts by kind: ${totalFails - reviewFails} worker (verify/stall) · ${reviewFails} review (checks passed, reviewer rejected)`);
+      if (totalFails) out(`  Failed attempts by kind: ${totalFails - reviewFails} worker (verify/stall) · ${reviewFails} review (checks passed, reviewer rejected${done.some(i => i.attempts.some(x => x.outcome === 'failed' && !x.kind)) ? '; attempts recorded before v0.22 are classified from their diagnosis note' : ''})`);
       // v0.22: first-pass only compares like with like — split by the review tier the item went through
       {
         const tiers = {};
@@ -6143,6 +6236,13 @@ const commands = {
       }
       const remote = hasRemote(cfgS) ? gc.remote : null;
       if (!remote) die(`Refused: no '${gc.remote}' remote — a milestone PR needs a pushed branch.`);
+      // v0.22.1: CI runs on every task push when the workflow listens to milestone/** — a red latest run is a known regression
+      {
+        const ci = ciStatus(b);
+        if (ci && ci.status === 'completed' && ci.conclusion && ci.conclusion !== 'success' && !opt('reason'))
+          die(`Refused: the latest CI run on '${b}' is ${ci.conclusion}${ci.url ? ` — ${ci.url}` : ''}.\nFix the regression as a task first, or ship anyway with --reason "..." (recorded).`);
+        if (ci && ciLine(ci)) out(ciLine(ci));
+      }
       const push = git(['push', '-u', remote, b]);
       if (push.code !== 0) die(`Refused: pushing '${b}' failed:\n${push.err}`);
       git(['fetch', remote, gc.base]);
@@ -6265,6 +6365,39 @@ const commands = {
       appendMd(DECISIONS_FILE, '# Decisions log (append-only, via forge CLI)',
         `\n### ${ts()} — Milestone '${milestoneLabel(w, m)}' reordered\n- Authority: human\n- Decision: moved ${opt('before') ? 'before' : 'after'} '${target}'${pulled.length ? `; pulled forward: ${pulled.map(p => `${p.id} (from ${p.from})`).join(', ')}` : ''}\n- Why: ${opt('reason')}\n`);
       out(`Milestone ${m} moved to position ${next.indexOf(m) + 1}.` + (pulled.length ? `\nPulled into ${m}: ${pulled.map(p => `${p.id} (from ${p.from})`).join(', ')}` : ''));
+    } else if (sub === 'verify') {
+      // v0.22.1: the gate run — every lane (verify.* and gate.*) over the finished milestone, recorded on the gate.
+      // approve refuses without a passing one when gate lanes are configured; the run is a session boundary
+      // for the tree: nothing else should be editing while it runs (the verify lock serialises verifies only).
+      const m = argv[2];
+      if (!m || !milestoneSeq(w).includes(m)) die(`Unknown milestone '${m || ''}'. See: forge milestone list`);
+      const cfgV = loadConfig() || {};
+      const lanes = Object.assign({}, cfgV.verify || {}, gateCmds(cfgV));
+      if (!Object.keys(lanes).length) die('No verify or gate commands configured.');
+      const open = w.order.filter(id => w.items[id].milestone === m && w.items[id].status === 'IN_PROGRESS');
+      if (open.length && !flag('force')) die(`Refused: ${open.join(', ')} still IN_PROGRESS in '${m}' — a gate run tests a finished slice. Settle them first (or --force).`);
+      releaseWorkLock();
+      acquireVerifyLock(`milestone:${m}`, flag('no-wait'));
+      const results = [];
+      for (const [k, cmd] of Object.entries(cfgV.verify || {})) results.push(Object.assign({ kind: `project:${k}` }, run(cmd)));
+      for (const [k, cmd] of Object.entries(gateCmds(cfgV))) results.push(Object.assign({ kind: `gate:${k}` }, run(cmd)));
+      if (fs.existsSync(BASELINE_FILE)) for (const r of baselineCompare(cfgV, true)) results.push(r);
+      const tree = treeState();
+      releaseVerifyLock();
+      acquireWorkLock();
+      const wNow = readJson(WORK_FILE, w); ensureMilestones(wNow);
+      const passed = results.every(r => r.exit === 0);
+      wNow.gates[m] = Object.assign({}, wNow.gates[m], { verify: { ts: ts(), passed, tree, head: gitHead(), results, durationMs: results.reduce((a, r) => a + (r.ms || 0), 0) } });
+      saveWork(wNow);
+      const failed = results.filter(r => r.exit !== 0);
+      out(`GATE VERIFY ${m} — ${passed ? 'PASS' : 'FAIL'} ${results.length - failed.length}/${results.length} · ${Math.round(results.reduce((a, r) => a + (r.ms || 0), 0) / 1000)}s`);
+      for (const r of results) {
+        if (r.exit === 0) { out(`  ✓ ${r.kind}${r.note ? ` (${r.note})` : ''}`); continue; }
+        out(`  ✗ ${r.kind} — exit ${r.exit}${r.note ? ` (${r.note})` : ''}\n${String(r.tail || '').split('\n').slice(-20).map(l => '    ' + l).join('\n')}`);
+      }
+      if (!passed) { out(`\nA red gate lane is a regression somewhere in '${m}': each task commit is on the branch, so bisect them (git bisect, or re-run the lane at each item commit — forge task show <id> has the sha), fix it as a task (--origin discovery), then run this again.`); process.exit(1); }
+      out(`\nRecorded on the gate. Next: the security pass if not done, the demo, then forge milestone approve ${m}.`);
+
     } else if (sub === 'security') {
       // v0.8: record the milestone security review (fresh-context reviewer over the slice's diff)
       const m = argv[2];
@@ -6322,6 +6455,21 @@ const commands = {
               `Or skip deliberately: forge milestone approve ${m} --skip-security --reason "..." — or disable for this project: forge config set options.security off`);
         }
       }
+      // v0.22.1: with gate lanes configured, the gate run must have passed on the tree as it is now
+      let gateSkip = null;
+      {
+        const cfgA = loadConfig() || {};
+        if (Object.keys(gateCmds(cfgA)).length) {
+          const gv = (w.gates[m] || {}).verify;
+          const current = gv && gv.passed && gv.tree && treeState() && gv.tree === treeState();
+          if (!current) {
+            if (flag('skip-gate')) { if (!opt('reason')) die('--skip-gate requires --reason "..." (recorded in the decisions log).'); gateSkip = opt('reason'); }
+            else die(`Refused: milestone '${m}' has no passing gate verification for the current tree (gate lanes: ${Object.keys(gateCmds(cfgA)).join(', ')}).\n` +
+                     `  forge milestone verify ${m}\n` +
+                     `Or skip deliberately: forge milestone approve ${m} --skip-gate --reason "..."`);
+          }
+        }
+      }
       // v0.16.2: the milestone's commit range — from the previous approved gate's head
       // (contiguous ranges), else from the earliest recorded item start, to HEAD now.
       let mBase = null;
@@ -6333,10 +6481,10 @@ const commands = {
         if (starts.length) mBase = starts[0].b;
       }
       const mCommits = commitRange(mBase, gitHead());
-      w.gates[m] = Object.assign({}, w.gates[m], { approved: true, ts: ts(), note: opt('note') || null, securitySkipped: secSkip, commits: mCommits || undefined });
+      w.gates[m] = Object.assign({}, w.gates[m], { approved: true, ts: ts(), note: opt('note') || null, securitySkipped: secSkip, gateSkipped: gateSkip || undefined, commits: mCommits || undefined });
       saveWork(w);
       appendMd(DECISIONS_FILE, '# Decisions log (append-only, via forge CLI)',
-        `\n### ${ts()} — Milestone '${m}' approved\n- Authority: human\n- Decision: milestone gate approved after human review${secSkip ? ` (SECURITY REVIEW SKIPPED: ${secSkip})` : ''}\n- Why: ${opt('note') || '(no note recorded)'}\n`);
+        `\n### ${ts()} — Milestone '${m}' approved\n- Authority: human\n- Decision: milestone gate approved after human review${secSkip ? ` (SECURITY REVIEW SKIPPED: ${secSkip})` : ''}${gateSkip ? ` (GATE VERIFY SKIPPED: ${gateSkip})` : ''}\n- Why: ${opt('note') || '(no note recorded)'}\n`);
       freezeLabels(w); saveWork(w);
       out(`Milestone ${computeLabels(w).milestone[m]} '${milestoneLabel(w, m)}' approved — later milestones may now start.`);
       {
@@ -6361,7 +6509,7 @@ const commands = {
       w.gates[m] = { approved: false, ts: ts(), note: `REOPENED: ${opt('reason')}` };
       saveWork(w);
       out(`Milestone '${m}' gate reopened: ${opt('reason')} — items in later milestones are blocked again.`);
-    } else die('Usage: forge milestone list | add <id> --name "..." [--demo] [--before|--after <M>] | update <id> [--name] [--demo] | move <id> --before|--after <M> [--pull-deps] --reason "..." | remove <id> --reason "..." | security <id> --agent <a> --note "..." | approve <id> [--note "..."] [--skip-security --reason "..."] | reopen <id> --reason "..."');
+    } else die('Usage: forge milestone list | add <id> --name "..." [--demo] [--before|--after <M>] | update <id> [--name] [--demo] | move <id> --before|--after <M> [--pull-deps] --reason "..." | remove <id> --reason "..." | verify <id> [--force] | security <id> --agent <a> --note "..." | approve <id> [--note "..."] [--skip-security --reason "..."] [--skip-gate --reason "..."] | reopen <id> --reason "..."');
   },
 
   // -- dashboard ----------------------------------------------------------------
@@ -6428,6 +6576,19 @@ const commands = {
           // v0.19: a plan behind the installed Forge's standards is mentioned once — never acted on unasked
           try { const openU = upgradeStatus().filter(x => !x.done);
             if (openU.length) ns += `\n\nPlan standards: ${openU.length} open for Forge v${VERSION} (${openU.map(x => x.id).join(', ')}). Mention it to the user in one line after the next step ("forge upgrade shows what a newer Forge would reshape"); automatic steps are safe to apply between items, judgement steps only with their go.`; } catch (_) { }
+          // v0.22.1: the latest CI run on the active milestone's branch — a red one is a regression to handle first
+          try {
+            const brNS = currentBranch();
+            const mNS = activeMilestone(wNS) || awaiting[0] || null;
+            const onMilestoneBranch = brNS && milestoneSeq(wNS).some(m => milestoneBranch(cfgNS, m) === brNS);
+            const ciBranch = perMilestone(cfgNS) ? (onMilestoneBranch ? brNS : (mNS ? milestoneBranch(cfgNS, mNS) : null)) : null;
+            if (ciBranch) {
+              const ci = ciStatus(ciBranch);
+              if (ci && ci.status === 'completed' && ci.conclusion && ci.conclusion !== 'success')
+                ns += `\n\nCI IS RED on ${ciBranch} (${ci.conclusion}${ci.sha ? `, commit ${ci.sha.slice(0, 7)}` : ''}${ci.url ? `, ${ci.url}` : ''}). That commit is one task's; before new work, record a discovery, open a fix task (--origin discovery --parent <that task>) and fix it — milestone ship refuses while the latest run is red.`;
+              else if (ci && ciLine(ci)) ns += `\n\n${ciLine(ci)}`;
+            }
+          } catch (_) { }
           parts.push('## YOUR NEXT STEP (tell the user this in plain language, first thing)\n' + ns +
             '\n\n📊 Remind the user when useful: `forge/dashboard.html` (open in a browser) is the visual picture of the whole project — progress, milestones, components, telemetry. It updates itself.');
         } catch (_) { /* guidance is best-effort; never break session start */ }
@@ -6642,7 +6803,9 @@ const commands = {
       // A worker older than options.workerMaxMinutes (default 90) no longer counts as live.
       {
         const live = liveWorkers(w, cfgS);
-        if (live.length && !failedTodo.length && inProg.every(id => live.some(x => x.id === id))) {
+        // v0.22.1: ANY live worker is enough — a task waiting on another task's worker (a flake fix, a
+        // dependency) cannot be settled either, and the nudge only costs an orchestrator turn
+        if (live.length && !failedTodo.length) {
           traceEvent({ outcome: 'ok', hook: 'stop', autopilot: 'worker-live', inProgress: inProg, workers: live.map(x => x.id) });
           releaseLock(); process.exit(0);
         }
@@ -6710,7 +6873,7 @@ const commands = {
     out(`forge — Forge v0 state CLI
   init [--project name]                  create forge/ state (idempotent)
   preflight [--full]                     check git, verify commands, graphify, playwright
-  config get [path] | set <path> <val>   read/write forge config
+  config get [path] | set <path> <val> | unset <path>   read/write forge config (gate.* = lanes run at the milestone gate, v0.22.1)
   task add --id T1 --title .. --objective .. [--milestone M1] [--deps A,B]
            [--criterion "desc::check-cmd"]... [--allowed glob,..] [--forbidden glob,..] [--mock spec/mocks/x.png]
            [--origin plan|split|review|discovery|human --parent <id>]   (v0.22: where the task came from)

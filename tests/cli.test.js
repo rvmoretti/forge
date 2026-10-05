@@ -2488,6 +2488,12 @@ test('v0.22: first-pass — a review rejection is a failed attempt of kind revie
   assert.match(dash, /1\/3 · no failed attempt, no mid-flight correction · 1 corrected/);
   assert.match(dash, /failed attempt\(s\) · 0 worker · 1 review/);
   assert.match(dash, /LAST 7 DAYS<\/div><div class="pv">3 done <small>· 3 added/);
+  // a failure recorded before v0.22 (no kind) is classified from its note
+  addItem('R5'); forge(['task', 'start', 'R5']); forge(['task', 'fail', 'R5', '--note', 'Review (opus) REJECT, blocker B1: race']);
+  forge(['task', 'start', 'R5']); touch('r5.txt'); forge(['task', 'verify', 'R5']); forge(['task', 'done', 'R5']);
+  const wf = JSON.parse(fs.readFileSync(path.join(dir, 'forge', 'state', 'work.json'), 'utf8'));
+  delete wf.items.R5.attempts.find(a => a.outcome === 'failed').kind; fs.writeFileSync(path.join(dir, 'forge', 'state', 'work.json'), JSON.stringify(wf));
+  assert.match(forge(['stats']).out, /Failed attempts by kind: 0 worker \(verify\/stall\) · 2 review \(checks passed, reviewer rejected; attempts recorded before v0.22 are classified from their diagnosis note\)/);
   // a message that looks like findings but is not flagged gets a note, not a correction
   addItem('R4'); forge(['task', 'start', 'R4']); forge(['task', 'dispatch', 'R4', '--agent', 'forge-implementer', '--model', 'sonnet']);
   r = forge(['task', 'dispatch', 'R4', '--kind', 'message', '--note', 'review F3: fix the import']);
@@ -2701,6 +2707,12 @@ test('v0.22: usage attributes cost to tasks and rolls it up by Forge version, or
   assert.match(r.out, /By Forge version/);
   assert.match(r.out, new RegExp(w1.items.U1.closed.forgeVersion.replace(/\./g, '\\.') + '\\s+2 done · first-pass 100%'));
   assert.match(r.out, /claude-opus-5-5\s+2 done/);
+  // a task closed without a stamp is grouped under the orchestrator model observed during its window
+  const wo = JSON.parse(fs.readFileSync(path.join(dir, 'forge', 'state', 'work.json'), 'utf8'));
+  delete wo.items.U1.closed; fs.writeFileSync(path.join(dir, 'forge', 'state', 'work.json'), JSON.stringify(wo));
+  const r2 = forge(['usage'], { env: { FORGE_CLAUDE_PROJECTS: root } });
+  assert.match(r2.out, /claude-opus-5-5 \(observed\)\s+1 done/);
+  assert.match(r2.out, /claude-opus-5-5\s+1 done/);
   assert.match(r.out, /M1\s+2 done/);
   assert.match(r.out, /all\s+2 done/);
   // cost: U1 = 2 worker calls + 4 main; U2 = 2 main → 4 calls/task on average
@@ -2713,4 +2725,138 @@ test('v0.22: usage attributes cost to tasks and rolls it up by Forge version, or
   assert.match(dash, /Per task by Forge version/);
   assert.match(dash, /Per task by orchestrator model/);
   assert.match(dash, /Per task by milestone/);
+});
+
+test('v0.22.1: gate lanes — verify.* on every task, gate.* on --full, after a high-risk task, every Nth task and at the gate; approve needs the gate run; config unset', () => {
+  const marker = path.join(dir, 'gate-ran.txt');
+  forge(['config', 'set', 'gate.e2e', `node -e "require('fs').appendFileSync('${marker}','x')"`]);
+  addItem('G1', ['--milestone', 'M1', '--allowed', 'g1/']); addItem('G2', ['--milestone', 'M1', '--allowed', 'g2/', '--deps', 'G1']);
+  addItem('G3', ['--milestone', 'M1', '--allowed', 'g3/', '--deps', 'G2']); addItem('G4', ['--milestone', 'M1', '--allowed', 'g4/', '--deps', 'G3', '--domain', 'payments']);
+  // G1: plain verify does not run the gate lane
+  forge(['task', 'start', 'G1']); touch('g1.txt');
+  let r = forge(['task', 'verify', 'G1']);
+  assert.strictEqual(r.code, 0, r.out); assert.match(r.out, /gate lanes \(e2e\) run at the milestone gate/); assert.ok(!fs.existsSync(marker));
+  forge(['task', 'done', 'G1']);
+  // --full runs it and records why
+  forge(['task', 'start', 'G2']); touch('g2.txt');
+  r = forge(['task', 'verify', 'G2', '--full']);
+  assert.match(r.out, /FULL \(gate lanes included: requested \(--full\)\)/); assert.strictEqual(fs.readFileSync(marker, 'utf8'), 'x');
+  assert.strictEqual(work().items.G2.verifications[0].full, true);
+  forge(['task', 'done', 'G2']);
+  // every Nth task: N=1 → the next task's verify is full on its own
+  forge(['config', 'set', 'options.fullVerifyEvery', '1']);
+  forge(['task', 'start', 'G3']); touch('g3.txt');
+  r = forge(['task', 'verify', 'G3']);
+  assert.match(r.out, /FULL \(gate lanes included: 1 task\(s\) closed since the last full verification/); assert.strictEqual(fs.readFileSync(marker, 'utf8'), 'xx');
+  forge(['task', 'done', 'G3']);
+  forge(['config', 'unset', 'options.fullVerifyEvery']);
+  assert.strictEqual(JSON.parse(fs.readFileSync(path.join(dir, 'forge', 'config.json'), 'utf8')).options.fullVerifyEvery, undefined);
+  assert.notStrictEqual(forge(['config', 'unset', 'options.fullVerifyEvery']).code, 0);
+  // high-risk task: full without asking
+  forge(['task', 'start', 'G4']); touch('g4.txt');
+  r = forge(['task', 'verify', 'G4']);
+  assert.match(r.out, /FULL \(gate lanes included: high-risk task \(payments\)\)/); assert.strictEqual(fs.readFileSync(marker, 'utf8'), 'xxx');
+  r = forge(['task', 'done', 'G4']);
+  assert.match(r.out, /First the gate run — every lane over the finished slice: forge milestone verify M1/);
+  // approve needs a passing gate run for the current tree
+  forge(['milestone', 'security', 'M1', '--agent', 'forge-reviewer', '--note', 'clean']);
+  r = forge(['milestone', 'approve', 'M1', '--note', 'ok']);
+  assert.notStrictEqual(r.code, 0); assert.match(r.out, /no passing gate verification for the current tree/);
+  r = forge(['milestone', 'verify', 'M1']);
+  assert.strictEqual(r.code, 0, r.out); assert.match(r.out, /GATE VERIFY M1 — PASS 2\/2/); assert.strictEqual(fs.readFileSync(marker, 'utf8'), 'xxxx');
+  assert.strictEqual(work().gates.M1.verify.passed, true);
+  touch('late.txt');                                                                       // the tree moved: the run is stale
+  r = forge(['milestone', 'approve', 'M1', '--note', 'ok']);
+  assert.notStrictEqual(r.code, 0);
+  forge(['milestone', 'verify', 'M1']);
+  r = forge(['milestone', 'approve', 'M1', '--note', 'ok']);
+  assert.strictEqual(r.code, 0, r.out);
+  // a red gate lane names the situation and exits 1; --skip-gate needs a reason and is recorded
+  addItem('H1', ['--milestone', 'M2', '--allowed', 'h1/']);
+  forge(['config', 'set', 'gate.e2e', 'node -e "process.exit(1)"']);
+  forge(['task', 'start', 'H1']); touch('h1.txt'); forge(['task', 'verify', 'H1']); forge(['task', 'done', 'H1']);
+  r = forge(['milestone', 'verify', 'M2']);
+  assert.strictEqual(r.code, 1); assert.match(r.out, /GATE VERIFY M2 — FAIL 1\/2/); assert.match(r.out, /regression somewhere in 'M2'/);
+  forge(['milestone', 'security', 'M2', '--agent', 'forge-reviewer', '--note', 'clean']);
+  assert.notStrictEqual(forge(['milestone', 'approve', 'M2', '--skip-gate']).code, 0);
+  r = forge(['milestone', 'approve', 'M2', '--skip-gate', '--reason', 'known flake, tracked']);
+  assert.strictEqual(r.code, 0, r.out);
+  assert.match(fs.readFileSync(path.join(dir, 'forge', 'decisions.md'), 'utf8'), /GATE VERIFY SKIPPED: known flake, tracked/);
+  // the baseline covers gate lanes but a plain verify does not compare them
+  const failFile = path.join(dir, 'FAIL-E2E');
+  forge(['config', 'set', 'gate.e2e', `node -e "process.exit(require('fs').existsSync('${failFile}')?1:0)"`]);
+  r = forge(['baseline', 'capture']);
+  assert.strictEqual(r.code, 0, r.out);
+  const base = JSON.parse(fs.readFileSync(path.join(dir, 'forge', 'state', 'baseline.json'), 'utf8'));
+  assert.ok(base.results.some(x => x.kind === 'e2e'));
+  addItem('H2', ['--milestone', 'M3', '--allowed', 'h2/']);
+  forge(['task', 'start', 'H2']); touch('h2.txt');
+  r = forge(['task', 'verify', 'H2']);
+  assert.strictEqual(r.code, 0, r.out); assert.doesNotMatch(r.out, /baseline:e2e/);
+  r = forge(['task', 'verify', 'H2', '--full']);
+  assert.match(r.out, /baseline:e2e/);
+  // a verify where only a gate lane fails says it is a regression elsewhere
+  fs.writeFileSync(failFile, '1');
+  r = forge(['task', 'verify', 'H2', '--full']);
+  assert.notStrictEqual(r.code, 0); assert.match(r.out, /only gate lane\(s\) failed \(gate:e2e, baseline:e2e\)/);
+});
+
+test('v0.22.1: red-first checks are capped — a slow criterion is recorded as not run, never as green, and does not weaken the done guard', () => {
+  forge(['config', 'set', 'options.redFirstTimeoutSec', '1']);
+  forge(['task', 'add', '--id', 'S1', '--title', 's', '--allowed', 'src/',
+    '--criterion', 'fast::node -e "process.exit(0)"',
+    '--criterion', 'slow::node -e "setTimeout(()=>process.exit(0),3000)"']);
+  const t0 = Date.now();
+  const r = forge(['task', 'start', 'S1']);
+  assert.strictEqual(r.code, 0, r.out);
+  assert.ok(Date.now() - t0 < 2500, 'start did not wait for the slow check');
+  assert.match(r.out, /1 criterion check\(s\) ran past 1s at start and were cut/);
+  assert.match(r.out, /- slow/);
+  const ps = work().items.S1.preState;
+  assert.strictEqual(ps[0].exit, 0); assert.strictEqual(ps[1].exit, null); assert.strictEqual(ps[1].timedOut, true);
+  // the fast check was green before work and the tree is unchanged: done still refuses (the cut check adds no proof)
+  forge(['config', 'set', 'options.redFirstTimeoutSec', '30']);
+  forge(['task', 'verify', 'S1']);
+  const d = forge(['task', 'done', 'S1']);
+  assert.notStrictEqual(d.code, 0); assert.match(d.out, /already passed BEFORE work started/);
+});
+
+test('v0.22.1: the Stop hook is quiet when ANY in-progress task has a live worker, and a review dispatched about a task counts', () => {
+  addItem('A', ['--milestone', 'M1', '--allowed', 'a/']); addItem('B', ['--milestone', 'M1', '--allowed', 'b/']);
+  forge(['config', 'set', 'options.concurrency', '2']); forge(['autopilot', 'on']);
+  forge(['task', 'start', 'A']); touch('a.txt'); forge(['task', 'verify', 'A']);           // A: verified, no worker now
+  forge(['task', 'start', 'B']); forge(['task', 'dispatch', 'B', '--agent', 'forge-tester', '--model', 'sonnet']);
+  let h = hook('stop', { session_id: 's' });
+  assert.strictEqual(h.code, 0, h.out);                                                      // B's worker is live: A waits with it
+  assert.match(fs.readFileSync(path.join(dir, 'forge', 'state', 'trace.jsonl'), 'utf8'), /"workers":\["B"\]/);
+  touch('b.txt'); forge(['task', 'verify', 'B']);
+  h = hook('stop', { session_id: 's' }); assert.strictEqual(h.code, 2);                     // nobody live: nudge
+  forge(['dispatch', '--agent', 'forge-reviewer', '--purpose', 'review', '--item', 'A', '--model', 'sonnet']);
+  h = hook('stop', { session_id: 's' }); assert.strictEqual(h.code, 0, h.out);              // the review about A is a live worker
+  forge(['dashboard']);
+  assert.match(fs.readFileSync(path.join(dir, 'forge', 'dashboard.html'), 'utf8'), /A<\/code> → forge-reviewer running/);
+});
+
+test('v0.22.1: CI on the milestone branch — session start reports a red run as the first thing to fix; ship refuses on it without a reason', () => {
+  gitFlowProject();
+  const { gh, log } = fakeGh();
+  const script = fs.readFileSync(gh, 'utf8').replace('case "$1 $2" in', 'case "$1 $2" in\n  "run list") cat "$(dirname "$0")/runs.json" ;;');
+  fs.writeFileSync(gh, script);
+  const runs = path.join(path.dirname(gh), 'runs.json');
+  fs.writeFileSync(runs, JSON.stringify([{ status: 'completed', conclusion: 'failure', headSha: 'abc1234def', url: 'https://github.com/acme/app/actions/runs/9', name: 'CI', createdAt: '2026-10-05T00:00:00Z' }]));
+  addItem('A', ['--milestone', 'M1']);
+  forge(['milestone', 'branch', 'M1']);
+  forge(['task', 'start', 'A']); fs.writeFileSync(path.join(dir, 'src', 'a.js'), 'a'); forge(['task', 'verify', 'A']); forge(['task', 'done', 'A']);
+  let h = hook('session-start', { session_id: 's9' });
+  // the hook runs status as a child process: FORGE_GH must reach it
+  const r0 = spawnSync(process.execPath, [CLI, 'hook', 'session-start'], { cwd: dir, encoding: 'utf8', input: '{"session_id":"s9"}', env: Object.assign({}, process.env, { CLAUDE_PROJECT_DIR: dir, FORGE_CLAUDE_PROJECTS: path.join(os.tmpdir(), 'forge-no-such-logs'), FORGE_GH: gh }) });
+  assert.match(r0.stdout, /CI IS RED on milestone\/M1 \(failure, commit abc1234, https:\/\/github.com\/acme\/app\/actions\/runs\/9\)/);
+  forge(['milestone', 'security', 'M1', '--agent', 'forge-reviewer', '--note', 'clean']);
+  forge(['milestone', 'approve', 'M1', '--note', 'ok']);
+  let r = forge(['milestone', 'ship', 'M1'], { env: { FORGE_GH: gh } });
+  assert.notStrictEqual(r.code, 0); assert.match(r.out, /latest CI run on 'milestone\/M1' is failure/);
+  fs.writeFileSync(runs, JSON.stringify([{ status: 'completed', conclusion: 'success', headSha: 'abc1234def', url: 'u', name: 'CI', createdAt: '2026-10-05T00:00:00Z' }]));
+  r = forge(['milestone', 'ship', 'M1'], { env: { FORGE_GH: gh } });
+  assert.strictEqual(r.code, 0, r.out); assert.match(r.out, /CI: success on milestone\/M1 \(abc1234\)/);
+  assert.match(fs.readFileSync(log, 'utf8'), /run list --branch milestone\/M1/);
 });
