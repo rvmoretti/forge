@@ -58,7 +58,11 @@ specifically.
 
 - Ensure `forge/config.json` has the project's real verify commands (ask the
   user or read package.json/CI config to find them; set via
-  `forge config set verify.*`). If the project has NO runnable checks, say so
+  `forge config set verify.*`). **Tier rule (v0.22.2):** the fast lanes go in
+  `verify.*` (every task); any browser/e2e or database suite, or a command over
+  about two minutes, goes in `gate.*` (milestone gate, high-risk tasks, every
+  third task) — `forge preflight` names a misplaced lane from its recorded
+  runs. If the project has NO runnable checks, say so
   plainly: the first work items must create a minimal harness around the code
   being changed — that is a precondition, not overhead.
 - `forge baseline capture`. RED items are recorded as pre-existing: new work

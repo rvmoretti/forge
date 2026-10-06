@@ -42,6 +42,13 @@ At **Step 7** (generate handoff artifacts), in addition to `CLAUDE.md` and
    - `forge config set verify.test "<test command>"`
    - `forge config set verify.lint "<lint command>"` (if the stack has one)
    - `forge config set verify.typecheck "<typecheck command>"` (if typed)
+   - **Tier rule (v0.22.2):** `verify.*` is run on every task, so it holds only
+     the fast lanes. Any browser/e2e or database suite, and any command that
+     takes more than about two minutes, goes in `gate.*` instead — e.g.
+     `forge config set gate.e2e "<e2e command>"` — and runs at the milestone
+     gate, after high-risk tasks and every third task (`options.fullVerifyEvery`,
+     already set by `forge init`). If unsure how long a lane takes, time it once;
+     `forge preflight` reports a misplaced lane from its recorded runs.
    - `forge config set options.web true|false`
    - `forge config set specDir "<spec folder>"`
    - `forge config set phase build`

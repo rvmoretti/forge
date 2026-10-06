@@ -146,7 +146,12 @@ from confirmed goals, milestone cut across everything. Then the same loop.
    which for UI work are *that task's* spec files, never the whole suite. `gate.*`
    holds the slow lanes (the whole e2e suite, the database suite) and runs at the
    milestone gate (`forge milestone verify <M>`), after a high-risk task, every
-   `options.fullVerifyEvery`-th task, and on demand (`task verify --full`). CI runs the
+   `options.fullVerifyEvery`-th task, and on demand (`task verify --full`). **Placing a lane
+   is a rule, not a judgement** (v0.22.2): a command that takes more than about two
+   minutes, or any browser/e2e or database suite, goes in `gate.*` at setup; new projects
+   start with `fullVerifyEvery 3` and the red-first cap on, and `forge preflight`,
+   `forge doctor` and the `verify-tiers` upgrade step name a `verify.*` lane whose recorded
+   runs average over `options.slowLaneSec` (120 s) with the exact move. CI runs the
    whole suite on every task push when the workflow listens to the milestone branches —
    a red run there is a regression to handle first (session start reports it;
    `milestone ship` refuses on it). **A failing check that is not the task's own** —

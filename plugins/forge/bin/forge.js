@@ -347,7 +347,7 @@ function usageFiles(dirs) {
 }
 
 function emptyUsageCache() {
-  return { v: 7, files: {}, models: {}, byType: {}, perItem: {}, byDay: {}, itemMain: {}, mainUnattributed: { calls: 0, ctx: 0, out: 0 },
+  return { v: 8, files: {}, models: {}, byType: {}, perItem: {}, perItemType: {}, byDay: {}, itemMain: {}, mainUnattributed: { calls: 0, ctx: 0, out: 0 },
            dispatches: 0, tied: 0, firstTs: null, lastTs: null, bytes: 0, total: 0, complete: false };
 }
 
@@ -368,6 +368,12 @@ function readTail(file, off) {
   } finally { fs.closeSync(fd); }
 }
 
+// v0.22.2: per-model token counters ({calls, in, out, cc, cr}) kept on each worker transcript and on each
+// task's orchestrator share, so the dashboard can show one milestone's tokens by model without estimating.
+function bump(map, model, calls, inTok, outTok, cc, cr) {
+  const b = (map[model] = map[model] || { calls: 0, in: 0, out: 0, cc: 0, cr: 0 });
+  b.calls += calls; b.in += inTok; b.out += outTok; b.cc += cc; b.cr += cr;
+}
 // Folds one chunk of JSONL into an aggregate. Pure accumulation, so the same
 // function serves the persistent cache and the throwaway tail view.
 function consumeUsage(agg, text, side, knownIdRe, rec) {
@@ -419,13 +425,14 @@ function consumeUsage(agg, text, side, knownIdRe, rec) {
       if (prev.day) agg.byDay[prev.day] = (agg.byDay[prev.day] || 0) + cur.out - prev.out;
       // v0.22: the same correction on the per-transcript and per-item accumulators
       const dctx = (cur.cc + cur.cr + cur.in) - (prev.cc + prev.cr + prev.in), dout = cur.out - prev.out;
-      if (rec) { rec.ctx = (rec.ctx || 0) + dctx; rec.out = (rec.out || 0) + dout; }
-      if (prev.items && prev.items.length) for (const id of prev.items) { const im = agg.itemMain[id]; if (im) { im.ctx += dctx / prev.items.length; im.out += dout / prev.items.length; } }
+      const dIn = cur.in - prev.in, dCc = cur.cc - prev.cc, dCr = cur.cr - prev.cr;
+      if (rec) { rec.ctx = (rec.ctx || 0) + dctx; rec.out = (rec.out || 0) + dout; bump(rec.byModel = rec.byModel || {}, prev.model, 0, dIn, dout, dCc, dCr); }
+      if (prev.items && prev.items.length) for (const id of prev.items) { const im = agg.itemMain[id]; if (im) { im.ctx += dctx / prev.items.length; im.out += dout / prev.items.length; bump(im.byModel = im.byModel || {}, prev.model, 0, dIn / prev.items.length, dout / prev.items.length, dCc / prev.items.length, dCr / prev.items.length); } }
       else if (prev.thread === 'main' && agg.mainUnattributed) { agg.mainUnattributed.ctx += dctx; agg.mainUnattributed.out += dout; }
       holder.lastMsg = Object.assign({}, prev, cur);
     } else {
     const ctx1 = cur.cc + cur.cr + cur.in;
-    if (rec) { rec.calls = (rec.calls || 0) + 1; rec.model = model; rec.ctx = (rec.ctx || 0) + ctx1; rec.out = (rec.out || 0) + cur.out; }
+    if (rec) { rec.calls = (rec.calls || 0) + 1; rec.model = model; rec.ctx = (rec.ctx || 0) + ctx1; rec.out = (rec.out || 0) + cur.out; bump(rec.byModel = rec.byModel || {}, model, 1, cur.in, cur.out, cur.cc, cur.cr); }
     const external = rec ? !!rec.external : (/^sdk/i.test(String(d.entrypoint || '')) && !side);
     const thread = external ? 'external' : (side || d.isSidechain || (rec && rec.workerTop)) ? 'side' : 'main';
     const m = (agg.models[model] = agg.models[model] || {});
@@ -440,7 +447,7 @@ function consumeUsage(agg, text, side, knownIdRe, rec) {
       const x = Date.parse(tsv);
       items = agg.intervals.filter(iv => x >= iv.start && x < iv.end).map(iv => iv.id);
       agg.itemMain = agg.itemMain || {};
-      if (items.length) for (const id of items) { const im = (agg.itemMain[id] = agg.itemMain[id] || { calls: 0, ctx: 0, out: 0, byModel: {} }); im.calls += 1 / items.length; im.ctx += ctx1 / items.length; im.out += cur.out / items.length; im.byModel = im.byModel || {}; im.byModel[model] = (im.byModel[model] || 0) + 1 / items.length; }
+      if (items.length) for (const id of items) { const im = (agg.itemMain[id] = agg.itemMain[id] || { calls: 0, ctx: 0, out: 0, byModel: {} }); const sh = 1 / items.length; im.calls += sh; im.ctx += ctx1 * sh; im.out += cur.out * sh; bump(im.byModel = im.byModel || {}, model, sh, cur.in * sh, cur.out * sh, cur.cc * sh, cur.cr * sh); }
       else { agg.mainUnattributed = agg.mainUnattributed || { calls: 0, ctx: 0, out: 0 }; agg.mainUnattributed.calls++; agg.mainUnattributed.ctx += ctx1; agg.mainUnattributed.out += cur.out; }
     }
     holder.lastMsg = mid ? Object.assign({ id: mid, model, thread, day, items }, cur) : null;
@@ -455,7 +462,7 @@ function consumeUsage(agg, text, side, knownIdRe, rec) {
       if (!itemId && knownIdRe) { const m4 = pr.match(knownIdRe); if (m4) itemId = m4[1]; }
       const ty = (ct.input || {}).subagent_type || 'unknown';
       agg.dispatches++; agg.byType[ty] = (agg.byType[ty] || 0) + 1;
-      if (itemId) { agg.tied++; agg.perItem[itemId] = (agg.perItem[itemId] || 0) + 1; }
+      if (itemId) { agg.tied++; agg.perItem[itemId] = (agg.perItem[itemId] || 0) + 1; const pt = ((agg.perItemType = agg.perItemType || {})[itemId] = agg.perItemType[itemId] || {}); pt[ty] = (pt[ty] || 0) + 1; }
     }
   }
 }
@@ -464,7 +471,7 @@ function collectUsage(opts = {}) {
   const budgetMs = opts.budgetMs || 0;
   const t0 = Date.now();
   let c = opts.rescan ? null : readJson(USAGE_CACHE, null);
-  if (!c || c.v !== 7) c = emptyUsageCache(); // v0.17.1: v4 separates external sessions · v0.21: v5 counts one call per message id · v0.22: v6 attributes calls to tasks · v0.22.1: v7 keeps the orchestrator model per task
+  if (!c || c.v !== 8) c = emptyUsageCache(); // v0.17.1: v4 separates external sessions · v0.21: v5 counts one call per message id · v0.22: v6 attributes calls to tasks · v0.22.1: v7 keeps the orchestrator model per task · v0.22.2: v8 keeps per-model tokens per transcript and per task (the milestone view)
   const dirs = usageDirs(opts.rescan ? null : c.dirs);
   if (!dirs) return null;
   c.dirs = dirs;
@@ -687,6 +694,48 @@ function usageSince(m, base) {
   return d;
 }
 
+// a byModel entry is a count (cache v7) or a counter object (v8)
+function modelCalls(b) { return typeof b === 'number' ? b : ((b || {}).calls || 0); }
+// v0.22.2: the token panel per milestone. A worker transcript is tied to a task, so to the task's
+// milestone; the orchestrator's calls while a task was in progress belong to that milestone too.
+// Everything else — briefs, planning, gates, worker transcripts with no task tie — is outside every
+// milestone and reported as such, never spread.
+function usageByMilestone(c, w) {
+  const items = (w || {}).items || {};
+  const msOf = id => (items[id] ? (items[id].milestone || '(none)') : null);
+  const groups = {};
+  const slot = m => (groups[m] = groups[m] || { models: {}, mainOut: 0, sideOut: 0, mainCalls: 0, sideCalls: 0, ctx: 0, byType: {}, dispatches: [], items: 0, done: 0 });
+  const addM = (g, model, thread, b) => {
+    const mm = (g.models[model] = g.models[model] || {}); const t = (mm[thread] = mm[thread] || { calls: 0, in: 0, out: 0, ctx: 0 });
+    const cx = (b.in || 0) + (b.cc || 0) + (b.cr || 0);
+    t.calls += b.calls || 0; t.in += b.in || 0; t.out += b.out || 0; t.ctx += cx; g.ctx += cx;
+    if (thread === 'main') { g.mainOut += b.out || 0; g.mainCalls += b.calls || 0; } else { g.sideOut += b.out || 0; g.sideCalls += b.calls || 0; }
+  };
+  const outside = { workerFiles: 0, workerCalls: 0, workerOut: 0, mainCalls: Math.round(((c || {}).mainUnattributed || {}).calls || 0), mainCtx: ((c || {}).mainUnattributed || {}).ctx || 0 };
+  for (const rec of Object.values((c || {}).files || {})) {
+    if (rec.external || !(rec.side || rec.workerTop) || !(rec.calls > 0)) continue;
+    const m = rec.item ? msOf(rec.item) : null;
+    if (!m) { outside.workerFiles++; outside.workerCalls += rec.calls || 0; outside.workerOut += rec.out || 0; continue; }
+    const g = slot(m); g.dispatches.push(rec.calls);
+    if (rec.byModel) for (const [model, b] of Object.entries(rec.byModel)) addM(g, model, 'side', b);
+    else addM(g, rec.model || 'unknown', 'side', { calls: rec.calls, in: rec.ctx || 0, out: rec.out || 0 }); // v7 record: context as one figure
+  }
+  for (const [id, im] of Object.entries((c || {}).itemMain || {})) {
+    const m = msOf(id); if (!m) continue; const g = slot(m);
+    for (const [model, b] of Object.entries(im.byModel || {})) addM(g, model, 'main', typeof b === 'number' ? { calls: b } : b);
+  }
+  for (const [id, byT] of Object.entries((c || {}).perItemType || {})) { const m = msOf(id); if (!m) continue; const g = slot(m); for (const [ty, n] of Object.entries(byT)) g.byType[ty] = (g.byType[ty] || 0) + n; }
+  for (const id of ((w || {}).order || [])) { const g = slot(msOf(id)); g.items++; if (items[id].status === 'DONE') g.done++; }
+  const q = (arr, p2) => arr.length ? arr[Math.min(arr.length - 1, Math.floor(arr.length * p2))] : null;
+  for (const g of Object.values(groups)) {
+    const per = g.dispatches.sort((a, b) => a - b);
+    g.callsPerDispatch = { median: q(per, 0.5), p90: q(per, 0.9), max: per.length ? per[per.length - 1] : null, n: per.length };
+    delete g.dispatches;
+    g.calls = g.mainCalls + g.sideCalls; g.out = g.mainOut + g.sideOut;
+    g.perDone = g.done ? { calls: g.calls / g.done, ctx: g.ctx / g.done, out: g.out / g.done } : null;
+  }
+  return { groups, outside };
+}
 // v0.22: per-task cost (worker transcripts tied to the task + orchestrator calls made while it was in
 // progress) rolled up by Forge version, orchestrator model, milestone and in total. Each DONE item is
 // stamped at close (item.closed: forgeVersion, model) so the groups need no transcript archaeology.
@@ -698,7 +747,7 @@ function usageRollup(c, w) {
     const p = slot(rec.item).worker; p.calls += rec.calls || 0; p.ctx += rec.ctx || 0; p.out += rec.out || 0;
   }
   for (const [id, im] of Object.entries((c || {}).itemMain || {})) { const p = slot(id).main; p.calls += im.calls || 0; p.ctx += im.ctx || 0; p.out += im.out || 0;
-    const bm = Object.entries(im.byModel || {}).sort((a, b) => b[1] - a[1]); if (bm.length) perItem[id].observedModel = bm[0][0]; }
+    const bm = Object.entries(im.byModel || {}).sort((a, b) => modelCalls(b[1]) - modelCalls(a[1])); if (bm.length) perItem[id].observedModel = bm[0][0]; }
   const groups = { version: {}, model: {}, milestone: {}, total: {} };
   const add = (g, k, t, p) => {
     const r = (groups[g][k] = groups[g][k] || { items: 0, fp: 0, calls: 0, ctx: 0, out: 0, mainCalls: 0, costed: 0, models: {}, versions: {} });
@@ -733,11 +782,12 @@ function usageSnapshot(c) {
       return w2.order.filter(id => w2.items[id].status === 'DONE').length; } catch (_) { return 0; }
   })();
   const metrics = usageMetrics(c, doneCount);
-  let rollup = null; try { rollup = usageRollup(c, readJson(WORK_FILE, { items: {}, order: [] })); } catch (_) { }
+  let rollup = null, byMilestone = null;
+  try { const wS = readJson(WORK_FILE, { items: {}, order: [] }); rollup = usageRollup(c, wS); byMilestone = usageByMilestone(c, wS); } catch (_) { }
   return { ts: ts(), models: c.models, dispatches: c.dispatches, byType: c.byType,
            mainOut, sideOut, complete: !!c.complete,
            scanPct: c.total ? Math.round(100 * c.bytes / c.total) : 100,
-           metrics, since: usageSince(metrics, readJson(USAGE_BASELINE, null)), rollup };
+           metrics, since: usageSince(metrics, readJson(USAGE_BASELINE, null)), rollup, byMilestone };
 }
 
 // Called from the dashboard generator: keeps the token panel current without
@@ -1171,6 +1221,15 @@ const UPGRADE_STEPS = [
       else { const map = (c.options || {}).models || {}; const miss = MODEL_ROLES.filter(r => !map[r]); if (miss.length) f.push(`options.models missing: ${miss.join(', ')} (defaults apply)`); }
       return { done: !f.length, findings: f };
     } },
+  { id: 'verify-tiers', since: '0.22.1', kind: 'review', title: 'Slow suites (e2e, database) run at the milestone gate (gate.*), not on every task (verify.*)',
+    how: 'for each lane named: forge config set gate.<lane> "<cmd>" then forge config unset verify.<lane>; afterwards forge baseline capture (the baseline covers the gate tier) and forge config set options.fullVerifyEvery 3',
+    check(ctx) {
+      const c = loadConfig() || {}; const f = [];
+      if (c.phase !== 'build') return { done: true, findings: [] };
+      for (const sl of slowLanes(c, ctx.raw)) f.push(slowLaneLine(c, sl));
+      if (Object.keys(gateCmds(c)).length && !fullVerifyEvery(c)) f.push('gate.* is set but options.fullVerifyEvery is 0 — a cross-task regression is only caught at the gate: forge config set options.fullVerifyEvery 3');
+      return { done: !f.length, findings: f };
+    } },
   { id: 'architecture', since: '0.19.0', kind: 'review', title: 'The architecture is drafted from the repo, screens belong to their app, and you confirmed it',
     how: 'forge-brownfield skill, "Architecture draft": forge arch scan --write, a forge-explorer pass to name/split/link parts and assign screens, then your confirmation',
     check() {
@@ -1376,6 +1435,7 @@ const CONFIG_DOCS = [
   { key: 'gate.*', def: '—', group: 'Verification', what: 'The slow lanes (the whole e2e suite, the database suite). Not run on every task: at the milestone gate (forge milestone verify), on forge task verify --full, after a high-risk task, and every options.fullVerifyEvery-th task. The baseline covers them too.', change: 'forge config set gate.e2e "npm run test:e2e"   ·   forge config unset verify.e2e', why: 'A suite that takes minutes ran on every task — most of a session\'s wall-clock — and failed on specs that were not the task\'s own. Keep verify.* fast; let CI run the suite on every push.', risk: 'low' },
   { key: 'options.fullVerifyEvery', def: '0 (gate only)', group: 'Verification', what: 'Run the gate lanes inside task verify every Nth task closed in the milestone (plus after any high-risk task).', change: 'forge config set options.fullVerifyEvery 3', why: 'Catch a cross-task regression before the gate without paying the suite on every task. Lower it for tightly coupled milestones.', risk: 'low' },
   { key: 'options.fullVerifyHighRisk', def: 'true', group: 'Verification', what: 'A task tagged auth/data/payments/migrations/security runs the gate lanes in its verify.', change: 'forge config set options.fullVerifyHighRisk false', why: 'Turn off only when the gate lanes are irrelevant to the risky domains.', risk: 'low' },
+  { key: 'options.slowLaneSec', def: '120', group: 'Verification', what: 'A verify.* lane averaging more than this many seconds over its last runs is reported (preflight, doctor, forge upgrade step verify-tiers) as belonging in gate.*.', change: 'forge config set options.slowLaneSec 60', why: 'Tighten when tasks are small and even a one-minute suite per task is too much; loosen for a slow but essential unit suite.', risk: 'none' },
   { key: 'options.redFirstTimeoutSec', def: '120', group: 'Verification', what: 'Cap for each criterion check run at task start (the red-first proof). A check cut by the cap is recorded as not run, never as green.', change: 'forge config set options.redFirstTimeoutSec 60', why: 'A criterion that is a whole test lane took minutes before any work started.', risk: 'low' },
   { key: 'options.verifyVerbose', def: 'false', group: 'Verification', what: 'Print every check\'s full output on verify (default: one line per passing check; the full tail is always kept in state).', change: 'forge config set options.verifyVerbose true', why: 'When you are debugging a check and want its full output on screen.', risk: 'none' },
   { key: 'options.security', def: 'on', group: 'Verification', what: 'Security gate before a milestone is approved and a preflight warning when no verify.security scanner is set. "off" disables both.', change: 'forge config set options.security off', why: 'Leave on; turn off only for throwaway prototypes.', risk: 'none' },
@@ -1423,6 +1483,7 @@ const COMMAND_DOCS = [
     ['forge task verify <id> --full', 'v0.22.1: the gate lanes too (gate.*), on demand.'],
     ['forge milestone verify <M>', 'v0.22.1: every lane over the finished milestone, recorded on the gate; approve needs it when gate.* is set.'],
     ['forge config unset <path>', 'v0.22.1: remove a config key (e.g. move verify.e2e to gate.e2e).'],
+    ['forge config set options.<key> <value> --global', 'v0.22.2: a per-machine default every future forge init starts with (~/.config/forge/defaults.json; get/unset --global too).'],
     ['forge task fail <id> --from-review <file>', 'Fail with the reviewer\'s findings (kind review); the retry brief carries only the latest.'],
     ['forge task dispatch <id> --kind message --findings --note "…"', 'v0.22: review findings sent to a running worker — the attempt no longer counts as first-pass.'],
     ['forge task add … --origin split|review|discovery|human --parent <id>', 'v0.22: where a task came from; a review fix or a split names its parent and sits right after it.'],
@@ -1561,6 +1622,49 @@ function autopilotMode(cfg) { return (((cfg || {}).options) || {}).autopilotMode
 function gateCmds(cfg) { return ((cfg || {}).gate) || {}; }
 function fullVerifyEvery(cfg) { const n = parseInt((((cfg || {}).options) || {}).fullVerifyEvery, 10); return n > 0 ? n : 0; }
 function redFirstTimeoutMs(cfg) { const n = parseFloat((((cfg || {}).options) || {}).redFirstTimeoutSec); return (n > 0 ? n : 120) * 1000; }
+// v0.22.2: the options every NEW project starts with. The verification tiers are a default now, not a
+// per-project setup step: fast lanes per task, a full run every third task, the red-first proof capped.
+function initOptions() {
+  return Object.assign({ graphify: 'unset', web: 'unset', concurrency: 4 }, SWITCH_ON, // v0.20: 4 in parallel · v0.21: delegation switches on for new projects
+    { modelRouting: 'fixed', models: Object.assign({}, MODEL_DEFAULTS), autopilotMode: 'session' }, // v0.22: every worker role pinned to a model id; the orchestrator is the session model
+    { fullVerifyEvery: 3, redFirstTimeoutSec: 120, slowLaneSec: 120 }); // v0.22.2: verification tiers on by default
+}
+// v0.22.2: one defaults file per machine (options only), merged over the built-ins by `forge init` — so a
+// model map or a verification setting chosen once applies to every new project without a command.
+function userDefaultsFile() {
+  return process.env.FORGE_DEFAULTS || path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'), 'forge', 'defaults.json');
+}
+function loadUserDefaults() { const d = readJson(userDefaultsFile(), null); return d && typeof d === 'object' && !Array.isArray(d) ? d : null; }
+function mergeUserDefaults(options, ud) {
+  const applied = [];
+  for (const [k, v] of Object.entries((ud || {}).options || {})) {
+    if (k === 'models' && v && typeof v === 'object') { options.models = Object.assign({}, options.models, v); applied.push(...Object.keys(v).map(r => `models.${r}`)); }
+    else { options[k] = v; applied.push(k); }
+  }
+  return applied;
+}
+// v0.22.2: a verify.* lane that keeps taking longer than options.slowLaneSec (default 120 s) belongs in
+// gate.*. Measured from the recorded verifications (each check carries its ms), last ten runs of the lane.
+const SLOW_LANE_NAME_RE = /^(e2e|db|database|integration|browser|playwright|cypress|acceptance|smoke)$/i;
+function slowLaneSec(cfg) { const n = parseFloat((((cfg || {}).options) || {}).slowLaneSec); return n > 0 ? n : 120; }
+function slowLanes(cfg, w) {
+  const lim = slowLaneSec(cfg) * 1000, res = [];
+  for (const [k, cmd] of Object.entries((cfg || {}).verify || {})) {
+    const obs = [];
+    for (const id of ((w || {}).order || [])) for (const v of ((w.items[id] || {}).verifications || [])) for (const r of (v.results || [])) if (r.kind === `project:${k}` && r.ms > 0) obs.push({ ts: v.ts, ms: r.ms });
+    const last = obs.sort((a, b) => String(a.ts).localeCompare(String(b.ts))).slice(-10);
+    if (!last.length) { if (SLOW_LANE_NAME_RE.test(k)) res.push({ lane: k, cmd, runs: 0, avgMs: null, byName: true }); continue; }
+    const avg = last.reduce((a, b) => a + b.ms, 0) / last.length;
+    if (avg > lim) res.push({ lane: k, cmd, runs: last.length, avgMs: avg, byName: false });
+  }
+  return res;
+}
+function slowLaneLine(cfg, sl) {
+  const move = `forge config set gate.${sl.lane} ${JSON.stringify(sl.cmd)} && forge config unset verify.${sl.lane}`;
+  return sl.byName
+    ? `verify.${sl.lane} is named like a slow suite and has no recorded run yet — gate tier unless it finishes under ${slowLaneSec(cfg)} s: ${move}`
+    : `verify.${sl.lane} averages ${Math.round(sl.avgMs / 1000)} s over its last ${sl.runs} run(s) (limit options.slowLaneSec ${slowLaneSec(cfg)}) — it runs on every task: ${move}`;
+}
 // Why this verify should run the gate tier too — null when it should not.
 function fullVerifyReason(w, cfg, item, forced) {
   if (!Object.keys(gateCmds(cfg)).length) return null;
@@ -2065,18 +2169,20 @@ function generateDashboard() {
       : `<p class="mut">No dispatch records yet — they accumulate as items run under v0.12+ (<code>forge task dispatch</code>).</p>`}
       <div class="footnote">Median item start→done <b>${fmtDur(med(itemSpans))}</b>${itemSpans.length ? ` (${itemSpans.length} item(s))` : ''} · median verification run <b>${fmtDur(med(verifDurs))}</b>${gateWaits.length ? ` · your gate wait — ${gateWaits.join(', ')}` : ''}. Windows over 2h are excluded as session breaks; execution is bracketed by CLI events, so it is the window the worker ran in, not its exact runtime (see <code>forge usage</code>).</div></div>`;
     const usageSnap = readJson(USAGE_FILE, null);
-    let tokenPanel;
-    if (usageSnap) {
+    // v0.22.2: the token panel and the efficiency strip are rendered once per view — the whole project and
+    // each milestone — from the same template; a selector on the Usage page switches between them. A
+    // milestone's figures are what was attributed to its tasks (worker transcripts tied to them, orchestrator
+    // calls while they ran); what fell between tasks is reported beside the selector, never spread.
+    const tokenView = (V) => {
       let tokenRows = '';
-      for (const [model, threads] of Object.entries(usageSnap.models || {}))
-        for (const [thread, t2] of Object.entries(threads))
-          tokenRows += `<div class="tokrow"><span class="m"><i style="background:${thread === 'main' ? 'var(--progc)' : 'var(--readyc)'}"></i><code>${esc(model)}</code> <span class="mut">${thread === 'main' ? 'orchestrator' : 'workers'} · ${t2.calls || 0} call(s)</span></span><b>${(t2.out || 0).toLocaleString()}</b><span class="n">out · ${(t2.in || 0).toLocaleString()} in</span></div>`;
-      const byType = Object.entries(usageSnap.byType || {}).map(([k, v2]) => `${esc(k)}×${v2}`).join(' · ');
-      const totOut = (usageSnap.mainOut || 0) + (usageSnap.sideOut || 0);
-      const delPct = totOut ? Math.round(100 * (usageSnap.sideOut || 0) / totOut) : 0;
+      for (const r of V.rows)
+        tokenRows += `<div class="tokrow"><span class="m"><i style="background:${r.thread === 'main' ? 'var(--progc)' : 'var(--readyc)'}"></i><code>${esc(r.model)}</code> <span class="mut">${r.thread === 'main' ? 'orchestrator' : 'workers'} · ${Math.round(r.calls || 0).toLocaleString()} call(s)</span></span><b>${Math.round(r.out || 0).toLocaleString()}</b><span class="n">out · ${Math.round(r.in || 0).toLocaleString()} in${r.ctx != null ? ` · ${esc(fmtBig(r.ctx))} context` : ''}</span></div>`;
+      const byType = Object.entries(V.byType || {}).map(([k, v2]) => `${esc(k)}×${v2}`).join(' · ');
+      const totOut = (V.mainOut || 0) + (V.sideOut || 0);
+      const delPct = totOut ? Math.round(100 * (V.sideOut || 0) / totOut) : 0;
       const C = 226; const sideDash = Math.round(C * delPct / 100);
-      tokenPanel =
-        `<div class="panel"><h3>Tokens <span class="mut">— observed, snapshot as of ${esc(String(usageSnap.ts || '?').slice(0, 16).replace('T', ' '))}${usageSnap.ts ? ` (<span data-since="${esc(usageSnap.ts)}" data-post=" ago"></span>)` : ''}</span></h3>
+      const panel =
+        `<div class="panel"><h3>Tokens <span class="mut">— observed${V.scope ? `, ${esc(V.scope)}` : ''}, snapshot as of ${esc(String(usageSnap.ts || '?').slice(0, 16).replace('T', ' '))}${usageSnap.ts ? ` (<span data-since="${esc(usageSnap.ts)}" data-post=" ago"></span>)` : ''}</span></h3>
         ${usageSnap.complete === false ? `<p class="mut">Still reading the transcript backlog — ${usageSnap.scanPct || 0}% scanned. It continues on its own each time state changes; <code>forge usage</code> finishes it in one go.</p>` : ''}
         <div class="donutwrap">
           <svg width="92" height="92" viewBox="0 0 92 92" role="img" aria-label="${delPct} percent of output tokens delegated to workers">
@@ -2085,42 +2191,71 @@ function generateDashboard() {
             <text x="46" y="44" text-anchor="middle" font-size="15" font-weight="700" fill="#1b1d24">${delPct}%</text>
             <text x="46" y="58" text-anchor="middle" font-size="9" fill="#8a8e9a">delegated</text></svg>
           <div style="flex:1;min-width:170px">
-            <div class="tokrow"><span class="m"><i style="background:var(--readyc)"></i>Workers</span><b>${(usageSnap.sideOut || 0).toLocaleString()}</b><span class="n">out</span></div>
-            <div class="tokrow"><span class="m"><i style="background:var(--progc)"></i>Orchestrator</span><b>${(usageSnap.mainOut || 0).toLocaleString()}</b><span class="n">out</span></div>
+            <div class="tokrow"><span class="m"><i style="background:var(--readyc)"></i>Workers</span><b>${Math.round(V.sideOut || 0).toLocaleString()}</b><span class="n">out</span></div>
+            <div class="tokrow"><span class="m"><i style="background:var(--progc)"></i>Orchestrator</span><b>${Math.round(V.mainOut || 0).toLocaleString()}</b><span class="n">out</span></div>
           </div>
         </div>
-        <div>${tokenRows || '<p class="mut">empty snapshot</p>'}</div>
-        <div class="footnote">${delPct}% delegated${byType ? ` · dispatches: ${byType}` : ''}. Per-agent token attribution inside worker threads is not exposed by the logs — absent data is shown as absent, never estimated. This refreshes itself on every state change; <code>forge usage</code> prints the full report.</div></div>`;
-    } else {
-      tokenPanel = `<div class="panel"><h3>Tokens</h3><p class="mut">No usage snapshot yet — this fills in by itself once Claude Code session logs exist for this project (or run <code>forge usage</code> now; zero tokens, any terminal).</p></div>`;
-    }
-    // v0.16: the cost/speed headline — context re-read per item and model calls per
-    // item. Field finding: context:output ran 339:1, so token *share* by model says
-    // almost nothing about the bill.
-    let effPanel = '';
-    {
-      const M = (usageSnap && usageSnap.metrics) || null;
+        <div>${tokenRows || `<p class="mut">${V.scope ? 'nothing attributed to this milestone yet' : 'empty snapshot'}</p>`}</div>
+        <div class="footnote">${delPct}% delegated${byType ? ` · dispatches: ${byType}` : ''}. ${V.note || ''}Per-agent token attribution inside worker threads is not exposed by the logs — absent data is shown as absent, never estimated. This refreshes itself on every state change; <code>forge usage</code> prints the full report.</div></div>`;
+      let eff = '';
+      const M = V.eff;
       if (M && M.perItem) {
-        const sinceD = usageSnap.since;
+        const sinceD = V.since;
         const arrow = v => v == null ? '' : `<b style="color:${v < 0 ? 'var(--done)' : v > 0 ? 'var(--blockc)' : 'var(--ink3)'}">${v > 0 ? '+' : ''}${v}%</b>`;
-        effPanel = `<div class="pacestrip" style="margin-top:12px">
-          <div><div class="pk">CONTEXT RE-READ PER DONE ITEM</div><div class="pv">${esc(fmtBig(M.perItem.context))} <small>${M.outTok ? Math.round(M.context / M.outTok) : '—'}:1 vs generated</small></div></div>
+        eff = `<div class="pacestrip" style="margin-top:12px">
+          <div><div class="pk">CONTEXT RE-READ PER DONE ITEM</div><div class="pv">${esc(fmtBig(M.perItem.context))} <small>${M.outTok ? Math.round(M.context / M.outTok) : '—'}:1 vs generated${M.done != null ? ` · ${M.done} done` : ''}</small></div></div>
           <div class="pdiv"></div>
-          <div><div class="pk">MODEL CALLS PER DONE ITEM</div><div class="pv">${Math.round(M.perItem.calls)} <small>${M.mainCalls.toLocaleString()} orch · ${M.sideCalls.toLocaleString()} workers</small></div></div>
+          <div><div class="pk">MODEL CALLS PER DONE ITEM</div><div class="pv">${Math.round(M.perItem.calls)} <small>${Math.round(M.mainCalls).toLocaleString()} orch · ${Math.round(M.sideCalls).toLocaleString()} workers</small></div></div>
           <div class="pdiv"></div>
           <div><div class="pk">CALLS PER WORKER DISPATCH</div><div class="pv">${M.callsPerDispatch.median == null ? '—' : M.callsPerDispatch.median} <small>median · p90 ${M.callsPerDispatch.p90 == null ? '—' : M.callsPerDispatch.p90} · max ${M.callsPerDispatch.max == null ? '—' : M.callsPerDispatch.max}</small></div></div>
           ${sinceD ? `<div class="pdiv"></div><div><div class="pk" style="color:var(--accent)">SINCE BASELINE${sinceD.label ? ` · ${esc(sinceD.label)}` : ''}</div>
             <div class="pv" style="font-size:14px">${sinceD.done} item(s) — calls ${arrow(sinceD.vs && sinceD.vs.calls)} · context ${arrow(sinceD.vs && sinceD.vs.context)} · output ${arrow(sinceD.vs && sinceD.vs.out)}</div></div>` : ''}
-          <div class="pnote">Context re-read is what a subscription quota actually spends — every turn re-sends the window. A worker dispatch running far past the median is exploring, not building.${sinceD ? '' : ' Record a baseline with <code>forge usage --baseline</code> to measure a change.'}</div>
+          <div class="pnote">${V.scope ? 'Attributed to this milestone\'s tasks only — the orchestrator\'s calls between tasks are not in these figures. ' : ''}Context re-read is what a subscription quota actually spends — every turn re-sends the window. A worker dispatch running far past the median is exploring, not building.${sinceD || V.scope ? '' : ' Record a baseline with <code>forge usage --baseline</code> to measure a change.'}</div>
         </div>`;
+      } else if (V.scope) {
+        eff = `<div class="pacestrip" style="margin-top:12px"><div class="pnote">No task of this milestone is DONE yet — per-task figures appear with the first one.</div></div>`;
       }
+      return { panel, eff };
+    };
+    let tokenPanel, effPanel = '', usageViews = '', usageSelect = '';
+    if (usageSnap) {
+      // the whole project — the same figures as before v0.22.2
+      const rowsAll = [];
+      for (const [model, threads] of Object.entries(usageSnap.models || {}))
+        for (const [thread, t2] of Object.entries(threads)) rowsAll.push({ model, thread, calls: t2.calls, out: t2.out, in: t2.in, ctx: (t2.cacheRead || 0) + (t2.cacheCreate || 0) + (t2.in || 0) });
+      const Mall = usageSnap.metrics || null;
+      const all = tokenView({ rows: rowsAll, byType: usageSnap.byType, mainOut: usageSnap.mainOut, sideOut: usageSnap.sideOut, eff: Mall && Mall.perItem ? Object.assign({}, Mall, { done: Mall.done }) : null, since: usageSnap.since });
+      tokenPanel = all.panel; effPanel = all.eff;
+      const BM = usageSnap.byMilestone;
+      if (BM && BM.groups && Object.keys(BM.groups).length) {
+        const seqU = milestoneSeq(w);
+        const names = [...seqU.filter(m => BM.groups[m]), ...Object.keys(BM.groups).filter(m => !seqU.includes(m)).sort()];
+        const o = BM.outside || {};
+        const outsideNote = (o.mainCalls || o.workerFiles) ? `Outside every milestone: ${o.mainCalls ? `${o.mainCalls.toLocaleString()} orchestrator call(s) between tasks (${fmtBig(o.mainCtx)} context — briefs, planning, gates)` : ''}${o.mainCalls && o.workerFiles ? ' · ' : ''}${o.workerFiles ? `${o.workerFiles} worker transcript(s) tied to no task (${o.workerCalls} call(s))` : ''}. ` : '';
+        const views = [`<div class="usview" data-ms="all"><div class="telgrid one">${tokenPanel}</div>${effPanel}</div>`];
+        for (const m of names) {
+          const g = BM.groups[m];
+          const rows = [];
+          for (const [model, threads] of Object.entries(g.models || {})) for (const [thread, t2] of Object.entries(threads)) rows.push({ model, thread, calls: t2.calls, out: t2.out, in: t2.in, ctx: t2.ctx });
+          rows.sort((a, b) => (a.thread === b.thread ? b.out - a.out : a.thread === 'main' ? -1 : 1));
+          const label = m === '(none)' ? 'tasks in no milestone' : `milestone ${m}${milestoneName(w, m) ? ` — ${milestoneName(w, m)}` : ''}`;
+          const eff = g.perDone ? { perItem: { context: g.perDone.ctx, calls: g.perDone.calls }, context: g.ctx, outTok: g.out, mainCalls: g.mainCalls, sideCalls: g.sideCalls, callsPerDispatch: g.callsPerDispatch, done: g.done } : null;
+          const v = tokenView({ scope: label, rows, byType: g.byType, mainOut: g.mainOut, sideOut: g.sideOut, eff, note: `${g.done}/${g.items} task(s) of this milestone done. ` });
+          views.push(`<div class="usview" data-ms="${esc(m)}" hidden><div class="telgrid one">${v.panel}</div>${v.eff}</div>`);
+        }
+        usageViews = views.join('');
+        usageSelect = `<div class="usfilter"><label for="usms">Scope</label><select id="usms"><option value="all">Whole project</option>${names.map(m => `<option value="${esc(m)}">${esc(m === '(none)' ? '(no milestone)' : `${m}${milestoneName(w, m) ? ` — ${milestoneName(w, m)}` : ''}`)}</option>`).join('')}</select><span class="mut">${outsideNote ? esc(outsideNote.replace(/\. $/, '')) : 'every call is attributed to a milestone'}</span></div>`;
+      } else usageViews = `<div class="usview" data-ms="all"><div class="telgrid one">${tokenPanel}</div>${effPanel}</div>`;
+    } else {
+      tokenPanel = `<div class="panel"><h3>Tokens</h3><p class="mut">No usage snapshot yet — this fills in by itself once Claude Code session logs exist for this project (or run <code>forge usage</code> now; zero tokens, any terminal).</p></div>`;
+      usageViews = `<div class="telgrid one">${tokenPanel}</div>`;
     }
     // v0.22: cost per task by Forge version, orchestrator model and milestone — the evolution of Forge, measured
     let rollupPanel = '';
     if (usageSnap && usageSnap.rollup && usageSnap.rollup.groups) {
       const G = usageSnap.rollup.groups;
       const tbl = (title, entries, note) => entries.length ? `<div class="panel"><h3>${title}</h3><div class="tblwrap"><table class="cfgt"><thead><tr><th>Group</th><th>Done</th><th>First-pass</th><th>Calls / task</th><th>Context / task</th><th>Output / task</th><th>Orchestrator share</th><th></th></tr></thead><tbody>${
-        entries.map(([k, r]) => { const x = rollupRow(r); return `<tr><td><code>${esc(k)}</code></td><td>${x.items}</td><td>${x.fp == null ? '—' : x.fp + '%'}</td><td>${x.calls == null ? '—' : x.calls}</td><td>${esc(fmtBig(x.ctx))}</td><td>${esc(fmtBig(x.out))}</td><td>${x.orchShare == null ? '—' : x.orchShare + '%'}</td><td class="mut">${x.mixed ? `<span class="warn">⚠ ${Object.keys(x.models).length} orchestrator models — not comparable</span>` : ''}${x.costed < x.items ? ` ${x.items - x.costed} untied` : ''}</td></tr>`; }).join('')
+        entries.map(([k, r]) => { const x = rollupRow(r); return `<tr${title === 'Per task by milestone' ? ` data-ms="${esc(k)}"` : ''}><td><code>${esc(k)}</code></td><td>${x.items}</td><td>${x.fp == null ? '—' : x.fp + '%'}</td><td>${x.calls == null ? '—' : x.calls}</td><td>${esc(fmtBig(x.ctx))}</td><td>${esc(fmtBig(x.out))}</td><td>${x.orchShare == null ? '—' : x.orchShare + '%'}</td><td class="mut">${x.mixed ? `<span class="warn">⚠ ${Object.keys(x.models).length} orchestrator models — not comparable</span>` : ''}${x.costed < x.items ? ` ${x.items - x.costed} untied` : ''}</td></tr>`; }).join('')
       }</tbody></table></div>${note ? `<div class="footnote">${note}</div>` : ''}</div>` : '';
       const byNum = (a, b) => a[0].localeCompare(b[0], undefined, { numeric: true });
       const msSeq = milestoneSeq(w);
@@ -2130,7 +2265,7 @@ function generateDashboard() {
         tbl('Per task by milestone', [...msSeq.filter(m => G.milestone[m]).map(m => [m, G.milestone[m]]), ...Object.entries(G.milestone).filter(([k]) => !msSeq.includes(k))])}${
         tbl('Total', Object.entries(G.total), `A task's cost = its workers' transcripts + the orchestrator's calls while it was in progress (split evenly when several ran).${usageSnap.rollup.unattributed && usageSnap.rollup.unattributed.calls ? ` Between tasks the orchestrator made ${Math.round(usageSnap.rollup.unattributed.calls).toLocaleString()} more calls (${esc(fmtBig(usageSnap.rollup.unattributed.ctx))} context) — briefs, planning, gates.` : ''} Transcripts scanned before v0.22 carry no per-task cost until <code>forge usage --rescan</code> runs once.`)}</div>`;
     }
-    timePanelOut = timePanel; usagePanelOut = `<div class="telgrid one">${tokenPanel}</div>${effPanel}${rollupPanel}`;
+    timePanelOut = timePanel; usagePanelOut = `${usageSelect}${usageViews}${rollupPanel}`;
     telemetryBlock = `<details class="sec" open><summary>Telemetry <span class="mut">(time live from state · tokens re-read from session logs on every change)</span></summary><div class="telgrid">${timePanel}${tokenPanel}</div>${effPanel}</details>`;
   }
 
@@ -2351,7 +2486,7 @@ function generateDashboard() {
   const gcD = (() => { try { return gitCfg(cfg); } catch (_) { return null; } })();
   // ---- v0.20.1: Configuration and Commands pages ------------------------------------
   const cfgVal = key => {
-    if (key === 'verify.*') { const v = cfg.verify || {}; return Object.keys(v).length ? Object.entries(v).map(([k, x]) => `<div><b>${esc(k)}</b> <code>${esc(String(x))}</code></div>`).join('') : null; }
+    if (key === 'verify.*' || key === 'gate.*') { const v = cfg[key.slice(0, -2)] || {}; return Object.keys(v).length ? Object.entries(v).map(([k, x]) => `<div><b>${esc(k)}</b> <code>${esc(String(x))}</code></div>`).join('') : null; }
     if (key === 'providers.*') { const v = cfg.providers || {}; return Object.keys(v).length ? Object.entries(v).filter(([k]) => !/key$/i.test(k) || k === 'keyEnv').map(([k, x]) => `<div><b>${esc(k)}</b> <code>${esc(String(x))}</code></div>`).join('') : null; }
     if (key === 'options.models.<role>') { const v = ((cfg.options || {}).models) || {}; return Object.keys(v).length ? MODEL_ROLES.filter(r => v[r]).map(r => `<div><b>${esc(r)}</b> <code>${esc(String(v[r]))}</code></div>`).join('') : null; }
     const v = key.split('.').reduce((o, k) => (o == null ? undefined : o[k]), cfg);
@@ -2700,6 +2835,10 @@ details.icd.flash>summary,details.sec.sub.flash>summary{animation:flash 1.6s eas
 .tokrow .m{color:var(--ink2);overflow:hidden;text-overflow:ellipsis}
 .tokrow .m i{display:inline-block;width:9px;height:9px;border-radius:3px;margin-right:6px}
 .donutwrap{display:flex;gap:18px;align-items:center;flex-wrap:wrap}
+.usfilter{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:0 0 12px;font-size:12px}
+.usfilter label{color:var(--ink3);text-transform:uppercase;letter-spacing:.06em;font-size:10px;font-weight:700}
+.usfilter select{font:inherit;font-size:12px;padding:5px 8px;border:1px solid var(--line);border-radius:6px;background:var(--surface);color:var(--ink)}
+tr[data-ms].sel td{background:rgba(69,83,196,.08)}
 .footnote{font-size:11px;color:var(--ink3);line-height:1.5}
 /* ---- journal ---- */
 .jgrid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
@@ -3099,6 +3238,18 @@ tbody tr:hover{background:#faf9f5}
     window.scrollTo(0,0);
   }
   window.addEventListener('hashchange',route);
+  /* v0.22.2: the Usage page scope — whole project or one milestone; the per-milestone row is highlighted */
+  (function(){
+    var sel=document.getElementById('usms'); if(!sel) return;
+    function apply(){
+      var v=sel.value;
+      document.querySelectorAll('.usview').forEach(function(el){ el.hidden = el.getAttribute('data-ms')!==v; });
+      document.querySelectorAll('tr[data-ms]').forEach(function(tr){ tr.classList.toggle('sel', tr.getAttribute('data-ms')===v); });
+      try{ localStorage.setItem('forge.usage.scope', v); }catch(_){ }
+    }
+    try{ var saved=localStorage.getItem('forge.usage.scope'); if(saved && Array.prototype.some.call(sel.options,function(o){ return o.value===saved; })) sel.value=saved; }catch(_){ }
+    sel.addEventListener('change',apply); apply();
+  })();
   /* run after every script on the page has defined its hooks */
   if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',route); else setTimeout(route,0);
   window.addEventListener('load',function(){ if(window.forgeArch) window.forgeArch.draw(); });
@@ -3825,16 +3976,19 @@ const commands = {
   // -- init -----------------------------------------------------------------
   init() {
     fs.mkdirSync(STATE, { recursive: true });
+    const initOpts = initOptions();
+    const applied = mergeUserDefaults(initOpts, loadUserDefaults());
     if (!loadConfig()) {
       writeJson(CONFIG_FILE, {
         project: opt('project') || path.basename(PROJECT),
         phase: 'spec',                       // 'spec' until METHOD Step 7 sets verify commands
         specDir: opt('spec-dir') || null,    // discovered/declared later
-        verify: {},                          // e.g. { test: "npm test", lint: "...", typecheck: "..." }
-        options: Object.assign({ graphify: 'unset', web: 'unset', concurrency: 4 }, SWITCH_ON, // v0.20: 4 in parallel · v0.21: delegation switches on for new projects
-          { modelRouting: 'fixed', models: Object.assign({}, MODEL_DEFAULTS), autopilotMode: 'session' }) // v0.22: every worker role pinned to a model id; the orchestrator is the session model
+        verify: {},                          // e.g. { test: "npm test", lint: "...", typecheck: "..." } — the fast lanes, every task
+        gate: {},                            // v0.22.2: the slow lanes (e2e, db) — milestone gate, --full, every Nth task
+        options: initOpts
       });
       out('Initialized forge/config.json (phase: spec).');
+      if (applied.length) out(`Applied your defaults from ${userDefaultsFile()}: ${applied.join(', ')}`);
     } else out('forge/config.json already exists — left untouched (init is idempotent).');
     if (!fs.existsSync(WORK_FILE)) { saveWork(loadWork()); out('Initialized forge/state/work.json.'); }
     appendMd(DECISIONS_FILE, '# Decisions log (append-only, via forge CLI)', '');
@@ -3846,6 +4000,29 @@ const commands = {
   // -- config ---------------------------------------------------------------
   config() {
     const action = argv[1];
+    // v0.22.2: --global reads/writes the per-machine defaults file instead of this project (options.* only)
+    if (flag('global')) {
+      const f = userDefaultsFile();
+      const ud = loadUserDefaults() || { options: {} };
+      const pos = argv.filter(a => !String(a).startsWith('--'));
+      if (action === 'get') { out(JSON.stringify(pos[2] ? pos[2].split('.').reduce((o, k) => (o || {})[k], ud) : ud, null, 2)); out(`# ${f}`); return; }
+      if (action !== 'set' && action !== 'unset') die('Usage: forge config get [path] --global | set options.<key> <value> --global | unset options.<key> --global');
+      const keyPath = pos[2];
+      if (!keyPath || !/^options\.[A-Za-z]/.test(keyPath)) die(`--global takes options.* keys only (verify.* and gate.* are per project). Got: ${keyPath || '(none)'}`);
+      const keys = keyPath.split('.');
+      if (action === 'set') {
+        const value = pos[3]; if (value === undefined) die('Usage: forge config set options.<key> <value> --global');
+        let node = ud; keys.slice(0, -1).forEach(k => { node[k] = node[k] || {}; node = node[k]; });
+        node[keys[keys.length - 1]] = value === 'true' ? true : value === 'false' ? false : (/^\d+$/.test(value) ? parseInt(value, 10) : value);
+        fs.mkdirSync(path.dirname(f), { recursive: true }); writeJson(f, ud);
+        out(`Set ${keyPath} = ${value} in ${f} — every forge init on this machine starts with it (existing projects: forge config set ${keyPath} ${value}).`);
+      } else {
+        let node = ud; for (const k of keys.slice(0, -1)) node = node ? node[k] : undefined;
+        if (!node || !(keys[keys.length - 1] in node)) die(`'${keyPath}' is not set in ${f}.`);
+        delete node[keys[keys.length - 1]]; writeJson(f, ud); out(`Unset ${keyPath} in ${f}`);
+      }
+      return;
+    }
     const cfg = loadConfig();
     if (!cfg) die('No forge/config.json. Run: forge init');
     if (action === 'get') {
@@ -3918,6 +4095,13 @@ const commands = {
             const r = run(cmd);
             check(`verify.${k} runs`, r.exit === 0, r.exit === 0 ? 'green' : `exit ${r.exit} — record as pre-existing failure or fix before relying on this gate`, 'warning');
           }
+        }
+        // v0.22.2: a slow lane in verify.* runs on every task — the gate tier exists for it
+        if (cmds.length) {
+          const sl = slowLanes(cfg, readJson(WORK_FILE, { items: {}, order: [] }));
+          const gk = Object.keys(gateCmds(cfg));
+          check('verification tiers', sl.length === 0,
+            sl.length ? sl.map(x => slowLaneLine(cfg, x)).join(' | ') : `verify.* fast (${cmds.map(([k]) => k).join(', ')})${gk.length ? ` · gate.* at the milestone (${gk.join(', ')})${fullVerifyEvery(cfg) ? ` and every ${fullVerifyEvery(cfg)} task(s)` : ' only — set options.fullVerifyEvery 3 to catch a cross-task regression earlier'}` : ' · no gate lanes'}`, 'warning');
         }
         // v0.13: the architecture / screens views are only honest when items are tagged
         {
@@ -4423,7 +4607,7 @@ const commands = {
         try {
           const uc = readJson(USAGE_CACHE, null);
           if (sid && uc && uc.files) for (const [f, rec] of Object.entries(uc.files)) if (f.includes(sid) && rec.session && !rec.side && rec.model) { model = rec.model; break; }
-          if (!model && uc && uc.itemMain && uc.itemMain[item.id] && uc.itemMain[item.id].byModel) { const bm = Object.entries(uc.itemMain[item.id].byModel).sort((a, b) => b[1] - a[1]); if (bm.length) model = bm[0][0]; }
+          if (!model && uc && uc.itemMain && uc.itemMain[item.id] && uc.itemMain[item.id].byModel) { const bm = Object.entries(uc.itemMain[item.id].byModel).sort((a, b) => modelCalls(b[1]) - modelCalls(a[1])); if (bm.length) model = bm[0][0]; }
         } catch (_) { }
         item.closed = { ts: ts(), forgeVersion: VERSION, session: sid, model };
       }
@@ -5650,6 +5834,15 @@ const commands = {
         }
         check('autopilot mode', true, `${autopilotMode(c)}${autopilotMode(c) === 'runner' ? ` · forge autopilot run · args: ${(c.options || {}).runnerArgs || '--permission-mode acceptEdits'}` : ''} · worker live window ${workerMaxMs(c) / 60000} min`);
       } catch (_) { }
+      // v0.22.2: verification tiers — a slow verify.* lane is the single biggest wall-clock cost per task
+      try {
+        const c = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
+        const sl = slowLanes(c, readJson(WORK_FILE, { items: {}, order: [] }));
+        const gk = Object.keys(gateCmds(c));
+        check('verification tiers', !sl.length, sl.length ? sl.map(x => slowLaneLine(c, x)).join(' | ') : `verify.* ${Object.keys(c.verify || {}).join(', ') || '(none)'} · gate.* ${gk.join(', ') || '(none)'} · full run every ${fullVerifyEvery(c) || '— (gate only)'} task(s)`, !!sl.length);
+        const ud = loadUserDefaults();
+        check('machine defaults', true, ud && ud.options && Object.keys(ud.options).length ? `${userDefaultsFile()} · ${Object.keys(ud.options).join(', ')}` : `none (${userDefaultsFile()}) — forge config set options.<key> <value> --global`);
+      } catch (_) { }
       // v0.21 (C6): parallel tasks + a shared local database: verifies are serialised by the verify lock
       try {
         const c = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
@@ -6874,6 +7067,7 @@ const commands = {
   init [--project name]                  create forge/ state (idempotent)
   preflight [--full]                     check git, verify commands, graphify, playwright
   config get [path] | set <path> <val> | unset <path>   read/write forge config (gate.* = lanes run at the milestone gate, v0.22.1)
+  config set options.<key> <val> --global   v0.22.2: per-machine default for every future forge init (~/.config/forge/defaults.json)
   task add --id T1 --title .. --objective .. [--milestone M1] [--deps A,B]
            [--criterion "desc::check-cmd"]... [--allowed glob,..] [--forbidden glob,..] [--mock spec/mocks/x.png]
            [--origin plan|split|review|discovery|human --parent <id>]   (v0.22: where the task came from)

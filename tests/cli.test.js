@@ -18,7 +18,7 @@ function forge(args, opts = {}) {
   const r = spawnSync(process.execPath, [CLI, ...args], {
     cwd: dir, encoding: 'utf8', input: opts.stdin || '',
     env: Object.assign({}, process.env,
-      { CLAUDE_PROJECT_DIR: dir, FORGE_CLAUDE_PROJECTS: path.join(os.tmpdir(), 'forge-no-such-logs') },
+      { CLAUDE_PROJECT_DIR: dir, FORGE_CLAUDE_PROJECTS: path.join(os.tmpdir(), 'forge-no-such-logs'), FORGE_DEFAULTS: path.join(os.tmpdir(), 'forge-no-such-defaults.json') },
       opts.env || {})
   });
   return { code: r.status, out: (r.stdout || '') + (r.stderr || '') };
@@ -27,7 +27,7 @@ function hook(name, stdinObj) {
   const r = spawnSync(process.execPath, [CLI, 'hook', name], {
     cwd: dir, encoding: 'utf8', input: JSON.stringify(stdinObj || {}),
     env: Object.assign({}, process.env,
-      { CLAUDE_PROJECT_DIR: dir, FORGE_CLAUDE_PROJECTS: path.join(os.tmpdir(), 'forge-no-such-logs') })
+      { CLAUDE_PROJECT_DIR: dir, FORGE_CLAUDE_PROJECTS: path.join(os.tmpdir(), 'forge-no-such-logs'), FORGE_DEFAULTS: path.join(os.tmpdir(), 'forge-no-such-defaults.json') })
   });
   return { code: r.status, out: (r.stdout || '') + (r.stderr || '') };
 }
@@ -2859,4 +2859,148 @@ test('v0.22.1: CI on the milestone branch — session start reports a red run as
   r = forge(['milestone', 'ship', 'M1'], { env: { FORGE_GH: gh } });
   assert.strictEqual(r.code, 0, r.out); assert.match(r.out, /CI: success on milestone\/M1 \(abc1234\)/);
   assert.match(fs.readFileSync(log, 'utf8'), /run list --branch milestone\/M1/);
+});
+
+// --- v0.22.2 ---------------------------------------------------------------
+
+test('v0.22.2: forge init starts every project with the verification tiers on, and merges the machine defaults file; config --global edits that file', () => {
+  // a fresh init with no defaults file: the built-ins
+  const c0 = JSON.parse(fs.readFileSync(path.join(dir, 'forge', 'config.json'), 'utf8'));
+  assert.deepStrictEqual(c0.gate, {});
+  assert.strictEqual(c0.options.fullVerifyEvery, 3);
+  assert.strictEqual(c0.options.redFirstTimeoutSec, 120);
+  assert.strictEqual(c0.options.slowLaneSec, 120);
+  // the machine defaults file: written through config --global, options.* only
+  const defs = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'forge-defs-')), 'cfg', 'forge', 'defaults.json');
+  let r = forge(['config', 'set', 'options.concurrency', '2', '--global'], { env: { FORGE_DEFAULTS: defs } });
+  assert.strictEqual(r.code, 0, r.out); assert.match(r.out, /every forge init on this machine starts with it/);
+  r = forge(['config', 'set', 'options.models.explorer', 'claude-sonnet-5-5', '--global'], { env: { FORGE_DEFAULTS: defs } });
+  assert.strictEqual(r.code, 0, r.out);
+  r = forge(['config', 'set', 'verify.test', 'x', '--global'], { env: { FORGE_DEFAULTS: defs } });
+  assert.notStrictEqual(r.code, 0); assert.match(r.out, /options\.\* keys only/);
+  r = forge(['config', 'get', '--global'], { env: { FORGE_DEFAULTS: defs } });
+  assert.match(r.out, /"concurrency": 2/); assert.match(r.out, /"explorer": "claude-sonnet-5-5"/);
+  const saved = JSON.parse(fs.readFileSync(defs, 'utf8'));
+  assert.strictEqual(saved.options.concurrency, 2);
+  // a new project on this machine starts with them — merged over the built-ins, the rest of the model map intact
+  const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-test2-'));
+  const r2 = spawnSync(process.execPath, [CLI, 'init', '--project', 'two'], { cwd: dir2, encoding: 'utf8', env: Object.assign({}, process.env, { CLAUDE_PROJECT_DIR: dir2, FORGE_DEFAULTS: defs }) });
+  assert.strictEqual(r2.status, 0, r2.stdout + r2.stderr);
+  assert.match(r2.stdout, /Applied your defaults from .*defaults\.json: concurrency, models\.explorer/);
+  const c2 = JSON.parse(fs.readFileSync(path.join(dir2, 'forge', 'config.json'), 'utf8'));
+  assert.strictEqual(c2.options.concurrency, 2);
+  assert.strictEqual(c2.options.models.explorer, 'claude-sonnet-5-5');
+  assert.strictEqual(c2.options.models.implementer, 'claude-sonnet-5-5');
+  assert.strictEqual(c2.options.fullVerifyEvery, 3);
+  // unset --global
+  r = forge(['config', 'unset', 'options.concurrency', '--global'], { env: { FORGE_DEFAULTS: defs } });
+  assert.strictEqual(r.code, 0, r.out);
+  assert.strictEqual(JSON.parse(fs.readFileSync(defs, 'utf8')).options.concurrency, undefined);
+  // doctor names the file
+  r = forge(['doctor'], { env: { FORGE_DEFAULTS: defs } });
+  assert.match(r.out, /machine defaults: .*defaults\.json · models/);
+});
+
+test('v0.22.2: a slow verify.* lane is reported as a gate-tier candidate by preflight, doctor and the verify-tiers upgrade step — with the exact move; fixed once moved', () => {
+  // the fixture's verify.test takes a few ms; a 10 ms limit makes it "slow" without waiting
+  forge(['config', 'set', 'options.slowLaneSec', '0.01']);
+  forge(['config', 'set', 'verify.e2e', 'node -e "process.exit(0)"']);       // named like a slow suite, no run yet
+  // no recorded run of verify.test yet → not reported by timing; e2e is reported by name
+  let r = forge(['upgrade']);
+  assert.match(r.out, /verify-tiers/);
+  assert.match(r.out, /verify\.e2e is named like a slow suite and has no recorded run yet/);
+  assert.ok(!/verify\.test averages/.test(r.out), r.out);
+  // one verification records ms per lane
+  addItem('S1'); forge(['task', 'start', 'S1']); touch('s1.txt');
+  r = forge(['task', 'verify', 'S1']); assert.strictEqual(r.code, 0, r.out);
+  const v = work().items.S1.verifications[0];
+  assert.ok(v.results.find(x => x.kind === 'project:test').ms > 0);
+  r = forge(['preflight']);
+  assert.match(r.out, /WARN  verification tiers: .*verify\.test averages \d+ s over its last 1 run\(s\) \(limit options\.slowLaneSec 0\.01\) — it runs on every task: forge config set gate\.test "node -e \\"process\.exit\(0\)\\"" && forge config unset verify\.test/);
+  r = forge(['doctor']);
+  assert.match(r.out, /verification tiers: .*verify\.test averages/);
+  r = forge(['upgrade']);
+  assert.match(r.out, /verify\.test averages/);
+  // the move, as printed: both lanes to gate.*; the step closes
+  forge(['config', 'set', 'gate.test', 'node -e "process.exit(0)"']); forge(['config', 'unset', 'verify.test']);
+  forge(['config', 'set', 'gate.e2e', 'node -e "process.exit(0)"']); forge(['config', 'unset', 'verify.e2e']);
+  forge(['config', 'set', 'verify.lint', 'node -e "process.exit(0)"']);
+  forge(['config', 'set', 'options.slowLaneSec', '120']);
+  r = forge(['upgrade']);
+  assert.ok(!/verify-tiers.*\n.*averages/.test(r.out), r.out);
+  const st = JSON.parse(forge(['upgrade', '--json']).out).steps;
+  const step = st.find(x => x.id === 'verify-tiers');
+  assert.strictEqual(step.done, true, JSON.stringify(step));
+  // gate.* without a periodic full run is a finding too
+  forge(['config', 'unset', 'options.fullVerifyEvery']);
+  const st2 = JSON.parse(forge(['upgrade', '--json']).out).steps.find(x => x.id === 'verify-tiers');
+  assert.strictEqual(st2.done, false); assert.match(st2.findings[0], /options\.fullVerifyEvery is 0/);
+  r = forge(['preflight']);
+  assert.match(r.out, /OK    verification tiers: verify\.\* fast \(lint\) · gate\.\* at the milestone \(test, e2e\) only — set options\.fullVerifyEvery 3/);
+  // the Configuration page lists the gate lanes
+  const dash = fs.readFileSync(path.join(dir, 'forge', 'dashboard.html'), 'utf8');
+  assert.match(dash, /<b>e2e<\/b> <code>node -e "process\.exit\(0\)"<\/code>/);
+});
+
+test('v0.22.2: the Usage page has a scope selector — the token table and the per-item strip per milestone, from attributed transcripts only; what fell between tasks is reported, not spread', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-logs-'));
+  const projDir = path.join(root, dir.replace(/[^a-zA-Z0-9]/g, '-'));
+  const subs = path.join(projDir, 'sess-main', 'subagents');
+  fs.mkdirSync(subs, { recursive: true });
+  addItem('U1', ['--milestone', 'M1']); addItem('U2', ['--milestone', 'M2', '--allowed', 'u2/']);
+  forge(['milestone', 'update', 'M1', '--name', 'Cart']);
+  forge(['config', 'set', 'options.gates', 'end-only']);   // M2 may start before M1 is approved
+  const asstL = (t, out, model, extra) => JSON.stringify(Object.assign({ type: 'assistant', timestamp: t, message: { id: 'm' + Math.random(), model, usage: { output_tokens: out, input_tokens: 10, cache_read_input_tokens: 1000 } } }, extra || {}));
+  const userL = (t, txt) => JSON.stringify({ type: 'user', timestamp: t, message: { content: txt } });
+  const now = () => new Date().toISOString();
+  hook('session-start', { session_id: 'sess-main' });
+  // two orchestrator calls BEFORE any task: between-tasks work, outside every milestone
+  fs.writeFileSync(path.join(projDir, 'sess-main.jsonl'), [asstL(now(), 7, 'claude-opus-5-5'), asstL(now(), 7, 'claude-opus-5-5')].join('\n') + '\n');
+  sleepSync(20);
+  forge(['task', 'start', 'U1']); touch('u1.txt'); forge(['task', 'verify', 'U1']);
+  // U1: one worker transcript (sonnet, 2 calls, 100 out), dispatched as forge-implementer; 3 orchestrator calls while it ran
+  fs.writeFileSync(path.join(subs, 'w1.jsonl'), [userL(now(), '# Work brief — U1: one'), asstL(now(), 60, 'claude-sonnet-5-5'), asstL(now(), 40, 'claude-sonnet-5-5')].join('\n') + '\n');
+  fs.appendFileSync(path.join(projDir, 'sess-main.jsonl'), [
+    asstL(now(), 100, 'claude-opus-5-5', { message: { id: 'd1', model: 'claude-opus-5-5', usage: { output_tokens: 100, input_tokens: 10, cache_read_input_tokens: 1000 }, content: [{ type: 'tool_use', name: 'Agent', input: { subagent_type: 'forge:forge-implementer', prompt: '# Work brief — U1: one' } }] } }),
+    asstL(now(), 100, 'claude-opus-5-5'), asstL(now(), 100, 'claude-opus-5-5')].join('\n') + '\n');
+  forge(['task', 'done', 'U1'], { env: { FORGE_CLAUDE_PROJECTS: root } });
+  // U2 (M2): no worker, one orchestrator call, left in progress
+  forge(['task', 'start', 'U2']); touch('u2.txt');
+  fs.appendFileSync(path.join(projDir, 'sess-main.jsonl'), asstL(now(), 5, 'claude-opus-5-5') + '\n');
+  const r = forge(['usage'], { env: { FORGE_CLAUDE_PROJECTS: root } });
+  assert.strictEqual(r.code, 0, r.out);
+  const snap = JSON.parse(fs.readFileSync(path.join(dir, 'forge', 'state', 'usage.json'), 'utf8'));
+  const BM = snap.byMilestone;
+  assert.ok(BM && BM.groups.M1 && BM.groups.M2, JSON.stringify(Object.keys(BM.groups)));
+  const m1 = BM.groups.M1;
+  assert.strictEqual(m1.sideCalls, 2); assert.strictEqual(m1.sideOut, 100);
+  assert.strictEqual(Math.round(m1.mainCalls), 3); assert.strictEqual(Math.round(m1.mainOut), 300);
+  assert.strictEqual(m1.models['claude-sonnet-5-5'].side.calls, 2);
+  assert.strictEqual(m1.models['claude-sonnet-5-5'].side.ctx, 2 * 1010);
+  assert.strictEqual(Math.round(m1.models['claude-opus-5-5'].main.calls), 3);
+  assert.strictEqual(m1.models['claude-sonnet-5-5'].main, undefined);
+  assert.deepStrictEqual(m1.byType, { 'forge:forge-implementer': 1 });
+  assert.strictEqual(m1.done, 1); assert.strictEqual(m1.items, 1);
+  assert.strictEqual(Math.round(m1.perDone.calls), 5);
+  assert.strictEqual(m1.callsPerDispatch.median, 2);
+  assert.strictEqual(Math.round(BM.groups.M2.mainCalls), 1); assert.strictEqual(BM.groups.M2.perDone, null);
+  assert.strictEqual(BM.outside.mainCalls, 2);
+  // the dashboard: a selector, one hidden view per milestone, the per-milestone rollup rows tagged for highlighting
+  const dash = fs.readFileSync(path.join(dir, 'forge', 'dashboard.html'), 'utf8');
+  assert.match(dash, /<select id="usms"><option value="all">Whole project<\/option><option value="M1">M1 — Cart<\/option><option value="M2">M2<\/option><\/select>/);
+  assert.match(dash, /Outside every milestone: 2 orchestrator call\(s\) between tasks/);
+  const vM1 = dash.slice(dash.indexOf('<div class="usview" data-ms="M1" hidden>'), dash.indexOf('<div class="usview" data-ms="M2" hidden>'));
+  assert.ok(vM1.length > 0, 'M1 view rendered');
+  assert.match(vM1, /observed, milestone M1 — Cart, snapshot as of/);
+  assert.match(vM1, /<code>claude-sonnet-5-5<\/code> <span class="mut">workers · 2 call\(s\)<\/span><\/span><b>100<\/b><span class="n">out · 20 in · 2k context<\/span>/);
+  assert.match(vM1, /<code>claude-opus-5-5<\/code> <span class="mut">orchestrator · 3 call\(s\)<\/span><\/span><b>300<\/b>/);
+  assert.match(vM1, /1\/1 task\(s\) of this milestone done\./);
+  assert.match(vM1, /CONTEXT RE-READ PER DONE ITEM/);
+  assert.match(vM1, /Attributed to this milestone's tasks only/);
+  const vM2 = dash.slice(dash.indexOf('<div class="usview" data-ms="M2" hidden>'), dash.indexOf('Per task by Forge version'));
+  assert.match(vM2, /No task of this milestone is DONE yet/);
+  assert.match(dash, /<tr data-ms="M1"><td><code>M1<\/code>/);
+  // the whole-project view is unchanged in substance and shown first
+  assert.match(dash, /<div class="usview" data-ms="all"><div class="telgrid one"><div class="panel"><h3>Tokens <span class="mut">— observed, snapshot as of/);
+  assert.match(dash, /forge\.usage\.scope/);
 });

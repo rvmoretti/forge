@@ -22,6 +22,11 @@ Claude Code session logs, never an estimate. Highlight, in order:
 4. **Per task, grouped** (v0.22) — calls and context per done task by Forge
    version, orchestrator model and milestone, with first-pass beside each. A
    group flagged with two orchestrator models cannot be compared; say so.
+5. **Per milestone** (v0.22.2) — the dashboard's Usage page has a scope
+   selector (whole project or one milestone) for the token table and the
+   per-item strip. Point the user there rather than reading figures aloud; the
+   calls made between tasks are shown beside the selector and belong to no
+   milestone.
 
 Do not editorialize beyond that. If the user wants the raw report, they can
 run the same command in any terminal — it costs zero tokens.

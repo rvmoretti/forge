@@ -290,6 +290,28 @@ fix, and `milestone ship` refuses while the latest run is red. Field evidence: w
 `verify.*`, one two-hour stretch ran it nine times (67 minutes) and three runs failed on specs that
 were not the task's own.
 
+## The tiers are the default, and your defaults travel (v0.22.2)
+
+`forge init` now writes `gate: {}`, `options.fullVerifyEvery 3`, `options.redFirstTimeoutSec 120`
+and `options.slowLaneSec 120`, so a new project only has to put each command in the right tier:
+anything over about two minutes, or any browser/e2e or database suite, goes in `gate.*`. If a
+lane lands in `verify.*` anyway, its recorded runs tell on it: `forge preflight` (build phase),
+`forge doctor` and the `forge upgrade` step `verify-tiers` report a `verify.*` lane averaging more
+than `options.slowLaneSec` over its last ten runs — with the exact `config set gate.<lane>` /
+`config unset verify.<lane>` to paste. Lanes named like slow suites (`e2e`, `db`, `integration`,
+`playwright` …) are reported before their first run too. A per-machine defaults file
+(`~/.config/forge/defaults.json`, `options.*` only) is merged over the built-ins by every `forge
+init`: `forge config set options.models.explorer claude-sonnet-5-5 --global`, `forge config get
+--global`, `forge config unset <key> --global`. Existing projects are not changed by it — the
+session-start hook names the open upgrade steps instead.
+
+The Usage page has a **scope** selector: the whole project or one milestone. A milestone's token
+table and per-item strip are built from what was attributed to its tasks — the worker transcripts
+tied to them and the orchestrator calls made while they ran, per model — and the calls that fell
+between tasks (briefs, planning, gates) are stated beside the selector, never spread across
+milestones. The per-milestone rollup row is highlighted for the selected scope. The usage cache is
+rebuilt once for this (v8); `forge usage --rescan` does it in one go.
+
 ## Measuring Forge itself (v0.22)
 
 Every DONE task is stamped with the Forge version, the orchestrator session and its model.
