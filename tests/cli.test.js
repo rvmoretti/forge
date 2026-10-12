@@ -3275,3 +3275,11 @@ test('v0.23: forge clock splits wall-clock into model, tools and idle gaps label
   const txt = forge(['clock', '--since', '2026-10-12T00:00Z'], { env: { FORGE_CLAUDE_PROJECTS: root } }).out;
   assert.match(txt, /ORCHESTRATOR \(main thread\) — 1 transcript\(s\), 48\.0 min/);
 });
+
+test('v0.23.1: an HTTP status in a mock name is a surface, not a viewport; forge dispatch accepts --purpose plan', () => {
+  forge(['task', 'add', '--id', 'N1', '--title', '404', '--milestone', 'M1', '--allowed', 'src/nf/', '--mock', 'spec/mocks/mvp/p-404.png', '--objective', 'spec/mocks/mvp/p-404-1440.png and spec/mocks/mvp/p-404-390.png', '--criterion', 'ok::node -e "process.exit(0)"']);
+  const r = forge(['milestone', 'check', 'M1']);
+  assert.strictEqual(r.code, 0, r.out);
+  const d = forge(['dispatch', '--agent', 'forge-planner', '--purpose', 'plan', '--model', 'sonnet', '--note', 'M1']);
+  assert.strictEqual(d.code, 0, d.out);
+});

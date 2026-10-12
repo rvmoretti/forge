@@ -3633,6 +3633,9 @@ function failedAttempts(item) {
 // A surface is a mock group: the first two dash-separated parts of a mock file name under spec/mocks
 // (r-drawer-pending-1440.png and r-drawer-states.png are one surface, r-drawer; r-checkout-1440.png another).
 const MOCK_RE = /(?:^|[\s`'"(,])((?:\.\/)?(?:[\w.-]+\/)*mocks\/(?:\{[^}\s]*\}|[^\s`'",)])+?\.(?:png|jpe?g|webp|svg|gif))/gi;
+// v0.23.1: viewport widths and variant words — not any number (p-404 is a surface, p-404-1440 a 1440 view of it)
+const VARIANT_RE = /^(~|\d{3,4}w?|@?[23]x|desktop|mobile|tablet|phone|wide|narrow|dark|light|states?|v\d+)$/i;
+const NOT_VIEWPORT = new Set(['401', '403', '404', '410', '429', '500', '502', '503']);
 function itemSurfaces(item) {
   const text = [item.title, item.objective, item.mock, ...(item.mocks || []), ...(item.criteria || []).map(c => `${c.desc || ''} ${c.check || ''}`)].filter(Boolean).join(' \n ');
   const keys = new Set();
@@ -3641,8 +3644,9 @@ function itemSurfaces(item) {
     const base = path.basename(file).replace(/\.[a-z]+$/i, '');
     const dir = path.dirname(file).split('/').pop();
     // trailing viewport/variant parts are not surfaces: r-drawer-pending-1440, home-desktop, cart/375
-    const parts = base.split('-'); while (parts.length > 1 && /^(\d+|~|desktop|mobile|tablet|phone|wide|narrow|dark|light|states?|v\d+)$/i.test(parts[parts.length - 1])) parts.pop();
-    const head = (parts.length === 1 && /^(\d+|~|desktop|mobile|tablet|phone|wide|narrow|dark|light|states?)$/i.test(parts[0])) ? '' : parts.slice(0, 2).join('-');
+    const isVariant = x => VARIANT_RE.test(x) && !NOT_VIEWPORT.has(x);
+    const parts = base.split('-'); while (parts.length > 1 && isVariant(parts[parts.length - 1])) parts.pop();
+    const head = (parts.length === 1 && isVariant(parts[0])) ? '' : parts.slice(0, 2).join('-');
     if (!head) { keys.add(dir); continue; }
     keys.add(`${dir}/${head}${/[*?~]/.test(head) ? '#wide' : ''}`);
   }
@@ -6638,7 +6642,7 @@ const commands = {
   dispatch() {
     const w = loadWork();
     const agent = opt('agent'), purpose = opt('purpose');
-    const PURPOSES = ['explore', 'review', 'security', 'advise', 'test', 'other'];
+    const PURPOSES = ['explore', 'review', 'security', 'advise', 'test', 'plan', 'other']; // v0.23.1: plan (forge-planner)
     if (!agent || !purpose || !PURPOSES.includes(purpose))
       die(`Usage: forge dispatch --agent <worker> --purpose ${PURPOSES.join('|')} [--model <m>] [--item <id>] [--milestone <m>] [--note "..."]\n` +
           `(A launch that implements a work item is 'forge task dispatch <id>' instead.)`);
@@ -7621,7 +7625,7 @@ const commands = {
                                          v0.17: after the gate — commit the gate record, push, open ONE PR
                                          milestone branch → base (merge commit), record it; auto-merge only
                                          when the base branch has required status checks
-  dispatch --agent <a> --purpose explore|review|security|advise|test|other [--model m] [--item id] [--note]
+  dispatch --agent <a> --purpose explore|review|security|advise|test|plan|other [--model m] [--item id] [--note]
                                          v0.17: record a dispatch that has no IN_PROGRESS item
                                          v0.16.2: milestones are named feature slices in an explicit
                                          order; a move that would break a dependency or jump ahead of
