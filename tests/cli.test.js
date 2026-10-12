@@ -2050,6 +2050,7 @@ test('autopilot: the Stop hook continues inside a milestone and stops only for a
 
 test('autopilot: a blocked question and the run limit stop it; pre-compact tells the summary what to keep', () => {
   addItem('Q1', ['--milestone', 'M1']); addItem('Q2', ['--milestone', 'M1']); addItem('Q3', ['--milestone', 'M1']);
+  switchOn('autopilotQuestions', 'stop'); // v0.23: the pre-v0.23 behaviour (the default now carries on — tested below)
   forge(['autopilot', 'on', '--max-items', '1']);
   forge(['task', 'start', 'Q1']); forge(['task', 'block', 'Q1', '--reason', 'question: card or invoice?']);
   let h = hook('stop', { session_id: 's' });
@@ -2164,11 +2165,12 @@ test('v0.21: new projects start with every delegation switch on; existing projec
 test('C1: more than 6 criteria is refused at start without --reason, recorded with it; warn keeps the warning; autopilot states the limit', () => {
   const crit = []; for (let i = 0; i < 7; i++) crit.push('--criterion', `c${i}::node -e "process.exit(0)"`);
   forge(['task', 'add', '--id', 'BIG', '--title', 'big', '--milestone', 'M1', ...crit, '--allowed', 'src/']);
-  // warn (absent): today's behaviour
+  // warn (absent): today's behaviour — v0.23's plan check (default refuse) set to warn for this legacy path
+  switchOn('planCheck', 'warn');
   let r = forge(['task', 'start', 'BIG']);
   assert.strictEqual(r.code, 0); assert.match(r.out, /ITEM-SHAPE WARNING: 7 acceptance criteria/);
   forge(['task', 'fail', 'BIG', '--note', 'reset']);
-  switchOn('itemShape', 'refuse');
+  switchOn('itemShape', 'refuse'); switchOn('planCheck', 'off');
   r = forge(['task', 'start', 'BIG']);
   assert.notStrictEqual(r.code, 0); assert.match(r.out, /7 acceptance criteria \(limit 6, options.itemShape=refuse\)/); assert.match(r.out, /SIDE BY SIDE/);
   r = forge(['task', 'start', 'BIG', '--reason', 'one atomic migration']);
@@ -2456,7 +2458,9 @@ test('v0.22: task origin — a review fix names its parent and sits right after 
   assert.match(st, /Origin: plan:1 · review:2 · discovery:1 · human:1/);
   assert.match(st, /4 task\(s\) \(80%\) were not in the plan/);
   const dash = fs.readFileSync(path.join(dir, 'forge', 'dashboard.html'), 'utf8');
-  assert.match(dash, /1 planned · 0 split · <b title="review 2 · discovery 1 · human 1">4 discovered<\/b>/);
+  // v0.23: planned = existed at the milestone's first start (P1, F1, F1b, P2); D1 came after it
+  assert.match(dash, /4 planned · <b title="discovery 1 — added after their milestone started">1 added while building<\/b>/);
+  assert.match(st, /Plan: 4 planned at their milestone's start · 1 added while building \(discovery 1\)/);
   assert.match(dash, /origin-review/);
 });
 
@@ -3003,4 +3007,271 @@ test('v0.22.2: the Usage page has a scope selector — the token table and the p
   // the whole-project view is unchanged in substance and shown first
   assert.match(dash, /<div class="usview" data-ms="all"><div class="telgrid one"><div class="panel"><h3>Tokens <span class="mut">— observed, snapshot as of/);
   assert.match(dash, /forge\.usage\.scope/);
+});
+
+// --- v0.23: verification without repeats -------------------------------------
+
+test('v0.23: the baseline check reuses the lane results of the same verify — each lane runs once; wall time recorded', () => {
+  const marker = path.join(dir, 'lane-ran.txt');
+  forge(['config', 'set', 'verify.test', `node -e "require('fs').appendFileSync('${marker}','x')"`]);
+  forge(['baseline', 'capture']);
+  fs.writeFileSync(marker, '');
+  addItem('B1'); forge(['task', 'start', 'B1']); touch('b1.txt');
+  const r = forge(['task', 'verify', 'B1']);
+  assert.strictEqual(r.code, 0, r.out);
+  assert.strictEqual(fs.readFileSync(marker, 'utf8'), 'x', 'the lane ran twice');
+  const v = work().items.B1.verifications[0];
+  assert.match(v.results.find(x => x.kind === 'baseline:test').note, /GREEN → GREEN · same run/);
+  assert.ok(Number.isFinite(v.wallMs) && v.wallMs >= v.durationMs, JSON.stringify(v));
+});
+
+test('v0.23: a bare playwright criterion is covered by an e2e gate lane that passed in the same verify; red-first skips guards and specs not written yet', () => {
+  // the gate lane is an unfiltered `playwright test` (a fake one on PATH); criterion checks are `npx playwright test …`
+  const bin = path.join(dir, 'fakebin'); fs.mkdirSync(bin);
+  fs.writeFileSync(path.join(bin, 'playwright'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  const env = { PATH: `${bin}:${process.env.PATH}` };
+  forge(['config', 'set', 'gate.e2e', 'playwright test']);
+  forge(['task', 'add', '--id', 'C1', '--title', 'c1', '--allowed', 'src/',
+    '--criterion', 'own spec::npx playwright test e2e/c1-own.spec.ts',
+    '--criterion', 'cart e2e stay green::npx playwright test e2e/01-cart-',
+    '--criterion', 'unit::node -e "process.exit(1)"']);
+  let r = forge(['task', 'start', 'C1']);
+  assert.strictEqual(r.code, 0, r.out);
+  assert.match(r.out, /Red-first: 2 check\(s\) not run at start/);
+  const pre = work().items.C1.preState;
+  assert.strictEqual(pre[0].skipped, 'new-spec'); assert.strictEqual(pre[1].skipped, 'guard'); assert.strictEqual(pre[2].exit, 1);
+  // a bug-fix criterion must prove red first — "regression", "unchanged", "no longer breaks" are not guards
+  forge(['task', 'add', '--id', 'C3', '--title', 'c3', '--allowed', 'src3/', '--criterion', 'Regression test: total computed once::node -e "process.exit(1)"', '--criterion', 'The total no longer breaks on an empty cart::node -e "process.exit(1)"']);
+  assert.ok(!/regression guard/.test(forge(['brief', 'C3']).out));
+  assert.match(forge(['brief', 'C1']).out, /cart e2e stay green.*regression guard: Forge runs it at verify/);
+  // make the unit check pass, then a full verify: the two playwright checks are covered, never run (npx playwright is not installed here)
+  forge(['task', 'update', 'C1', '--criterion-remove', '2', '--criterion-add', 'unit::node -e "process.exit(0)"']);
+  touch('c1.txt');
+  r = forge(['task', 'verify', 'C1', '--full'], { env });
+  assert.strictEqual(r.code, 0, r.out);
+  const v = work().items.C1.verifications.slice(-1)[0];
+  const cov = v.results.filter(x => x.covered);
+  assert.strictEqual(cov.length, 2, JSON.stringify(v.results));
+  assert.match(cov[0].note, /covered by gate:e2e/);
+  // without the gate lane in the run, the criterion runs (and fails: no playwright here)
+  r = forge(['task', 'verify', 'C1']);
+  assert.notStrictEqual(r.code, 0);
+  // options.redFirst all runs every check at start
+  switchOn('redFirst', 'all');
+  forge(['task', 'add', '--id', 'C2', '--title', 'c2', '--allowed', 'src2/', '--criterion', 'still green::node -e "process.exit(0)"']);
+  forge(['task', 'start', 'C2']);
+  assert.strictEqual(work().items.C2.preState[0].exit, 0);
+});
+
+test('v0.23: after a failed full verify the next verifies run only the failed gate lanes (Playwright --last-failed or gateRetry.<lane>) until they pass; the pass counts as the full', () => {
+  const flagF = path.join(dir, 'e2e-broken'); const dbm = path.join(dir, 'db-ran.txt'); const rm = path.join(dir, 'retry-ran.txt');
+  fs.writeFileSync(flagF, '1');
+  forge(['config', 'set', 'gate.e2e', `node -e "process.exit(require('fs').existsSync('${flagF}')?1:0)"`]);
+  forge(['config', 'set', 'gate.db', `node -e "require('fs').appendFileSync('${dbm}','x')"`]);
+  forge(['config', 'set', 'gateRetry.e2e', `node -e "require('fs').appendFileSync('${rm}','x');process.exit(require('fs').existsSync('${flagF}')?1:0)"`]);
+  addItem('R1', ['--milestone', 'M1', '--allowed', 'r1/']); addItem('R2', ['--milestone', 'M1', '--allowed', 'r2/']);
+  forge(['task', 'start', 'R1']); touch('r1.txt');
+  let r = forge(['task', 'verify', 'R1', '--full']);
+  assert.notStrictEqual(r.code, 0);
+  assert.strictEqual(fs.readFileSync(dbm, 'utf8'), 'x');
+  // still broken: the retry runs only e2e, through gateRetry.e2e; db is not run again
+  r = forge(['task', 'verify', 'R1']);
+  assert.notStrictEqual(r.code, 0); assert.match(r.out, /retry of the failed full verification/);
+  assert.strictEqual(fs.readFileSync(dbm, 'utf8'), 'x'); assert.strictEqual(fs.readFileSync(rm, 'utf8'), 'x');
+  // fixed: the retry passes and is recorded as the full
+  fs.unlinkSync(flagF);
+  r = forge(['task', 'verify', 'R1']);
+  assert.strictEqual(r.code, 0, r.out);
+  const v = work().items.R1.verifications.slice(-1)[0];
+  assert.strictEqual(v.full, true); assert.deepStrictEqual(v.retryLanes, ['e2e']);
+  assert.strictEqual(fs.readFileSync(dbm, 'utf8'), 'x');
+  forge(['task', 'done', 'R1']);
+  // the milestone is green again: the next task's verify runs no gate lane
+  forge(['task', 'start', 'R2']); touch('r2.txt');
+  r = forge(['task', 'verify', 'R2']);
+  assert.strictEqual(r.code, 0, r.out); assert.ok(!/retry of the failed full/.test(r.out));
+});
+
+test('v0.23: a Playwright gate lane retries with exactly the spec files that failed in the full run; --all-lanes runs every lane', () => {
+  const bin = path.join(dir, 'fakebin'); fs.mkdirSync(bin);
+  const log = path.join(dir, 'pw-args.txt'); const flagF = path.join(dir, 'pw-broken');
+  fs.writeFileSync(path.join(bin, 'playwright'), `#!/bin/sh\necho "$@" >> '${log}'\nif [ -f '${flagF}' ]; then echo "  1) [chromium] › e2e/01-cart-9a.spec.ts:12:3 › reserve at"; echo "  2) [chromium] › e2e/04-passes-2.spec.ts:40:1 › pass"; exit 1; fi\nexit 0\n`, { mode: 0o755 });
+  const env = { PATH: `${bin}:${process.env.PATH}` };
+  fs.writeFileSync(flagF, '1');
+  forge(['config', 'set', 'gate.e2e', 'playwright test']);
+  addItem('P1', ['--milestone', 'M1', '--allowed', 'p1/']);
+  forge(['task', 'start', 'P1'], { env }); touch('p1.txt');
+  assert.notStrictEqual(forge(['task', 'verify', 'P1', '--full'], { env }).code, 0);
+  fs.unlinkSync(flagF);
+  let r = forge(['task', 'verify', 'P1'], { env });
+  assert.strictEqual(r.code, 0, r.out);
+  assert.deepStrictEqual(fs.readFileSync(log, 'utf8').trim().split('\n'), ['test', 'test e2e/01-cart-9a.spec.ts e2e/04-passes-2.spec.ts']);
+  r = forge(['task', 'verify', 'P1', '--full', '--all-lanes'], { env });
+  assert.strictEqual(r.code, 0, r.out);
+  assert.strictEqual(fs.readFileSync(log, 'utf8').trim().split('\n').pop(), 'test');
+});
+
+test('v0.23: options.fullTier ci — the periodic full run is the milestone branch CI result, not a local gate run', () => {
+  const marker = path.join(dir, 'gate-ran.txt');
+  const gh = path.join(dir, 'fake-gh.sh'); const ghOut = path.join(dir, 'gh.json');
+  fs.writeFileSync(gh, `#!/bin/sh\ncat '${ghOut}'\n`, { mode: 0o755 });
+  const env = { FORGE_GH: gh };
+  forge(['config', 'set', 'gate.e2e', `node -e "require('fs').appendFileSync('${marker}','x')"`]);
+  forge(['config', 'set', 'options.fullVerifyEvery', '1']);
+  switchOn('fullTier', 'ci');
+  addItem('Q1', ['--milestone', 'M1', '--allowed', 'q1/']); addItem('Q2', ['--milestone', 'M1', '--allowed', 'q2/']); addItem('Q3', ['--milestone', 'M1', '--allowed', 'q3/']);
+  forge(['task', 'start', 'Q1']); touch('q1.txt'); forge(['task', 'verify', 'Q1']); forge(['task', 'done', 'Q1']);
+  // CI red on the milestone branch → the verify fails with the run, no local gate run
+  fs.writeFileSync(ghOut, JSON.stringify([{ status: 'completed', conclusion: 'failure', headSha: 'abcdef1234', url: 'https://ci/1', name: 'ci', createdAt: '2026-10-12T10:00:00Z' }]));
+  forge(['task', 'start', 'Q2'], { env }); touch('q2.txt');
+  let r = forge(['task', 'verify', 'Q2'], { env });
+  assert.notStrictEqual(r.code, 0); assert.match(r.out, /gate:ci/); assert.ok(!fs.existsSync(marker));
+  // CI green → passes and counts as the full run
+  fs.writeFileSync(ghOut, JSON.stringify([{ status: 'completed', conclusion: 'success', headSha: 'abcdef1234', url: 'https://ci/2', name: 'ci', createdAt: '2026-10-12T10:05:00Z' }]));
+  r = forge(['task', 'verify', 'Q2'], { env });
+  assert.strictEqual(r.code, 0, r.out); assert.strictEqual(work().items.Q2.verifications.slice(-1)[0].full, true); assert.ok(!fs.existsSync(marker));
+  // --full still runs locally
+  r = forge(['task', 'verify', 'Q2', '--full'], { env });
+  assert.strictEqual(r.code, 0, r.out); assert.strictEqual(fs.readFileSync(marker, 'utf8'), 'x');
+});
+
+// --- v0.23: plan-time size, planned vs added ---------------------------------
+
+test('v0.23: a milestone whose tasks cover several surfaces is refused at its first start; milestone check lists them and prints the planner brief; a split before the start counts as planned', () => {
+  forge(['task', 'add', '--id', 'P1', '--title', 'Reserve and pay', '--milestone', 'M1', '--allowed', 'src/pay/',
+    '--objective', 'Build to spec/mocks/mvp/r-drawer-pending-1440.png, spec/mocks/mvp/r-drawer-states.png, spec/mocks/mvp/r-checkout-1440.png and spec/mocks/mvp/r-return-{1440,390}.png',
+    '--criterion', 'ok::node -e "process.exit(0)"']);
+  forge(['task', 'add', '--id', 'P2', '--title', 'Home', '--milestone', 'M1', '--allowed', 'src/home/', '--mock', 'spec/mocks/mvp/p-home-1440.png',
+    '--criterion', 'ok::node -e "process.exit(0)"']);
+  let r = forge(['milestone', 'check', 'M1']);
+  assert.notStrictEqual(r.code, 0);
+  assert.match(r.out, /1 of 2 TODO task\(s\) are bigger than one task/);
+  assert.match(r.out, /P1 .*3 surfaces \(mvp\/r-drawer, mvp\/r-checkout, mvp\/r-return\)/);
+  r = forge(['milestone', 'check', 'M1', '--brief']);
+  assert.match(r.out, /# Planner brief — milestone M1/); assert.match(r.out, /forge\/context\/questions-M1\.md/); assert.match(r.out, /--agent forge-planner/);
+  // the first start of the milestone is refused, even for the task that fits
+  r = forge(['task', 'start', 'P2', '--reason', 'out of order on purpose']);
+  assert.notStrictEqual(r.code, 0, r.out);
+  r = forge(['task', 'start', 'P1']);
+  assert.notStrictEqual(r.code, 0); assert.match(r.out, /Milestone 'M1' is starting and 1 task\(s\) are bigger than one task/); assert.match(r.out, /--size-reason/);
+  // the planner's split, before the start
+  forge(['task', 'update', 'P1', '--title', 'Cart drawer', '--objective', 'Build to spec/mocks/mvp/r-drawer-pending-1440.png and spec/mocks/mvp/r-drawer-states.png']);
+  forge(['task', 'add', '--id', 'P1b', '--title', 'Checkout', '--milestone', 'M1', '--origin', 'split', '--parent', 'P1', '--allowed', 'src/pay/checkout/', '--mock', 'spec/mocks/mvp/r-checkout-1440.png', '--criterion', 'ok::node -e "process.exit(0)"']);
+  forge(['task', 'add', '--id', 'P1c', '--title', 'Return', '--milestone', 'M1', '--origin', 'split', '--parent', 'P1', '--allowed', 'src/pay/return/', '--mock', 'spec/mocks/mvp/r-return-1440.png', '--criterion', 'ok::node -e "process.exit(0)"']);
+  assert.strictEqual(forge(['milestone', 'check', 'M1']).code, 0);
+  r = forge(['task', 'start', 'P1']);
+  assert.strictEqual(r.code, 0, r.out);
+  // a split after the start is a late split, counted as added
+  forge(['task', 'add', '--id', 'P2b', '--title', 'Home hero', '--milestone', 'M1', '--origin', 'split', '--parent', 'P2', '--allowed', 'src/home/hero/', '--criterion', 'ok::node -e "process.exit(0)"']);
+  r = forge(['stats']);
+  assert.match(r.out, /Plan: 4 planned at their milestone's start · 1 added while building \(split 1\)/);
+  // viewport and variant parts of a mock name are not surfaces
+  forge(['task', 'add', '--id', 'V1', '--title', 'v', '--milestone', 'M2', '--allowed', 'src/v/', '--objective', 'spec/mocks/home-desktop.png, spec/mocks/home-mobile.png and spec/mocks/home-states.png', '--criterion', 'ok::node -e "process.exit(0)"']);
+  forge(['task', 'add', '--id', 'V2', '--title', 'v2', '--milestone', 'M2', '--allowed', 'src/v2/', '--objective', 'spec/mocks/cart/1440.png and spec/mocks/cart/375.png', '--criterion', 'ok::node -e "process.exit(0)"']);
+  assert.strictEqual(forge(['milestone', 'check', 'M2']).code, 0, forge(['milestone', 'check', 'M2']).out);
+  // options.planCheck warn lets an oversized task start, with a warning
+  switchOn('planCheck', 'warn');
+  forge(['task', 'add', '--id', 'P3', '--title', 'Two pages', '--milestone', 'M1', '--allowed', 'src/x/', '--objective', 'spec/mocks/mvp/a-one-1440.png and spec/mocks/mvp/b-two-1440.png', '--criterion', 'ok::node -e "process.exit(0)"']);
+  forge(['task', 'done', 'P1']);
+});
+
+test('v0.23: criteria cannot be appended past the limit — a review finding is the reviewed task\'s fix, not a later task\'s criterion', () => {
+  forge(['task', 'add', '--id', 'H1', '--title', 'hardening', '--allowed', 'src/', ...[1, 2, 3, 4, 5, 6].flatMap(i => ['--criterion', `c${i}::node -e "process.exit(0)"`])]);
+  let r = forge(['task', 'update', 'H1', '--criterion-add', 'from the 7c review::node -e "process.exit(0)"']);
+  assert.notStrictEqual(r.code, 0); assert.match(r.out, /would carry 7 criteria \(limit 6/); assert.match(r.out, /--origin review --parent <reviewed>/);
+  r = forge(['task', 'update', 'H1', '--criterion-add', 'needed::node -e "process.exit(0)"', '--reason', 'belongs here']);
+  assert.strictEqual(r.code, 0, r.out);
+  switchOn('maxCriteria', 8);
+  r = forge(['task', 'update', 'H1', '--criterion-add', 'eighth::node -e "process.exit(0)"']);
+  assert.strictEqual(r.code, 0, r.out);
+});
+
+// --- v0.23: hands-off guard --------------------------------------------------
+
+test('v0.23: hands-off guard — once a worker agent_id has been seen, the main thread may not edit source, sed -i source or run Playwright; workers and housekeeping are unaffected', () => {
+  const deny = r => { try { return JSON.parse(r.out).hookSpecificOutput.permissionDecision === 'deny'; } catch (_) { return false; } };
+  const edit = (file, extra = {}) => hook('pretooluse', Object.assign({ tool_name: 'Edit', session_id: 's1', tool_input: { file_path: path.join(dir, file) } }, extra));
+  const bash = (command, extra = {}) => hook('pretooluse', Object.assign({ tool_name: 'Bash', session_id: 's1', tool_input: { command } }, extra));
+  // not armed yet: an older Claude Code without agent_id is never blocked
+  assert.ok(!deny(edit('src/app.ts')));
+  assert.ok(!deny(bash('npx playwright test e2e/x.spec.ts')));
+  // a worker call arms the guard and is itself allowed
+  assert.ok(!deny(edit('src/app.ts', { agent_id: 'a1', agent_type: 'forge-implementer' })));
+  assert.ok(fs.existsSync(path.join(dir, 'forge', 'state', 'agent-id.seen')));
+  assert.ok(!deny(bash('npx playwright test e2e/x.spec.ts', { agent_id: 'a1' })));
+  // main thread: refused
+  let r = edit('src/app.ts');
+  assert.ok(deny(r), r.out); assert.match(r.out, /hands-off guard: the orchestrator does not edit project source \(src\/app\.ts\)/);
+  assert.ok(deny(bash('cd x && npx playwright test e2e/01-cart-')));
+  assert.ok(deny(bash('npm run test:e2e')));
+  assert.ok(deny(bash(`sed -i '' "s#a#b#" e2e/01-cart-9a.spec.ts`)));
+  // main thread: quoted text is data — criteria, config values and commit messages that mention Playwright are fine
+  assert.ok(!deny(bash(`f(){ node /x/forge.js "$@"; }; f task update T1 --criterion-add "own spec::npx playwright test e2e/t1.spec.ts"`)));
+  assert.ok(!deny(bash('node forge.js config set gate.e2e "npm run test:e2e"')));
+  assert.ok(!deny(bash('git commit -m "run npx playwright test later"')));
+  assert.ok(!deny(bash('grep -rn "playwright test" e2e/')));
+  assert.ok(deny(bash(`sed -e 's/a/b/' -i src/x.ts`)));
+  assert.ok(deny(bash('cd e2e && sed -i.bak s/a/b/ 01-cart.spec.ts')));
+  assert.ok(!deny(edit('.gitignore'))); assert.ok(!deny(edit('.github/workflows/ci.yml')));
+  // main thread: housekeeping and Forge's own verify stay allowed
+  assert.ok(!deny(edit('forge/briefs/T1.md')));
+  assert.ok(!deny(edit('docs/notes.txt')));
+  assert.ok(!deny(edit('CLAUDE.md')));
+  assert.ok(!deny(bash('node forge.js task verify T1 --full')));
+  assert.ok(!deny(bash(`sed -i '' 's/a/b/' forge/briefs/T1.md`)));
+  assert.ok(!deny(bash('git status')));
+  // the owner's switch
+  switchOn('handsOff', 'warn');
+  assert.ok(!deny(edit('src/app.ts')));
+  assert.match(forge(['trace', '--refusals']).out + fs.readFileSync(path.join(dir, 'forge', 'state', 'trace.jsonl'), 'utf8'), /hands-off/);
+});
+
+test('v0.23: autopilot — a question blocks its task, not the run: asked once, independent tasks go on; the run stops when nothing else is ready', () => {
+  addItem('Q1', ['--milestone', 'M1', '--allowed', 'q1/']); addItem('Q2', ['--milestone', 'M1', '--allowed', 'q2/']); addItem('Q3', ['--milestone', 'M1', '--allowed', 'q3/', '--deps', 'Q1']);
+  forge(['autopilot', 'on']);
+  forge(['task', 'start', 'Q1']); forge(['task', 'block', 'Q1', '--reason', 'question: card or invoice?']);
+  let h = hook('stop', { session_id: 's' });
+  assert.strictEqual(h.code, 2);
+  assert.match(h.out, /Q1 is blocked — question: card or invoice\?\. Write that question for the owner now/);
+  assert.match(h.out, /keep going — the next task is .*Q2/);
+  forge(['task', 'start', 'Q2']); touch('q2.txt'); forge(['task', 'verify', 'Q2']); forge(['task', 'done', 'Q2']);
+  // Q3 depends on the blocked Q1: nothing independent is left → the run stops for the owner
+  h = hook('stop', { session_id: 's', stop_hook_active: true });
+  assert.strictEqual(h.code, 2);
+  assert.match(h.out, /AUTOPILOT stops here: .*Q1 is blocked/);
+});
+
+test('v0.23: forge clock splits wall-clock into model, tools and idle gaps labelled by what ended them', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-clock-'));
+  const pd = path.join(root, fs.realpathSync(dir).replace(/[^a-zA-Z0-9]/g, '-'));
+  fs.mkdirSync(path.join(pd, 's1', 'subagents'), { recursive: true });
+  const L = (o) => JSON.stringify(o);
+  const t = m => new Date(Date.UTC(2026, 9, 12, 10, m)).toISOString();
+  fs.writeFileSync(path.join(pd, 's1.jsonl'), [
+    L({ type: 'user', timestamp: t(0), message: { content: 'go' } }),
+    L({ type: 'assistant', timestamp: t(1), message: { id: 'm1', content: [{ type: 'tool_use', id: 'u1', name: 'Bash', input: { command: 'node forge.js task verify T1' } }] } }),
+    L({ type: 'user', timestamp: t(11), message: { content: [{ type: 'tool_result', tool_use_id: 'u1' }] } }),
+    L({ type: 'assistant', timestamp: t(12), message: { id: 'm2', content: [{ type: 'text', text: 'waiting' }] } }),
+    L({ type: 'user', timestamp: t(32), isMeta: true, message: { content: 'Another Claude session sent a message: <agent-message from="a1"> [Subagent hand-back] done' } }),
+    L({ type: 'assistant', timestamp: t(33), message: { id: 'm3', content: [{ type: 'text', text: 'ok' }] } }),
+    L({ type: 'user', timestamp: t(48), message: { content: 'continue' } }),
+  ].join('\n') + '\n');
+  fs.writeFileSync(path.join(pd, 's1', 'subagents', 'agent-a1.jsonl'), [
+    L({ type: 'user', timestamp: t(12), isSidechain: true, message: { content: '# Work brief — T1' } }),
+    L({ type: 'assistant', timestamp: t(14), isSidechain: true, message: { id: 'w1', content: [{ type: 'tool_use', id: 'v1', name: 'Bash', input: { command: 'npx playwright test e2e/t1.spec.ts' } }] } }),
+    L({ type: 'user', timestamp: t(24), isSidechain: true, message: { content: [{ type: 'tool_result', tool_use_id: 'v1' }] } }),
+    L({ type: 'assistant', timestamp: t(30), isSidechain: true, message: { id: 'w2', content: [{ type: 'text', text: 'done' }] } }),
+  ].join('\n') + '\n');
+  const r = forge(['clock', '--since', '2026-10-12T00:00Z', '--json'], { env: { FORGE_CLAUDE_PROJECTS: root } });
+  assert.strictEqual(r.code, 0, r.out);
+  const j = JSON.parse(r.out);
+  const min = ms => Math.round(ms / 60000);
+  assert.strictEqual(min(j.ms.main['bash: forge task verify']), 10);
+  assert.strictEqual(min(j.ms.main['idle → a worker handed back']), 20);
+  assert.strictEqual(min(j.ms.main['idle → the owner']), 15);
+  assert.strictEqual(min(j.ms.main['model (API answering, thinking incl.)']), 3);
+  assert.strictEqual(min(j.ms.side['bash: playwright']), 10);
+  assert.strictEqual(min(j.ms.side['model (API answering, thinking incl.)']), 8);
+  const txt = forge(['clock', '--since', '2026-10-12T00:00Z'], { env: { FORGE_CLAUDE_PROJECTS: root } }).out;
+  assert.match(txt, /ORCHESTRATOR \(main thread\) — 1 transcript\(s\), 48\.0 min/);
 });

@@ -183,7 +183,9 @@ arrives from the code; the plan is the gap between them.
    the graph at cut time** — later-milestone items as thin items (id,
    title, objective, milestone, deps; criteria and scope via `task update`
    when their milestone approaches). A backlog parked in a document is a
-   spec-drift bug. Draft the architecture first (§8) and register the
+   spec-drift bug. One surface per task, checked with `forge milestone check
+   <m>` before the milestone's first start (v0.23 — the planner brief splits
+   and collects the mock-vs-spec questions). Draft the architecture first (§8) and register the
    screens the goals touch (`forge screen add <id> --app <part> --mock ..`) so
    every item can be tagged. No
    "foundation" milestone: groundwork goes inside the first feature that

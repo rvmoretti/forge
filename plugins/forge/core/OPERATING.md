@@ -57,8 +57,9 @@ existing project, `forge arch scan` drafts the parts from the repo.
 **Autopilot** (`forge autopilot on`): after each task, take the next task of the current
 milestone at once — no progress summary, no "shall I continue?". The Stop hook refuses to end
 the turn while such a task is ready and tells you when to stop: the milestone is ready for the
-user's testing, a task is blocked on a product question, a task failed twice, nothing is
-startable, or a run limit is reached. Put a question to the user by blocking the task
+user's testing, a task is blocked on a product question **and nothing independent is ready**
+(v0.23 — until then it tells you to ask the question once and keep going), a task failed twice,
+nothing is startable, or a run limit is reached. Put a question to the user by blocking the task
 (`forge task block <id> --reason "question: …"`) and asking it; never guess a product answer to
 keep the run going. The same goes for anything only the user can do — commit or revert a file of
 theirs, supply a credential: block the task with that request, never just end the turn with tasks
@@ -91,6 +92,45 @@ change → orientation, baseline, scoped mini-spec; (B) a destination (a
 feature/change set, possibly with mockups) → the roadmap intake: goals
 collected or elicited, gap analysis of desired vs observed, spec seeded
 from confirmed goals, milestone cut across everything. Then the same loop.
+
+## Planning a milestone (v0.23 — before its first task starts)
+
+Field evidence (cisc, 12 Oct 2026): milestones cut one task per *group* of pages grew
+19 → 36 and 24 → 78 tasks while running — 35 of those were splits the orchestrator made
+mid-milestone, and 1.1 h of a 7.8 h day went to questions about mock-vs-spec conflicts
+that surfaced mid-task. Both belong before the start:
+
+1. `forge milestone check <m>` — every TODO task must be **one surface** (one page/screen
+   and its mock set — `options.maxSurfaces`, 1), at most `options.maxCriteria` (6)
+   criteria and 8 scope globs. The milestone's first `task start` refuses while any task
+   fails it (`options.planCheck refuse`; `--size-reason` records an exception).
+2. `forge milestone check <m> --brief` prints the **planner brief**; dispatch
+   `forge-planner` (Sonnet) with it. It writes the split commands to
+   `forge/context/plan-<m>.md` and the **mock-vs-spec questions** to
+   `forge/context/questions-<m>.md`. Review the commands, run them; ask the owner the
+   questions **in one message**, record the answers (`forge decision add`). You do not
+   split tasks or compare mocks yourself.
+3. Splits made before the first start count as planned; afterwards the dashboard and
+   `forge stats` show them as *added while building* (late splits), with discoveries,
+   review fixes and owner requests.
+
+A question that still comes up mid-milestone blocks **its** task, not the run: `forge
+task block <id> --reason "question: …"`, ask it once in a short message the owner can
+answer while you work, and carry on with independent tasks — autopilot does this by
+itself (`options.autopilotQuestions continue`) and stops only when nothing independent
+is ready.
+
+## Hands off (v0.23)
+
+The orchestrator decides; workers do. With `options.handsOff refuse` (the default) the
+PreToolUse hook denies the main thread editing project source (anything outside
+forge/, the spec, docs/ and *.md), `sed -i` on source, and running Playwright — once
+Forge has seen a worker's `agent_id` (proof that Claude Code reports it). A one-line fix
+is still a dispatch: brief it in three lines. Forge's `task verify` runs the suites; you
+read its verdict, not the test output. Briefs **point, they don't pre-solve**: name the
+mock files, the spec section and the route; do not describe the mock's layout, labels
+and states or the code changes — the worker opens the mock and the spec itself, in its
+own window.
 
 ## The build loop (per work item)
 
@@ -141,7 +181,14 @@ from confirmed goals, milestone cut across everything. Then the same loop.
    worker is never resumed through chat; that path is retry-by-fresh-brief,
    nothing else.
 4. **Verify**: `forge task verify <id>` — machine evidence, not the worker's
-   claim. **Two tiers** (v0.22.1): `verify.*` runs on every task — the fast lanes
+   claim. v0.23: each check runs once per verify (the baseline comparison reuses the
+   lanes just run); a criterion that only runs part of the e2e suite is covered by the
+   e2e gate lane when that lane ran and passed in the same verify; after a failed full
+   verify the next verifies re-run only the failed gate lanes (Playwright with
+   the spec files that failed in the full run; `gateRetry.<lane>` sets the command; `--full` or `--all-lanes` for everything)
+   until they pass, and that pass counts as the full; red-first at `task start` skips
+   regression guards ("… stay green") and specs the worker has not written yet;
+   `options.fullTier ci` lets the milestone branch's CI run be the periodic full tier. **Two tiers** (v0.22.1): `verify.*` runs on every task — the fast lanes
    (lint, typecheck, unit tests, build, security scan) plus the task's own criteria,
    which for UI work are *that task's* spec files, never the whole suite. `gate.*`
    holds the slow lanes (the whole e2e suite, the database suite) and runs at the
@@ -201,12 +248,16 @@ from confirmed goals, milestone cut across everything. Then the same loop.
      review --from-review <file>` (checks passed, the reviewer rejected — it counts
      toward escalation and `forge stats` reports it apart from worker failures); the
      retry brief carries the findings. Non-blocking findings never stay in a chat
-     message: each becomes ONE fix task that names its parent — `forge task add --id
-     <parent>-fix1 --origin review --parent <parent> …` — placed right after the parent
-     in the plan, with its own scope and criteria; add `--deps` on a later planned task
-     only when that task genuinely needs the fix. Fix tasks are depth 1: a finding on a
-     fix task folds into it (`task update --criterion-add`) or, if it is already DONE,
-     into one consolidated hardening task for the milestone — never a chain of fixes.
+     message (v0.23): **in-scope ones are fixed before the task closes** — send them to the
+     same worker (`forge task dispatch <id> --kind message --findings --note "…"`), re-verify,
+     close; **out-of-scope ones become ONE fix task each** that names its parent — `forge task
+     add --id <parent>-fix1 --origin review --parent <parent> …` — placed right after the
+     parent, with its own scope and criteria; add `--deps` on a later planned task only when
+     that task genuinely needs the fix. **Never append a finding as a criterion of some later
+     task**: `task update --criterion-add` refuses past `options.maxCriteria` (6) — field
+     evidence, one cisc task grew to 15 criteria that way and would have been split again.
+     Fix tasks are depth 1: a finding on a fix task folds into it, or, when it is DONE, into a
+     new fix task of the reviewed task — never a chain of fixes.
      An accepted risk is a decision (`forge decision add`), not a silent omission.
      Sending findings to the *running* worker is allowed when the task is still open,
      but it is recorded as a correction — `forge task dispatch <id> --kind message

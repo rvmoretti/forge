@@ -98,7 +98,12 @@ At **Step 7** (generate handoff artifacts), in addition to `CLAUDE.md` and
    may enter THIN (id, title, objective, milestone, deps only — criteria and
    scope are added via `task update` when their milestone approaches).
    Nothing planned stays outside the graph — a backlog parked in a document
-   is invisible to every gate and view. **First seed the architecture
+   is invisible to every gate and view. **One surface per task** (v0.23): a
+   page or screen and its mock set is one task; a shared component is its own
+   task before the pages that use it. Before a milestone's first task starts,
+   `forge milestone check <m>` must pass — `--brief` gives the forge-planner
+   (Sonnet) brief that splits what doesn't fit and lists the mock-vs-spec
+   questions for the owner in one batch. **First seed the architecture
    and screens** (v0.19): every runtime part the spec names becomes `forge arch
    add <id> --name ".." --kind frontend|backend|db|auth|job|storage|hosting|integration
    --runs-on "<where it runs>"` with `forge arch link <from> <to> --label ".."` for

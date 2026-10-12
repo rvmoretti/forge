@@ -312,6 +312,44 @@ between tasks (briefs, planning, gates) are stated beside the selector, never sp
 milestones. The per-milestone rollup row is highlighted for the selected scope. The usage cache is
 rebuilt once for this (v8); `forge usage --rescan` does it in one go.
 
+## Less waiting, honest plans (v0.23)
+
+Measured on cisc, 12 Oct 2026 (7.8 h orchestrator thread, `forge clock`): 10% was the model
+answering, ~40% waiting on tests, 23% on workers, 14% on the owner. Playwright ran about 4 h in
+the day — each change three times. The design-system milestone went 19 → 36 tasks, 14 of them
+splits made mid-milestone.
+
+- **Each check runs once.** The baseline comparison reuses the lanes the verify just ran (before,
+  every lane ran twice — on a full verify the whole e2e + db suite; 76 min that day). A criterion
+  that is a bare `playwright test <files>` is covered by an e2e gate lane that passed in the same
+  verify. `wallMs` on each verification is the real elapsed time.
+- **A failed full verify is retried narrow.** The next verifies — of any task in the milestone —
+  re-run only the failed gate lanes (Playwright: the spec files that failed in the full run; `gateRetry.<lane>` sets the
+  command) until they pass; that pass counts as the full. `task verify --all-lanes` runs everything.
+- **Red-first skips what cannot prove anything**: regression guards ("… stay green") and specs the
+  worker has not written yet (`options.redFirst all` restores every check).
+- **CI can be the periodic full tier**: `options.fullTier ci` reads the milestone branch's latest
+  CI run instead of running the gate lanes locally every Nth task (off by default).
+- **Workers run their own checks**; the brief says so, and that Forge's verify owns regressions.
+- **Hands off**: the orchestrator's own tool calls may not edit source, `sed -i` source or run
+  Playwright (`options.handsOff`); it arms once a worker's `agent_id` has been seen.
+- **Plan-time size**: one surface per task (a page and its mock set), at most 6 criteria —
+  `forge milestone check <m>`; the milestone's first start refuses until it passes.
+  `--brief` prints the `forge-planner` (Sonnet) brief: split commands to
+  `forge/context/plan-<m>.md`, mock-vs-spec questions to `forge/context/questions-<m>.md`, asked
+  in one message. `task update --criterion-add` refuses past the limit — no catch-all tasks.
+- **Planned vs added** is counted at each milestone's first start: a split before it is planning;
+  after it, a late split, shown with discoveries, review fixes and owner requests.
+- **Review findings**: in-scope ones are fixed by the same worker before the task closes;
+  out-of-scope ones get their own fix task.
+- **A question blocks its task, not the run**: autopilot asks it once and carries on with
+  independent tasks (`options.autopilotQuestions stop` restores the old stop).
+- **Delegation by context read** on the Usage page and in `forge usage` (what the quota spends),
+  next to the output-token share. **`forge clock [--since …] [--samples]`** prints the wall-clock
+  breakdown.
+- The `delegation-on` upgrade step lists the v0.21 team-delegation switches a project still has
+  off, with the commands.
+
 ## Measuring Forge itself (v0.22)
 
 Every DONE task is stamped with the Forge version, the orchestrator session and its model.
