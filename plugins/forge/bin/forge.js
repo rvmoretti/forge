@@ -4740,8 +4740,19 @@ const commands = {
       // v0.23: red-first proves a check can fail. A regression guard is expected green, and a spec the worker has
       // not written yet cannot run — both are skipped (options.redFirst smart, the default; 'all' runs every one).
       const cfgRF = loadConfig();
-      item.preState = item.criteria.map(c => { if (!c.check) return null; const skip = redFirstSkip(cfgRF, c); if (skip) return { desc: c.desc, exit: null, skipped: skip }; const r = run(c.check, { timeout: redFirstTimeoutMs(cfgRF) }); return { desc: c.desc, exit: r.exit === -1 ? null : r.exit, timedOut: r.exit === -1 || undefined }; });
-      item.startTree = treeState();
+      // v0.23.2: a RESTART (after a failed attempt or an unblock) keeps the first start's red-first record and tree.
+      // Re-running red-first on a tree that already holds attempt 1's work made every check green "before work",
+      // and done refused the task (cisc 06-design-system-9e, 12 Oct: blocked 2 h for a hand repair). Only criteria
+      // added since the first start are run now.
+      const priorPre = item.attempts.some(a => a.outcome === 'started') && Array.isArray(item.preState) ? item.preState : null;
+      item.preState = item.criteria.map(c => {
+        if (!c.check) return null;
+        const old = priorPre && priorPre.find(p => p && p.desc === c.desc);
+        if (old) return old;
+        const skip = redFirstSkip(cfgRF, c); if (skip) return { desc: c.desc, exit: null, skipped: skip };
+        const r = run(c.check, { timeout: redFirstTimeoutMs(cfgRF) }); return { desc: c.desc, exit: r.exit === -1 ? null : r.exit, timedOut: r.exit === -1 || undefined, addedAfterStart: priorPre ? true : undefined };
+      });
+      if (!(priorPre && item.startTree)) item.startTree = treeState();
       // v0.16.2: HEAD at the first start — the lower bound of this item's commit range
       if (!item.commitBase) item.commitBase = gitHead();
       const alreadyGreen = item.preState.filter(p => p && p.exit === 0);
@@ -4784,15 +4795,24 @@ const commands = {
       const cfg = loadConfig() || { verify: {} };
       // C6: checks run under the verify lock, NOT the state lock
       releaseWorkLock();
+      // v0.23.2: a second verify of the SAME task while one runs is refused — it would repeat the same suites and
+      // plan its gate lanes from state read before the first one finished (cisc 06-design-system-9f3, 12 Oct: two
+      // 10-minute full runs back to back, the second never saw the first fail, so no narrow retry)
+      { let h = null; try { h = JSON.parse(fs.readFileSync(VERIFY_LOCK, 'utf8')); } catch (_) { }
+        if (h && !h.released && h.item === item.id && pidAlive(h.pid))
+          die(`Refused: a verify of ${item.id} is already running (pid ${h.pid}, since ${String(h.ts).slice(11, 19)}). Wait for its result — a second one repeats the same suites.`); }
       acquireVerifyLock(item.id, flag('no-wait'));
+      // v0.23.2: plan from the state as it is NOW (a verify that waited on the lock must see the one before it)
+      let wV = w;
+      { const wFresh = readJson(WORK_FILE, null); if (wFresh && wFresh.items && wFresh.items[item.id]) { wV = wFresh; item = wV.items[item.id]; } }
       const results = [];
       // v0.22.1: verify.* every time; gate.* when --full, after a high-risk task, or every Nth task
       const t0Verify = Date.now();
-      let fullWhy = fullVerifyReason(w, cfg, item, flag('full'));
+      let fullWhy = fullVerifyReason(wV, cfg, item, flag('full'));
       // v0.23: which gate lanes run. A retry after a failed full runs only the lanes that failed
       // (options.gateRetry, default on); options.fullTier ci lets CI on the milestone branch be the
       // periodic full run (default local). Forced (--full) and high-risk runs are always local and complete.
-      const plan = fullPlan(w, cfg, item, fullWhy, flag('full'), flag('all-lanes'));
+      const plan = fullPlan(wV, cfg, item, fullWhy, flag('full'), flag('all-lanes'));
       fullWhy = plan.why;
       for (const [k, cmd] of Object.entries(cfg.verify || {})) results.push(Object.assign({ kind: `project:${k}` }, run(cmd)));
       if (plan.ci) results.push(plan.ci);

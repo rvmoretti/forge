@@ -3283,3 +3283,30 @@ test('v0.23.1: an HTTP status in a mock name is a surface, not a viewport; forge
   const d = forge(['dispatch', '--agent', 'forge-planner', '--purpose', 'plan', '--model', 'sonnet', '--note', 'M1']);
   assert.strictEqual(d.code, 0, d.out);
 });
+
+test('v0.23.2: a restart after a review rejection keeps the first start\'s red-first record; a second verify of the same running task is refused', () => {
+  const flagF = path.join(dir, 'feature-done');
+  forge(['task', 'add', '--id', 'RS1', '--title', 'rs', '--allowed', 'src/', '--criterion', `feature::node -e "process.exit(require('fs').existsSync('${flagF}')?0:1)"`]);
+  forge(['task', 'start', 'RS1']);
+  assert.strictEqual(work().items.RS1.preState[0].exit, 1);
+  fs.writeFileSync(flagF, '1'); touch('rs1.txt');
+  forge(['task', 'verify', 'RS1']);
+  forge(['task', 'fail', 'RS1', '--kind', 'review', '--note', 'B1 layout']);
+  // the review adds a criterion; the retry starts on a tree that already holds attempt 1's work
+  forge(['task', 'update', 'RS1', '--criterion-add', 'layout::node -e "process.exit(0)"', '--reason', 'review B1']);
+  let r = forge(['task', 'start', 'RS1']);
+  assert.strictEqual(r.code, 0, r.out);
+  const pre = work().items.RS1.preState;
+  assert.strictEqual(pre[0].exit, 1, 'the first start\'s red result is kept');
+  assert.strictEqual(pre[1].addedAfterStart, true);
+  touch('rs1b.txt');
+  assert.strictEqual(forge(['task', 'verify', 'RS1']).code, 0);
+  r = forge(['task', 'done', 'RS1']);
+  assert.strictEqual(r.code, 0, r.out);
+  // a verify of a task that is already being verified is refused
+  addItem('RS2'); forge(['task', 'start', 'RS2']); touch('rs2.txt');
+  fs.writeFileSync(path.join(dir, 'forge', 'state', 'verify.lock'), JSON.stringify({ pid: process.pid, ts: new Date().toISOString(), item: 'RS2', nonce: 'x' }));
+  r = forge(['task', 'verify', 'RS2']);
+  assert.notStrictEqual(r.code, 0); assert.match(r.out, /a verify of RS2 is already running/);
+  fs.unlinkSync(path.join(dir, 'forge', 'state', 'verify.lock'));
+});
