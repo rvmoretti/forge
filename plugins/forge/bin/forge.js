@@ -251,6 +251,8 @@ function run(cmd, opts = {}) {
     tail: outText.split('\n').slice(-40).join('\n'),
     ms: Date.now() - t0 // v0.13: verification time becomes observable in evidence records
   };
+  // v0.23.4: a command killed by the timeout says so — it is not a code failure and has no failure list
+  if (res.exit === -1) { res.timedOut = true; res.note = `timed out after ${Math.round((opts.timeout || 600000) / 1000)} s — killed by Forge, not failed by the code${opts.timeoutKey ? ` (${opts.timeoutKey})` : ''}`; }
   // v0.23: a failed Playwright run names its failing spec files — kept so a retry re-runs exactly those
   if (opts.specs && res.exit !== 0) { const f = failedSpecFiles(outText); if (f.length) res.failedSpecs = f; }
   return res;
@@ -1481,6 +1483,9 @@ const CONFIG_DOCS = [
   { key: 'options.fullTier', def: 'local', group: 'Verification', what: 'v0.23: ci makes the milestone branch\'s latest CI run the periodic full tier: a red run fails the verify, a green one counts as the full, a pending one is checked again next time. --full and high-risk tasks still run locally.', change: 'forge config set options.fullTier ci', why: 'CI already runs the whole suite on every push; the local periodic run repeats it.', risk: 'medium' },
   { key: 'options.planCheck', def: 'refuse', group: 'Planning', what: 'v0.23: one surface per task (options.maxSurfaces, 1) and at most options.maxCriteria (6) criteria — checked at a milestone\'s first start for every TODO task, and at each later start for that task; criterion-add past the limit is refused. forge milestone check <m> [--brief].', change: 'forge config set options.planCheck warn', why: 'Milestones cut one task per group of pages grew 19 → 36 and 24 → 78 tasks while running, mostly late splits.', risk: 'medium' },
   { key: 'options.autopilotQuestions', def: 'continue', group: 'Running unattended', what: 'v0.23: a question blocks its task, not the run — autopilot asks it once and carries on with independent tasks; it stops only when nothing independent is ready. stop restores the pre-v0.23 stop at the first question.', change: 'forge config set options.autopilotQuestions stop', why: '1.1 h of a 7.8 h day was the run waiting on the owner while independent tasks were ready.', risk: 'medium' },
+  { key: 'options.gateTimeoutSec', def: '1800', group: 'Verification', what: 'v0.23.4: time limit for each gate lane (whole e2e, db). A lane killed by it is reported as timed out — not as a code failure — and a lane past 75% of it is flagged.', change: 'forge config set options.gateTimeoutSec 2400', why: 'The e2e suite outgrew the fixed 600 s command limit; every full verify failed and its retry hit the same wall.', risk: 'low' },
+  { key: 'options.forcedFull', def: 'reason', group: 'Verification', what: 'v0.23.3: task verify --full needs --reason when no full is due (the tier runs by itself every Nth task, after high-risk tasks and when the milestone is red). free: --full always allowed.', change: 'forge config set options.forcedFull free', why: '7 of 10 verifies in one morning were forced full by habit, ~8 min each.', risk: 'medium' },
+  { key: 'options.briefCheck', def: 'on', group: 'Delegation', what: 'v0.23.3: an implementer launch needs forge/briefs/<id>.md; a brief that tells the worker to run serial Playwright, a whole gate lane or its own criterion specs is refused (--brief-reason to override); other tasks\' specs are warned.', change: 'forge config set options.briefCheck off', why: 'Workers spent half their time in Playwright running checks verify runs anyway.', risk: 'medium' },
   { key: 'options.handsOff', def: 'refuse', group: 'Delegation', what: 'v0.23: the orchestrator (main thread) may not edit project source, sed -i source or run Playwright; armed once Forge has seen a worker\'s agent_id. forge/, the spec, docs/ and *.md stay open.', change: 'forge config set options.handsOff warn', why: 'The orchestrator ran 28 min of Playwright itself and fixed code by sed outside any dispatch.', risk: 'medium' },
   { key: 'options.verifyVerbose', def: 'false', group: 'Verification', what: 'Print every check\'s full output on verify (default: one line per passing check; the full tail is always kept in state).', change: 'forge config set options.verifyVerbose true', why: 'When you are debugging a check and want its full output on screen.', risk: 'none' },
   { key: 'options.security', def: 'on', group: 'Verification', what: 'Security gate before a milestone is approved and a preflight warning when no verify.security scanner is set. "off" disables both.', change: 'forge config set options.security off', why: 'Leave on; turn off only for throwaway prototypes.', risk: 'none' },
@@ -1677,9 +1682,24 @@ const GUARD_RE = /\b(stays?|remains?|still|keeps?)\b[^.;]{0,40}\b(green|passing)
 function redFirstSkip(cfg, c) {
   if (String((((cfg || {}).options) || {}).redFirst || 'smart') === 'all') return null;
   if (c.guard === true || GUARD_RE.test(String(c.desc || ''))) return 'guard';
+  // v0.23.3: a check made only of the project's own lane commands (e.g. npm run check && npm run test:e2e) is a suite guard
+  { const lanes = new Set([...Object.values((cfg || {}).verify || {}), ...Object.values(gateCmds(cfg))].map(x => String(x).trim()));
+    const ok = list => list.every(x => lanes.has(x.seg) || (x.inner && ok(x.inner)));
+    const segs = lanes.size && !/[;|]|\$\(|`/.test(String(c.check || '')) ? expandSegments(c.check) : [];
+    const gatesSet = new Set(Object.values(gateCmds(cfg)).map(x => String(x).trim()));
+    const flat = list => list.flatMap(x => [x.seg, ...(x.inner ? flat(x.inner) : [])]);
+    if (segs.length && ok(segs) && flat(segs).some(x => gatesSet.has(x))) return 'guard'; }
   const files = String(c.check || '').split(/\s+/).filter(t => /\.(spec|test)\.[cm]?[jt]sx?$/.test(t) && !/[*?]/.test(t));
   if (files.length && files.some(f => !fs.existsSync(path.resolve(PROJECT, f)))) return 'new-spec';
   return null;
+}
+// v0.23.4: gate lanes (the whole e2e / db suites) get their own timeout. Field (cisc, 13–14 Oct): the e2e suite grew
+// to 530–600 s and Forge's fixed 600 s command timeout killed it — every full verify "failed", the retry had no
+// failed-spec list and re-ran the whole lane into the same wall. Default 1800 s; a lane past 75% of it is flagged.
+function gateTimeoutMs(cfg) { const n = parseFloat((((cfg || {}).options) || {}).gateTimeoutSec); return (n > 0 ? n : 1800) * 1000; }
+function slowGateNote(cfg, lane, r) {
+  if (r.timedOut) { out(`GATE LANE TIMED OUT: gate.${lane} was killed after ${Math.round(gateTimeoutMs(cfg) / 1000)} s — the suite outgrew the limit, nothing in it failed. Speed the suite up, or raise the limit: forge config set options.gateTimeoutSec <seconds>`); return; }
+  if (r.ms > 0.75 * gateTimeoutMs(cfg)) out(`SLOW GATE LANE: gate.${lane} took ${Math.round(r.ms / 1000)} s of its ${Math.round(gateTimeoutMs(cfg) / 1000)} s limit (options.gateTimeoutSec).`);
 }
 function redFirstTimeoutMs(cfg) { const n = parseFloat((((cfg || {}).options) || {}).redFirstTimeoutSec); return (n > 0 ? n : 120) * 1000; }
 // v0.22.2: the options every NEW project starts with. The verification tiers are a default now, not a
@@ -1767,6 +1787,8 @@ function fullPlan(w, cfg, item, fullWhy, forced, allLanes) {
       const lanes = [...new Set(bad.map(r => r.kind.replace(/^(gate|baseline):/, '')).filter(k => gates.includes(k)))];
       const failedSpecs = {};
       for (const r of bad) if (r.failedSpecs && String(r.kind).startsWith('gate:')) failedSpecs[r.kind.slice(5)] = r.failedSpecs;
+      // a lane that only timed out did not fail: there is nothing narrower to retry, so this is a full run again
+      if (bad.filter(r => String(r.kind).startsWith('gate:')).every(r => r.timedOut || r.exit === -1)) return { why: fullWhy || `the last full verification (${lv.ts.slice(11, 16)}) timed out — re-running the gate lanes`, lanes: gates, full: true, retry: false };
       if (lanes.length) return { why: `retry of the failed full verification (${lv.ts.slice(11, 16)}): only ${lanes.join(', ')} — options.gateRetry (every lane: --all-lanes)`, lanes, full: true, retry: true, failedSpecs };
     }
   }
@@ -1813,6 +1835,57 @@ function gateRetryCmd(cfg, lane, specs) {
 }
 // v0.23: a criterion check that only runs part of an e2e gate lane is covered when that lane ran and passed in
 // the same verify. Only a bare `npx playwright test <files/filters>` counts — any flag, env or chaining runs it.
+// v0.23.3: lines of a brief that tell the worker to run what verify runs. The criteria list, Forge's own sections
+// and orchestrator notes are skipped; a spec named in this task's own criteria checks is the worker's.
+function briefRunProblems(cfg, item, text) {
+  const own = new Set(); for (const c of (item.criteria || [])) for (const t of String(c.check || '').split(/\s+/)) if (/\.(spec|test)\.[cm]?[jt]sx?$/.test(t)) own.add(t.replace(/^\.\//, ''));
+  const gates = Object.values(gateCmds(cfg)).map(x => String(x).trim()).filter(Boolean);
+  // targets of this task's criterion checks other than its own spec: verify runs them on every verify anyway
+  const critTargets = new Set(); for (const c of (item.criteria || [])) for (const m of String(c.check || '').matchAll(/playwright\s+test\s+((?:\s*(?:-\S+|[\w@.\/-]+))+)/g)) for (const t of m[1].trim().split(/\s+/)) if (!t.startsWith('-')) critTargets.add(t.replace(/^\.\//, ''));
+  // a task that works ON the test setup itself (runner, CI, Playwright config) legitimately runs suites
+  const infra = ((item.scope || {}).allowed || []).some(g => /playwright\.config|scripts\/(e2e|db)|\.github\/|vitest\.config|supabase\/tests/.test(String(g)));
+  if (infra) return [];
+  const probs = []; let section = '';
+  for (const raw of String(text || '').split('\n')) {
+    if (/^##\s/.test(raw)) { section = raw.toLowerCase(); continue; }
+    if (/acceptance criteria|what you run|project verification commands/.test(section) || /^\s*_/.test(raw)) continue;
+    // only instructions: the line (or a sentence in it) tells the worker to run something
+    const line = raw.replace(/`/g, '');
+    if (!/(^|[.;:]\s+|^\s*(?:[-*]|\d+[.)])\s+|\b(?:then|and|also)\s+)(re-?run|run|execute)\b/i.test(line)) continue;
+    const l = raw.trim().slice(0, 140);
+    // hard: serial Playwright and a whole gate lane — unambiguous; soft: every spec, other tasks' specs
+    if (/playwright\b[^;]*--workers[= ]1\b|--workers[= ]1\b[^;]*playwright/.test(line)) { probs.push({ hard: true, why: `serial Playwright (--workers=1): "${l}"` }); continue; }
+    const g = gates.find(x => new RegExp(`(^|[\\s(])${x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?!\\s+--\\s)(\\s|$|[,.;)])`).test(line));
+    if (g) { probs.push({ hard: true, why: `a gate lane, whole (${g}): "${l}"` }); continue; }
+    if (/\b(re-?run|run)\s+(every|all|the whole|the full|the entire)\s+(specs?|tests?|suites?|e2e)\b/i.test(line)) { probs.push({ hard: false, why: `the whole suite / every spec: "${l}"` }); continue; }
+    const targets = []; for (const m of line.matchAll(/playwright\s+test\s+((?:\s*(?:-\S+|[\w@.\/-]+))+)/g)) for (const t of m[1].trim().split(/\s+/)) if (/^(e2e|tests?)\//.test(t) || /\.(spec|test)\.[cm]?[jt]sx?$/.test(t)) targets.push(t.replace(/^\.\//, '').replace(/[,.]$/, ''));
+    const others = [...new Set(targets)].filter(t => !own.has(t) && !t.includes(item.id));
+    const inCriteria = others.filter(t => critTargets.has(t) || [...critTargets].some(c => t.startsWith(c) || c.startsWith(t)));
+    if (inCriteria.length) probs.push({ hard: true, why: `specs that are this task's criterion checks — verify runs them on every verify (${inCriteria.slice(0, 4).join(', ')}): "${l}"` });
+    else if (others.length >= 2) probs.push({ hard: false, why: `other tasks' specs (${others.slice(0, 4).join(', ')}${others.length > 4 ? ' …' : ''}): "${l}"` });
+  }
+  return probs;
+}
+// v0.23.3: `npm run x` expanded through package.json scripts into its command segments (depth 3)
+function expandSegments(cmd, depth = 0) {
+  const out2 = [];
+  for (const seg of String(cmd || '').split(/&&/).map(x => x.trim()).filter(Boolean)) {
+    const m = seg.match(/^npm\s+run\s+([\w:.-]+)\s*$/) || seg.match(/^npm\s+(test)\s*$/);
+    const pkg = m && depth < 3 ? readJson(path.join(PROJECT, 'package.json'), null) : null;
+    const sc = pkg && pkg.scripts && pkg.scripts[m[1]];
+    if (sc && !/[;|]/.test(sc)) { const inner = expandSegments(sc, depth + 1); if (inner) { out2.push({ seg, inner }); continue; } }
+    out2.push({ seg });
+  }
+  return out2;
+}
+// covered when every segment of the check (expanding npm scripts) is a lane command that ran and passed in this verify
+function coveredBySegments(check, results) {
+  const passed = new Set(results.filter(r => r.exit === 0 && !r.covered && !r.retry && /^(project|gate):/.test(String(r.kind))).map(r => String(r.cmd || '').trim()));
+  if (!passed.size || /[;|]|\$\(|`/.test(String(check || ''))) return null;
+  const ok = list => list.every(x => passed.has(x.seg) || (x.inner && ok(x.inner)));
+  const segs = expandSegments(check);
+  return segs.length && ok(segs) ? 'lanes' : null;
+}
 function coveringLane(cfg, check, results) {
   if ((((cfg || {}).options) || {}).gateCovers === false || (((cfg || {}).options) || {}).gateCovers === 'false') return null;
   if (!/^\s*(npx\s+)?playwright\s+test(\s+[^\s;&|<>$`'"-][^\s;&|<>$`'"]*)*\s*$/.test(String(check || ''))) return null;
@@ -4808,6 +4881,16 @@ const commands = {
       const results = [];
       // v0.22.1: verify.* every time; gate.* when --full, after a high-risk task, or every Nth task
       const t0Verify = Date.now();
+      // v0.23.3: --full when no full is due needs a reason. Field (cisc, 13 Oct morning): 7 of 10 verifies were forced
+      // full by habit, ~8 min each, while the tier runs by itself every Nth task and CI runs it on every push.
+      if (flag('full') && !opt('reason') && Object.keys(gateCmds(cfg)).length && String(((cfg.options || {}).forcedFull) || 'reason') !== 'free') {
+        const due = fullVerifyReason(wV, cfg, item, false);
+        const lvF = lastMilestoneVerification(wV, item);
+        const red = lvF && lvF.full && !lvF.passed;
+        if (!due && !red)
+          die(`Refused: no full verification is due for '${item.id}' — the gate lanes run by themselves every options.fullVerifyEvery-th task, after a high-risk task and at the milestone gate, and CI runs them on every push.\n` +
+              `Verify without --full. If this task genuinely needs the whole suite now: forge task verify ${item.id} --full --reason "<why>" (recorded).`);
+      }
       let fullWhy = fullVerifyReason(wV, cfg, item, flag('full'));
       // v0.23: which gate lanes run. A retry after a failed full runs only the lanes that failed
       // (options.gateRetry, default on); options.fullTier ci lets CI on the milestone branch be the
@@ -4818,8 +4901,9 @@ const commands = {
       if (plan.ci) results.push(plan.ci);
       for (const k of plan.lanes) {
         const retryCmd = plan.retry ? gateRetryCmd(cfg, k, (plan.failedSpecs || {})[k]) : null;
-        const r = run(retryCmd || gateCmds(cfg)[k], { specs: lanePlaywright(cfg, gateCmds(cfg)[k]) });
-        if (plan.retry) { r.retry = true; r.laneCmd = gateCmds(cfg)[k]; r.note = retryCmd ? `retry of the failed full: ${retryCmd}` : 'retry of the failed full: the whole lane (no failed spec list)'; }
+        const r = run(retryCmd || gateCmds(cfg)[k], { specs: lanePlaywright(cfg, gateCmds(cfg)[k]), timeout: gateTimeoutMs(cfg), timeoutKey: 'options.gateTimeoutSec' });
+        slowGateNote(cfg, k, r);
+        if (plan.retry) { r.retry = true; r.laneCmd = gateCmds(cfg)[k]; r.note = (r.note ? r.note + ' · ' : '') + (retryCmd ? `retry of the failed full: ${retryCmd}` : 'retry of the failed full: the whole lane (no failed spec list)'); }
         results.push(Object.assign({ kind: `gate:${k}` }, r));
       }
       for (const c of item.criteria) {
@@ -4827,6 +4911,7 @@ const commands = {
         // v0.23: a criterion that is a subset of an e2e gate lane that just passed in this verify is covered by it
         const cover = coveringLane(cfg, c.check, results);
         if (cover) { results.push({ kind: `criterion: ${c.desc}`, cmd: c.check, exit: 0, tail: '', ms: 0, covered: cover, note: `covered by gate:${cover} (passed in this verify)` }); continue; }
+        if ((((cfg || {}).options) || {}).gateCovers !== false && coveredBySegments(c.check, results)) { results.push({ kind: `criterion: ${c.desc}`, cmd: c.check, exit: 0, tail: '', ms: 0, covered: 'lanes', note: 'covered: every command in it ran and passed as a lane of this verify' }); continue; }
         results.push(Object.assign({ kind: `criterion: ${c.desc}` }, run(c.check)));
       }
       if (results.length === 0)
@@ -4856,7 +4941,7 @@ const commands = {
       const wNow = readJson(WORK_FILE, w);
       item = wNow.items[item.id] || item;
       item.verifications.push({ ts: ts(), passed, results, tree, skippedBaseline, artifacts: artifacts.length ? artifacts : undefined,
-        full: plan.full ? true : undefined, fullWhy: fullWhy || undefined, retryLanes: plan.retry ? plan.lanes : undefined, ciTier: plan.ci ? true : undefined,
+        full: plan.full ? true : undefined, fullWhy: (fullWhy && flag('full') && opt('reason') ? `${fullWhy} — ${opt('reason')}` : fullWhy) || undefined, retryLanes: plan.retry ? plan.lanes : undefined, ciTier: plan.ci ? true : undefined,
         durationMs: results.reduce((a, r) => a + (r.ms || 0), 0), wallMs: Date.now() - t0Verify });
       item.updated = ts();
       saveWork(wNow);
@@ -5265,6 +5350,20 @@ const commands = {
       const kind = opt('kind') || 'launch';
       if (!['launch', 'message'].includes(kind))
         die(`--kind must be 'launch' (handing the brief to a worker) or 'message' (mid-flight message to a running worker).`);
+      // v0.23.3: an implementer launch needs its saved brief, and the brief may not hand the worker Forge's job (the whole
+      // suite, other tasks' specs, serial --workers=1). Field (cisc, 13 Oct): workers spent 52% of their time in Playwright;
+      // a brief said "run every spec that touches these pages (7 specs) with --workers=1"; four tasks went out with no brief file.
+      if (kind === 'launch' && /implementer/i.test(opt('agent') || '') && String(((loadConfig() || {}).options || {}).briefCheck || 'on') !== 'off') {
+        const bf = path.join(FORGE, 'briefs', `${item.id}.md`);
+        if (!fs.existsSync(bf) && !opt('brief-reason'))
+          die(`Refused: forge/briefs/${item.id}.md does not exist. The worker gets the saved brief — it carries "What you run" and the scope list:\n  forge brief ${item.id} --save   (then complete it and pass the file to the worker)\nOverride: --brief-reason "…".`);
+        const bad = fs.existsSync(bf) ? briefRunProblems(loadConfig() || {}, item, fs.readFileSync(bf, 'utf8')) : [];
+        const hard = bad.filter(b => b.hard), soft = bad.filter(b => !b.hard);
+        if (hard.length && !opt('brief-reason'))
+          die(`Refused: the brief tells the worker to run checks that are Forge's verify's job:\n${hard.map(b => `  - ${b.why}`).join('\n')}\n` +
+              `Workers run their own criteria's checks and the fast lanes; Forge's task verify runs regressions and the full tier. Edit forge/briefs/${item.id}.md, or override: --brief-reason "…".`);
+        if (soft.length) out(`BRIEF WARNING — the worker is asked to run what verify runs anyway (workers' Playwright time is the largest cost left):\n${soft.map(b => `  - ${b.why}`).join('\n')}\nPrefer: the task's own spec only; verify covers the rest.`);
+      }
       // v0.21 (C2): the brief a worker actually receives is the completed file — its size is checked at launch too
       if (kind === 'launch' && sw(loadConfig(), 'briefLimit') === 'on' && /implementer|tester/i.test(opt('agent') || '')) {
         const bf = path.join(FORGE, 'briefs', `${item.id}.md`);
@@ -7075,7 +7174,7 @@ const commands = {
       acquireVerifyLock(`milestone:${m}`, flag('no-wait'));
       const results = [];
       for (const [k, cmd] of Object.entries(cfgV.verify || {})) results.push(Object.assign({ kind: `project:${k}` }, run(cmd)));
-      for (const [k, cmd] of Object.entries(gateCmds(cfgV))) results.push(Object.assign({ kind: `gate:${k}` }, run(cmd)));
+      for (const [k, cmd] of Object.entries(gateCmds(cfgV))) { const r = run(cmd, { timeout: gateTimeoutMs(cfgV), timeoutKey: 'options.gateTimeoutSec' }); slowGateNote(cfgV, k, r); results.push(Object.assign({ kind: `gate:${k}` }, r)); }
       if (fs.existsSync(BASELINE_FILE)) for (const r of baselineCompare(cfgV, true, results.slice())) results.push(r);
       const tree = treeState();
       releaseVerifyLock();

@@ -51,6 +51,8 @@ function freshProject() {
   // v0.22: new projects also start with fixed model routing and runner-capable autopilot settings;
   // the legacy tests exercise an existing project (auto routing). v0.22 tests opt back in.
   for (const k of ['modelRouting', 'models', 'autopilotMode']) delete c.options[k];
+  // v0.23.3: the saved-brief check is on for every project; the legacy tests launch workers without brief files
+  c.options.briefCheck = 'off';
   fs.writeFileSync(cf, JSON.stringify(c, null, 2));
 }
 function switchOn(k, v) { forge(['config', 'set', 'options.' + k, String(v)]); }
@@ -2142,7 +2144,7 @@ test('C6: two verifies started together run one after the other; --no-wait refus
   const [a, b] = await both;
   assert.strictEqual(a.c, 0, a.o); assert.strictEqual(b.c, 0, b.o);
   assert.match(a.o + b.o, /Waiting for the verify of/);
-  assert.notStrictEqual(nw.code, 0); assert.match(nw.out, /another verify is running/);
+  assert.notStrictEqual(nw.code, 0); assert.match(nw.out, /another verify is running|a verify of V1 is already running/); // v0.23.2: same task → its own refusal
   const ev = fs.readFileSync(log, 'utf8').trim().split('\n').map(l => l.split(' '));
   // runs must not interleave: start,end,start,end
   assert.deepStrictEqual(ev.map(e => e[0]), ['start', 'end', 'start', 'end']);
@@ -2743,7 +2745,7 @@ test('v0.22.1: gate lanes — verify.* on every task, gate.* on --full, after a 
   forge(['task', 'done', 'G1']);
   // --full runs it and records why
   forge(['task', 'start', 'G2']); touch('g2.txt');
-  r = forge(['task', 'verify', 'G2', '--full']);
+  r = forge(['task', 'verify', 'G2', '--full', '--reason', 'test']);
   assert.match(r.out, /FULL \(gate lanes included: requested \(--full\)\)/); assert.strictEqual(fs.readFileSync(marker, 'utf8'), 'x');
   assert.strictEqual(work().items.G2.verifications[0].full, true);
   forge(['task', 'done', 'G2']);
@@ -2797,11 +2799,11 @@ test('v0.22.1: gate lanes — verify.* on every task, gate.* on --full, after a 
   forge(['task', 'start', 'H2']); touch('h2.txt');
   r = forge(['task', 'verify', 'H2']);
   assert.strictEqual(r.code, 0, r.out); assert.doesNotMatch(r.out, /baseline:e2e/);
-  r = forge(['task', 'verify', 'H2', '--full']);
+  r = forge(['task', 'verify', 'H2', '--full', '--reason', 'test']);
   assert.match(r.out, /baseline:e2e/);
   // a verify where only a gate lane fails says it is a regression elsewhere
   fs.writeFileSync(failFile, '1');
-  r = forge(['task', 'verify', 'H2', '--full']);
+  r = forge(['task', 'verify', 'H2', '--full', '--reason', 'test']);
   assert.notStrictEqual(r.code, 0); assert.match(r.out, /only gate lane\(s\) failed \(gate:e2e, baseline:e2e\)/);
 });
 
@@ -3034,7 +3036,7 @@ test('v0.23: a bare playwright criterion is covered by an e2e gate lane that pas
   forge(['task', 'add', '--id', 'C1', '--title', 'c1', '--allowed', 'src/',
     '--criterion', 'own spec::npx playwright test e2e/c1-own.spec.ts',
     '--criterion', 'cart e2e stay green::npx playwright test e2e/01-cart-',
-    '--criterion', 'unit::node -e "process.exit(1)"']);
+    '--criterion', 'unit::node -e "process.exit(2-2+1)"']);
   let r = forge(['task', 'start', 'C1']);
   assert.strictEqual(r.code, 0, r.out);
   assert.match(r.out, /Red-first: 2 check\(s\) not run at start/);
@@ -3045,9 +3047,9 @@ test('v0.23: a bare playwright criterion is covered by an e2e gate lane that pas
   assert.ok(!/regression guard/.test(forge(['brief', 'C3']).out));
   assert.match(forge(['brief', 'C1']).out, /cart e2e stay green.*regression guard: Forge runs it at verify/);
   // make the unit check pass, then a full verify: the two playwright checks are covered, never run (npx playwright is not installed here)
-  forge(['task', 'update', 'C1', '--criterion-remove', '2', '--criterion-add', 'unit::node -e "process.exit(0)"']);
+  forge(['task', 'update', 'C1', '--criterion-remove', '2', '--criterion-add', 'unit::node -e "process.exit(2-2)"']);
   touch('c1.txt');
-  r = forge(['task', 'verify', 'C1', '--full'], { env });
+  r = forge(['task', 'verify', 'C1', '--full', '--reason', 'test'], { env });
   assert.strictEqual(r.code, 0, r.out);
   const v = work().items.C1.verifications.slice(-1)[0];
   const cov = v.results.filter(x => x.covered);
@@ -3071,7 +3073,7 @@ test('v0.23: after a failed full verify the next verifies run only the failed ga
   forge(['config', 'set', 'gateRetry.e2e', `node -e "require('fs').appendFileSync('${rm}','x');process.exit(require('fs').existsSync('${flagF}')?1:0)"`]);
   addItem('R1', ['--milestone', 'M1', '--allowed', 'r1/']); addItem('R2', ['--milestone', 'M1', '--allowed', 'r2/']);
   forge(['task', 'start', 'R1']); touch('r1.txt');
-  let r = forge(['task', 'verify', 'R1', '--full']);
+  let r = forge(['task', 'verify', 'R1', '--full', '--reason', 'test']);
   assert.notStrictEqual(r.code, 0);
   assert.strictEqual(fs.readFileSync(dbm, 'utf8'), 'x');
   // still broken: the retry runs only e2e, through gateRetry.e2e; db is not run again
@@ -3101,12 +3103,12 @@ test('v0.23: a Playwright gate lane retries with exactly the spec files that fai
   forge(['config', 'set', 'gate.e2e', 'playwright test']);
   addItem('P1', ['--milestone', 'M1', '--allowed', 'p1/']);
   forge(['task', 'start', 'P1'], { env }); touch('p1.txt');
-  assert.notStrictEqual(forge(['task', 'verify', 'P1', '--full'], { env }).code, 0);
+  assert.notStrictEqual(forge(['task', 'verify', 'P1', '--full', '--reason', 'test'], { env }).code, 0);
   fs.unlinkSync(flagF);
   let r = forge(['task', 'verify', 'P1'], { env });
   assert.strictEqual(r.code, 0, r.out);
   assert.deepStrictEqual(fs.readFileSync(log, 'utf8').trim().split('\n'), ['test', 'test e2e/01-cart-9a.spec.ts e2e/04-passes-2.spec.ts']);
-  r = forge(['task', 'verify', 'P1', '--full', '--all-lanes'], { env });
+  r = forge(['task', 'verify', 'P1', '--full', '--all-lanes', '--reason', 'test'], { env });
   assert.strictEqual(r.code, 0, r.out);
   assert.strictEqual(fs.readFileSync(log, 'utf8').trim().split('\n').pop(), 'test');
 });
@@ -3131,7 +3133,7 @@ test('v0.23: options.fullTier ci — the periodic full run is the milestone bran
   r = forge(['task', 'verify', 'Q2'], { env });
   assert.strictEqual(r.code, 0, r.out); assert.strictEqual(work().items.Q2.verifications.slice(-1)[0].full, true); assert.ok(!fs.existsSync(marker));
   // --full still runs locally
-  r = forge(['task', 'verify', 'Q2', '--full'], { env });
+  r = forge(['task', 'verify', 'Q2', '--full', '--reason', 'test'], { env });
   assert.strictEqual(r.code, 0, r.out); assert.strictEqual(fs.readFileSync(marker, 'utf8'), 'x');
 });
 
@@ -3309,4 +3311,80 @@ test('v0.23.2: a restart after a review rejection keeps the first start\'s red-f
   r = forge(['task', 'verify', 'RS2']);
   assert.notStrictEqual(r.code, 0); assert.match(r.out, /a verify of RS2 is already running/);
   fs.unlinkSync(path.join(dir, 'forge', 'state', 'verify.lock'));
+});
+
+// --- v0.23.3 --------------------------------------------------------------------
+
+test('v0.23.3: --full needs a reason when no full is due; allowed without one when the milestone is red or the tier is due', () => {
+  const flagF = path.join(dir, 'broken');
+  forge(['config', 'set', 'gate.e2e', `node -e "process.exit(require('fs').existsSync('${flagF}')?1:0)"`]);
+  addItem('F1', ['--milestone', 'M1', '--allowed', 'f1/']);
+  forge(['task', 'start', 'F1']); touch('f1.txt');
+  let r = forge(['task', 'verify', 'F1', '--full']);
+  assert.notStrictEqual(r.code, 0); assert.match(r.out, /no full verification is due for 'F1'/);
+  r = forge(['task', 'verify', 'F1', '--full', '--reason', 'touches the shared shell']);
+  assert.strictEqual(r.code, 0, r.out);
+  assert.match(work().items.F1.verifications.slice(-1)[0].fullWhy, /touches the shared shell/);
+  // a red milestone (failed full) → --full is allowed as is
+  fs.writeFileSync(flagF, '1');
+  forge(['task', 'verify', 'F1', '--full', '--reason', 'x']);
+  r = forge(['task', 'verify', 'F1', '--full']);
+  assert.ok(!/no full verification is due/.test(r.out), r.out);
+});
+
+test('v0.23.3: a criterion whose every command is a lane that passed in the same verify is covered (npm scripts expanded)', () => {
+  const marker = path.join(dir, 'e2e-runs.txt');
+  fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ scripts: {
+    lint: 'node -e "0"', check: 'npm run lint && npm test', test: 'node -e "0"',
+    'test:e2e': `node -e "require('fs').appendFileSync('${marker}','x')"` } }));
+  forge(['config', 'set', 'verify.lint', 'npm run lint']); forge(['config', 'set', 'verify.test', 'npm test']);
+  forge(['config', 'set', 'gate.e2e', 'npm run test:e2e']);
+  forge(['task', 'add', '--id', 'K1', '--title', 'k', '--allowed', 'src/', '--criterion', 'Full check and e2e suites green::npm run check && npm run test:e2e', '--criterion', 'own::node -e "0"']);
+  forge(['task', 'start', 'K1']); touch('k1.txt');
+  const r = forge(['task', 'verify', 'K1', '--full', '--reason', 'gate task']);
+  assert.strictEqual(r.code, 0, r.out);
+  assert.strictEqual(fs.readFileSync(marker, 'utf8'), 'x', 'e2e ran twice');
+  assert.strictEqual(work().items.K1.verifications.slice(-1)[0].results.find(x => /Full check/.test(x.kind)).covered, 'lanes');
+});
+
+test('v0.23.3: an implementer launch needs the saved brief, and a brief that hands the worker verify\'s checks is refused (serial Playwright, whole gate lane, the task\'s own criterion specs) or warned (other specs)', () => {
+  switchOn('briefCheck', 'on');
+  forge(['config', 'set', 'gate.e2e', 'npm run test:e2e']);
+  forge(['task', 'add', '--id', 'W1', '--title', 'w', '--allowed', 'src/', '--criterion', 'own spec::npx playwright test e2e/W1.spec.ts', '--criterion', 'Cart e2e stay green::npx playwright test e2e/01-cart-']);
+  forge(['task', 'start', 'W1']);
+  let r = forge(['task', 'dispatch', 'W1', '--agent', 'forge-implementer', '--model', 'sonnet']);
+  assert.notStrictEqual(r.code, 0); assert.match(r.out, /forge\/briefs\/W1\.md does not exist/);
+  forge(['brief', 'W1', '--save']);
+  const bf = path.join(dir, 'forge', 'briefs', 'W1.md');
+  const base = fs.readFileSync(bf, 'utf8');
+  assert.strictEqual(forge(['task', 'dispatch', 'W1', '--agent', 'forge-implementer', '--model', 'sonnet']).code, 0, 'the generated brief passes');
+  for (const [line, re] of [
+    ['- Run `npx playwright test e2e/W1.spec.ts e2e/x --workers=1`.', /serial Playwright/],
+    ['- Then run `npm run test:e2e` to be sure.', /a gate lane, whole/],
+    ['- Also run `npx playwright test e2e/01-cart- e2e/05-x`.', /this task's criterion checks/]]) {
+    fs.writeFileSync(bf, base.replace('## Rules', `## How\n${line}\n\n## Rules`));
+    r = forge(['task', 'dispatch', 'W1', '--agent', 'forge-implementer', '--model', 'sonnet']);
+    assert.notStrictEqual(r.code, 0, line); assert.match(r.out, re);
+  }
+  fs.writeFileSync(bf, base.replace('## Rules', '## How\n- Also run `npx playwright test e2e/05-a e2e/05-b`.\n- Run `npm run test:e2e -- e2e/W1.spec.ts` once.\n\n## Rules'));
+  r = forge(['task', 'dispatch', 'W1', '--agent', 'forge-implementer', '--model', 'sonnet']);
+  assert.strictEqual(r.code, 0, r.out); assert.match(r.out, /BRIEF WARNING/);
+  r = forge(['task', 'dispatch', 'W1', '--agent', 'forge-implementer', '--model', 'sonnet', '--brief-reason', 'x']);
+  assert.strictEqual(r.code, 0);
+});
+
+test('v0.23.4: gate lanes have their own timeout; a timed-out lane is reported as such and the next verify re-runs the lane, not a blind narrow retry', () => {
+  const marker = path.join(dir, 'slow.txt');
+  forge(['config', 'set', 'gate.e2e', `node -e "require('fs').appendFileSync('${marker}','x');setTimeout(()=>{},2500)"`]);
+  forge(['config', 'set', 'options.gateTimeoutSec', '1']);
+  addItem('T1', ['--milestone', 'M1', '--allowed', 't1/']);
+  forge(['task', 'start', 'T1']); touch('t1.txt');
+  let r = forge(['task', 'verify', 'T1', '--full', '--reason', 'test']);
+  assert.notStrictEqual(r.code, 0); assert.match(r.out, /GATE LANE TIMED OUT: gate\.e2e was killed after 1 s/);
+  assert.strictEqual(work().items.T1.verifications[0].results.find(x => x.kind === 'gate:e2e').timedOut, true);
+  forge(['config', 'set', 'options.gateTimeoutSec', '30']);
+  r = forge(['task', 'verify', 'T1']);
+  assert.strictEqual(r.code, 0, r.out); assert.match(r.out, /timed out — re-running the gate lanes/);
+  assert.strictEqual(fs.readFileSync(marker, 'utf8'), 'xx');
+  assert.strictEqual(work().items.T1.verifications[1].full, true);
 });

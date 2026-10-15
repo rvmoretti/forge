@@ -188,7 +188,12 @@ own window.
    the spec files that failed in the full run; `gateRetry.<lane>` sets the command; `--full` or `--all-lanes` for everything)
    until they pass, and that pass counts as the full; red-first at `task start` skips
    regression guards ("… stay green") and specs the worker has not written yet;
-   `options.fullTier ci` lets the milestone branch's CI run be the periodic full tier. **Two tiers** (v0.22.1): `verify.*` runs on every task — the fast lanes
+   `options.fullTier ci` lets the milestone branch's CI run be the periodic full tier.
+   v0.23.3: **do not pass `--full` by habit** — when no full is due it is refused without `--reason`
+   (the tier runs by itself; CI runs it on every push). A worker's brief is the saved file
+   (`forge brief <id> --save`, then completed); it never tells the worker to run serial Playwright
+   (`--workers=1`), a whole gate lane, or the specs of its own criteria — verify runs those on every
+   verify. The worker runs its own new spec and the fast lanes. **Two tiers** (v0.22.1): `verify.*` runs on every task — the fast lanes
    (lint, typecheck, unit tests, build, security scan) plus the task's own criteria,
    which for UI work are *that task's* spec files, never the whole suite. `gate.*`
    holds the slow lanes (the whole e2e suite, the database suite) and runs at the
