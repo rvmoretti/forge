@@ -3674,7 +3674,7 @@ function baselineCompare(cfg, full, ran) {
     }
     const cmdNow = currentCmd || b.cmd;
     const reused = prior.find(r => r.cmd === cmdNow && !r.covered && !r.retry && Number.isFinite(r.exit));
-    const now = reused ? { exit: reused.exit, tail: reused.tail } : run(cmdNow);
+    const now = reused ? { exit: reused.exit, tail: reused.tail } : run(cmdNow, inGate ? { specs: lanePlaywright(cfg, cmdNow, true), timeout: gateTimeoutMs(cfg), timeoutKey: 'options.gateTimeoutSec' } : {});
     const was = b.exit === 0;
     const is = now.exit === 0;
     if (was && !is) results.push({ kind: `baseline:${b.kind}`, cmd: b.cmd, exit: 1, tail: now.tail, note: 'REGRESSION — was GREEN at baseline' });
@@ -6172,7 +6172,8 @@ const commands = {
     const allCmds = Object.assign({}, cfg.verify, gateCmds(cfg)); // v0.22.1: gate lanes are part of the baseline too
     const sub = argv[1];
     if (sub === 'capture') {
-      const results = Object.entries(allCmds).map(([k, cmd]) => Object.assign({ kind: k }, run(cmd)));
+      // v0.23.6: gate lanes get options.gateTimeoutSec here too (capture used the 600 s default and recorded a killed e2e as RED)
+      const results = Object.entries(allCmds).map(([k, cmd]) => Object.assign({ kind: k }, run(cmd, (gateCmds(cfg)[k] && !(cfg.verify || {})[k]) ? { specs: lanePlaywright(cfg, cmd, true), timeout: gateTimeoutMs(cfg), timeoutKey: 'options.gateTimeoutSec' } : {})));
       writeJson(BASELINE_FILE, { ts: ts(), results });
       // P3: brownfield projects that skip the spec phase must still get build-phase gates
       if (cfg.phase === 'spec') {
