@@ -3388,3 +3388,21 @@ test('v0.23.4: gate lanes have their own timeout; a timed-out lane is reported a
   assert.strictEqual(fs.readFileSync(marker, 'utf8'), 'xx');
   assert.strictEqual(work().items.T1.verifications[1].full, true);
 });
+
+test('v0.23.5: a sharded Playwright lane (npm run x -- --shard=1/3) still yields its failed specs (FAILED: lines too), and the retry runs those files whole, without the shard', () => {
+  const bin = path.join(dir, 'fakebin'); fs.mkdirSync(bin);
+  const log = path.join(dir, 'pw-args.txt'); const flagF = path.join(dir, 'pw-broken');
+  fs.writeFileSync(path.join(bin, 'playwright'), `#!/bin/sh\necho "$@" >> '${log}'\nif [ -f '${flagF}' ]; then echo "FAILED: sticker.spec.ts:82 › board sticker"; exit 1; fi\nexit 0\n`, { mode: 0o755 });
+  fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ scripts: { 'test:e2e': 'playwright test' } }));
+  const env = { PATH: `${bin}:${process.env.PATH}` };
+  fs.writeFileSync(flagF, '1');
+  forge(['config', 'set', 'gate.e2e', 'npm run test:e2e -- --shard=1/3']);
+  addItem('S1', ['--milestone', 'M1', '--allowed', 's1/']);
+  forge(['task', 'start', 'S1'], { env }); touch('s1.txt');
+  assert.notStrictEqual(forge(['task', 'verify', 'S1', '--full', '--reason', 't'], { env }).code, 0);
+  assert.deepStrictEqual(work().items.S1.verifications[0].results.find(x => x.kind === 'gate:e2e').failedSpecs, ['sticker.spec.ts']);
+  fs.unlinkSync(flagF);
+  const r = forge(['task', 'verify', 'S1'], { env });
+  assert.strictEqual(r.code, 0, r.out);
+  assert.strictEqual(fs.readFileSync(log, 'utf8').trim().split('\n').pop(), 'test sticker.spec.ts');
+});

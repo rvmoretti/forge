@@ -262,7 +262,7 @@ function failedSpecFiles(text) {
   const set = new Set();
   // only failure lines: the summary's "  1) [chromium] › e2e/a.spec.ts:12:3 › …" and the list reporter's ✘ lines —
   // passing lines name spec files too, and a retry of everything would be no retry
-  for (const m of String(text || '').matchAll(/^\s*(?:\d+\)|✘|×)\s[^\n]*?((?:[\w@.-]+\/)*[\w@.-]+\.(?:spec|test)\.[cm]?[jt]sx?):\d+/gm)) set.add(m[1]);
+  for (const m of String(text || '').matchAll(/^\s*(?:\d+\)|✘|×|FAILED:)\s[^\n]*?((?:[\w@.-]+\/)*[\w@.-]+\.(?:spec|test)\.[cm]?[jt]sx?):\d+/gm)) set.add(m[1]); // v0.23.5: FAILED: (a failed-list reporter)
   return [...set].slice(0, 200);
 }
 // v0.13: the first milestone with unfinished items — warnings target it, not the backlog
@@ -1813,12 +1813,15 @@ function fullPlan(w, cfg, item, fullWhy, forced, allLanes) {
 }
 // 'direct' when the lane ends in an UNFILTERED `playwright test`, 'npm' when it is `npm run <script>` whose script
 // does; null otherwise (filtered lanes — --project, --grep, paths — are not "the whole suite")
-function lanePlaywright(cfg, cmd) {
+function lanePlaywright(cfg, cmd, anyArgs) {
   const whole = /(^|&&|;)\s*(npx\s+)?playwright\s+test\s*$/;
   const c = String(cmd || '');
   if (whole.test(c)) return 'direct';
-  const m = c.match(/^\s*npm\s+run\s+([\w:.-]+)\s*$/);
-  if (m) { const pkg = readJson(path.join(PROJECT, 'package.json'), null); const sc = pkg && pkg.scripts && pkg.scripts[m[1]]; if (sc && whole.test(sc)) return 'npm'; }
+  if (anyArgs && /(^|&&|;)\s*(npx\s+)?playwright\s+test\b[^&;|]*$/.test(c)) return 'direct';
+  // v0.23.5: `npm run <script> -- <args>` (e.g. a --shard) is still the Playwright lane for failure parsing and
+  // retries (anyArgs), but not "the whole suite" for criterion coverage
+  const m = c.match(/^\s*npm\s+run\s+([\w:.-]+)(\s+--\s+.*)?\s*$/);
+  if (m && (!m[2] || anyArgs)) { const pkg = readJson(path.join(PROJECT, 'package.json'), null); const sc = pkg && pkg.scripts && pkg.scripts[m[1]]; if (sc && whole.test(sc)) return 'npm'; }
   return null;
 }
 // The retry re-runs the spec FILES that failed in the full run (parsed from its output — Playwright's own
@@ -1827,11 +1830,12 @@ function gateRetryCmd(cfg, lane, specs) {
   const set = ((cfg || {}).gateRetry || {})[lane];
   if (set === 'off' || set === false) return null;
   if (set) return set;
-  const cmd = String(gateCmds(cfg)[lane] || '');
-  const kind = lanePlaywright(cfg, cmd);
+  // a shard argument is dropped: the failed files run whole, not 1/N of them
+  const cmd = String(gateCmds(cfg)[lane] || '').replace(/\s+--shard[= ]\S+/g, '').replace(/\s+--\s*$/, '');
+  const kind = lanePlaywright(cfg, cmd, true);
   if (!kind || !specs || !specs.length) return null;
   const q = f => /^[\w@./-]+$/.test(f) ? f : `'${f.replace(/'/g, `'\\''`)}'`;
-  return `${cmd}${kind === 'npm' ? ' --' : ''} ${specs.map(q).join(' ')}`;
+  return `${cmd}${kind === 'npm' && !/\s--(\s|$)/.test(cmd) ? ' --' : ''} ${specs.map(q).join(' ')}`;
 }
 // v0.23: a criterion check that only runs part of an e2e gate lane is covered when that lane ran and passed in
 // the same verify. Only a bare `npx playwright test <files/filters>` counts — any flag, env or chaining runs it.
@@ -4901,7 +4905,7 @@ const commands = {
       if (plan.ci) results.push(plan.ci);
       for (const k of plan.lanes) {
         const retryCmd = plan.retry ? gateRetryCmd(cfg, k, (plan.failedSpecs || {})[k]) : null;
-        const r = run(retryCmd || gateCmds(cfg)[k], { specs: lanePlaywright(cfg, gateCmds(cfg)[k]), timeout: gateTimeoutMs(cfg), timeoutKey: 'options.gateTimeoutSec' });
+        const r = run(retryCmd || gateCmds(cfg)[k], { specs: lanePlaywright(cfg, gateCmds(cfg)[k], true), timeout: gateTimeoutMs(cfg), timeoutKey: 'options.gateTimeoutSec' });
         slowGateNote(cfg, k, r);
         if (plan.retry) { r.retry = true; r.laneCmd = gateCmds(cfg)[k]; r.note = (r.note ? r.note + ' · ' : '') + (retryCmd ? `retry of the failed full: ${retryCmd}` : 'retry of the failed full: the whole lane (no failed spec list)'); }
         results.push(Object.assign({ kind: `gate:${k}` }, r));
@@ -7174,7 +7178,7 @@ const commands = {
       acquireVerifyLock(`milestone:${m}`, flag('no-wait'));
       const results = [];
       for (const [k, cmd] of Object.entries(cfgV.verify || {})) results.push(Object.assign({ kind: `project:${k}` }, run(cmd)));
-      for (const [k, cmd] of Object.entries(gateCmds(cfgV))) { const r = run(cmd, { timeout: gateTimeoutMs(cfgV), timeoutKey: 'options.gateTimeoutSec' }); slowGateNote(cfgV, k, r); results.push(Object.assign({ kind: `gate:${k}` }, r)); }
+      for (const [k, cmd] of Object.entries(gateCmds(cfgV))) { const r = run(cmd, { specs: lanePlaywright(cfgV, cmd, true), timeout: gateTimeoutMs(cfgV), timeoutKey: 'options.gateTimeoutSec' }); slowGateNote(cfgV, k, r); results.push(Object.assign({ kind: `gate:${k}` }, r)); }
       if (fs.existsSync(BASELINE_FILE)) for (const r of baselineCompare(cfgV, true, results.slice())) results.push(r);
       const tree = treeState();
       releaseVerifyLock();
