@@ -26,6 +26,14 @@ concurrency, delegation switches. A product decision never goes into config; a
 tooling setting never goes into the spec. Spec sync at item close touches the
 spec only for product behaviour.
 
+**The config is layered (v0.24)**: `forge/config.json` holds only the user's own
+choices; Forge's defaults, the profile (`fast` | `thorough`) and the machine
+defaults are layers (`forge config show` lists every value and its layer). The
+profile, `config reset` and `config adopt` are the user's decisions — offer
+them, never run them on your own. New defaults and a profile change take effect
+at a milestone's first task start; report the CONFIGURATION lines `task start`
+prints there.
+
 ## Phases
 
 **Spec phase** (no `forge/config.json` yet, or `phase: spec`): run the
@@ -307,7 +315,11 @@ own window.
    milestone?"** — the gate is the designed moment for course changes.
    Record the approval: `forge milestone approve <M> --note "..."`. Their
    feedback becomes decisions and work-graph updates BEFORE the next
-   milestone starts. The CLI refuses to start later-milestone items until
+   milestone starts. Every bug they found while testing is also recorded as a
+   defect against the milestone that shipped it (v0.24): `forge defect add
+   "<what>" --milestone <M> --found milestone-test --severity …` (staging /
+   production finds later: `--found staging|production`, against the milestone
+   that shipped them) — it is how profiles are compared on quality. The CLI refuses to start later-milestone items until
    the gate is approved — this is the user's early-drift catch; never ask
    them to skip it, though they may switch to `end-only` themselves.
    **Then ship it** (per-milestone git flow): `forge milestone ship <M>` commits

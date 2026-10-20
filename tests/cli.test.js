@@ -47,6 +47,13 @@ function freshProject() {
   // exercise an existing project, where they are absent (off). v0.21 tests opt back in.
   const cf = path.join(dir, 'forge', 'config.json');
   const c = JSON.parse(fs.readFileSync(cf, 'utf8'));
+  // v0.24: forge init writes only project facts plus the layered-defaults record; the legacy tests exercise a
+  // project created before v0.24 — no layers, the options init used to write — so the fixture rebuilds that.
+  delete c.defaults; delete c.profile;
+  Object.assign(c.options, { concurrency: 4, itemShape: 'refuse', workerExplore: 'bounded', contextPack: true, briefLimit: 'on', retryFromReview: true,
+    requireDispatch: true, requireTester: 'high-risk', architectPrepass: 'high-risk', delegateSpecSync: true,
+    modelRouting: 'fixed', models: { implementer: 'claude-sonnet-5-5', tester: 'claude-sonnet-5-5', reviewer: 'claude-sonnet-5-5', explorer: 'claude-haiku-4-5-20251001', architect: 'claude-opus-5-5', security: 'claude-opus-5-5', planner: 'claude-sonnet-5-5' },
+    autopilotMode: 'session', fullVerifyEvery: 3, redFirstTimeoutSec: 120, slowLaneSec: 120 });
   for (const k of ['itemShape', 'workerExplore', 'contextPack', 'briefLimit', 'retryFromReview', 'requireDispatch', 'requireTester', 'architectPrepass', 'delegateSpecSync']) delete c.options[k];
   // v0.22: new projects also start with fixed model routing and runner-capable autopilot settings;
   // the legacy tests exercise an existing project (auto routing). v0.22 tests opt back in.
@@ -56,6 +63,12 @@ function freshProject() {
   fs.writeFileSync(cf, JSON.stringify(c, null, 2));
 }
 function switchOn(k, v) { forge(['config', 'set', 'options.' + k, String(v)]); }
+// v0.24: the EFFECTIVE configuration of a project (Forge defaults → profile → machine → project), via the CLI
+function effectiveCfg(projDir, env = {}) {
+  const r = spawnSync(process.execPath, [CLI, 'config', 'get'], { cwd: projDir, encoding: 'utf8',
+    env: Object.assign({}, process.env, { CLAUDE_PROJECT_DIR: projDir, FORGE_DEFAULTS: path.join(os.tmpdir(), 'forge-no-such-defaults.json') }, env) });
+  return JSON.parse(r.stdout);
+}
 function addItem(id, extra = []) {
   // v0.12: start refuses an unscoped item — default a scope; explicit --allowed in `extra` wins (opt() takes the first).
   return forge(['task', 'add', '--id', id, '--title', id, '--criterion', 'ok::node -e "process.exit(0)"', ...extra, '--allowed', 'src/']);
@@ -626,6 +639,9 @@ test('task list flags items without a scope and withholds READY', () => {
 
 test('second in-flight item refused at cap 1; cap 2 allows disjoint scopes, refuses overlap; new projects start at 4', () => {
   assert.strictEqual(JSON.parse(fs.readFileSync(path.join(dir, 'forge', 'config.json'), 'utf8')).options.concurrency, 4);
+  { const t = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-new-')); spawnSync('git', ['init', '-q'], { cwd: t });
+    spawnSync(process.execPath, [CLI, 'init', '--project', 'n'], { cwd: t, env: Object.assign({}, process.env, { CLAUDE_PROJECT_DIR: t, FORGE_DEFAULTS: path.join(os.tmpdir(), 'forge-no-such-defaults.json') }) });
+    assert.strictEqual(effectiveCfg(t).options.concurrency, 4); }   // v0.24: a new project gets it from Forge's defaults
   forge(['config', 'set', 'options.concurrency', '1']);
   addItem('C1'); // src/
   forge(['task', 'add', '--id', 'C2', '--title', 'c', '--criterion', 'ok::node -e "process.exit(0)"', '--allowed', 'lib/']);
@@ -2156,7 +2172,7 @@ test('v0.21: new projects start with every delegation switch on; existing projec
   const t = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-new-'));
   spawnSync('git', ['init', '-q'], { cwd: t });
   spawnSync(process.execPath, [CLI, 'init', '--project', 'n'], { cwd: t, env: Object.assign({}, process.env, { CLAUDE_PROJECT_DIR: t }) });
-  const o = JSON.parse(fs.readFileSync(path.join(t, 'forge', 'config.json'), 'utf8')).options;
+  const o = effectiveCfg(t).options;   // v0.24: from Forge's built-in defaults, not copied into the file
   assert.deepStrictEqual([o.itemShape, o.workerExplore, o.contextPack, o.briefLimit, o.retryFromReview, o.requireDispatch, o.requireTester, o.architectPrepass, o.delegateSpecSync],
     ['refuse', 'bounded', true, 'on', true, true, 'high-risk', 'high-risk', true]);
   const d = forge(['doctor']).out;   // the fixture project: switches absent
@@ -2576,7 +2592,7 @@ test('v0.22: fixed model routing — new projects start fixed with a full id per
   const fresh = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-init-'));
   spawnSync('git', ['init', '-q'], { cwd: fresh });
   spawnSync(process.execPath, [CLI, 'init'], { cwd: fresh, encoding: 'utf8', env: Object.assign({}, process.env, { CLAUDE_PROJECT_DIR: fresh }) });
-  const initCfg = JSON.parse(fs.readFileSync(path.join(fresh, 'forge', 'config.json'), 'utf8'));
+  const initCfg = effectiveCfg(fresh);   // v0.24: the layered (effective) configuration
   assert.strictEqual(initCfg.options.modelRouting, 'fixed');
   assert.strictEqual(initCfg.options.models.implementer, 'claude-sonnet-5-5');
   assert.strictEqual(initCfg.options.models.explorer, 'claude-haiku-4-5-20251001');
@@ -2869,17 +2885,21 @@ test('v0.22.1: CI on the milestone branch — session start reports a red run as
 
 // --- v0.22.2 ---------------------------------------------------------------
 
-test('v0.22.2: forge init starts every project with the verification tiers on, and merges the machine defaults file; config --global edits that file', () => {
-  // a fresh init with no defaults file: the built-ins
-  const c0 = JSON.parse(fs.readFileSync(path.join(dir, 'forge', 'config.json'), 'utf8'));
-  assert.deepStrictEqual(c0.gate, {});
+test('v0.22.2 + v0.24: every new project gets the verification tiers from Forge\'s defaults; the machine defaults file is a live layer; config --global edits that file', () => {
+  // a fresh init with no defaults file: the built-ins, read as a layer (the file keeps only project facts)
+  const t0 = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-new-')); spawnSync('git', ['init', '-q'], { cwd: t0 });
+  spawnSync(process.execPath, [CLI, 'init', '--project', 'z'], { cwd: t0, env: Object.assign({}, process.env, { CLAUDE_PROJECT_DIR: t0, FORGE_DEFAULTS: path.join(os.tmpdir(), 'forge-no-such-defaults.json') }) });
+  const raw0 = JSON.parse(fs.readFileSync(path.join(t0, 'forge', 'config.json'), 'utf8'));
+  assert.deepStrictEqual(raw0.gate, {});
+  assert.deepStrictEqual(raw0.options, { graphify: 'unset', web: 'unset' });
+  const c0 = effectiveCfg(t0);
   assert.strictEqual(c0.options.fullVerifyEvery, 3);
   assert.strictEqual(c0.options.redFirstTimeoutSec, 120);
   assert.strictEqual(c0.options.slowLaneSec, 120);
   // the machine defaults file: written through config --global, options.* only
   const defs = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'forge-defs-')), 'cfg', 'forge', 'defaults.json');
   let r = forge(['config', 'set', 'options.concurrency', '2', '--global'], { env: { FORGE_DEFAULTS: defs } });
-  assert.strictEqual(r.code, 0, r.out); assert.match(r.out, /every forge init on this machine starts with it/);
+  assert.strictEqual(r.code, 0, r.out); assert.match(r.out, /every project on this machine that follows the layered defaults uses it/);
   r = forge(['config', 'set', 'options.models.explorer', 'claude-sonnet-5-5', '--global'], { env: { FORGE_DEFAULTS: defs } });
   assert.strictEqual(r.code, 0, r.out);
   r = forge(['config', 'set', 'verify.test', 'x', '--global'], { env: { FORGE_DEFAULTS: defs } });
@@ -2888,20 +2908,22 @@ test('v0.22.2: forge init starts every project with the verification tiers on, a
   assert.match(r.out, /"concurrency": 2/); assert.match(r.out, /"explorer": "claude-sonnet-5-5"/);
   const saved = JSON.parse(fs.readFileSync(defs, 'utf8'));
   assert.strictEqual(saved.options.concurrency, 2);
-  // a new project on this machine starts with them — merged over the built-ins, the rest of the model map intact
+  // a project on this machine reads them over the built-ins, the rest of the model map intact — nothing copied
   const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-test2-'));
   const r2 = spawnSync(process.execPath, [CLI, 'init', '--project', 'two'], { cwd: dir2, encoding: 'utf8', env: Object.assign({}, process.env, { CLAUDE_PROJECT_DIR: dir2, FORGE_DEFAULTS: defs }) });
   assert.strictEqual(r2.status, 0, r2.stdout + r2.stderr);
-  assert.match(r2.stdout, /Applied your defaults from .*defaults\.json: concurrency, models\.explorer/);
-  const c2 = JSON.parse(fs.readFileSync(path.join(dir2, 'forge', 'config.json'), 'utf8'));
+  assert.match(r2.stdout, /Your machine defaults \(.*defaults\.json\) apply on top: concurrency, models\.explorer/);
+  assert.deepStrictEqual(JSON.parse(fs.readFileSync(path.join(dir2, 'forge', 'config.json'), 'utf8')).options, { graphify: 'unset', web: 'unset' });
+  const c2 = effectiveCfg(dir2, { FORGE_DEFAULTS: defs });
   assert.strictEqual(c2.options.concurrency, 2);
   assert.strictEqual(c2.options.models.explorer, 'claude-sonnet-5-5');
   assert.strictEqual(c2.options.models.implementer, 'claude-sonnet-5-5');
   assert.strictEqual(c2.options.fullVerifyEvery, 3);
-  // unset --global
+  // unset --global: the project follows Forge's default again, at once (a live layer)
   r = forge(['config', 'unset', 'options.concurrency', '--global'], { env: { FORGE_DEFAULTS: defs } });
   assert.strictEqual(r.code, 0, r.out);
   assert.strictEqual(JSON.parse(fs.readFileSync(defs, 'utf8')).options.concurrency, undefined);
+  assert.strictEqual(effectiveCfg(dir2, { FORGE_DEFAULTS: defs }).options.concurrency, 4);
   // doctor names the file
   r = forge(['doctor'], { env: { FORGE_DEFAULTS: defs } });
   assert.match(r.out, /machine defaults: .*defaults\.json · models/);
@@ -3405,4 +3427,302 @@ test('v0.23.5: a sharded Playwright lane (npm run x -- --shard=1/3) still yields
   const r = forge(['task', 'verify', 'S1'], { env });
   assert.strictEqual(r.code, 0, r.out);
   assert.strictEqual(fs.readFileSync(log, 'utf8').trim().split('\n').pop(), 'test sticker.spec.ts');
+});
+
+// --- v0.24: layered configuration, profiles, defects ---------------------------
+// A project created by this version: forge init stores only project facts; the options come from layers.
+function layeredProject(initArgs = []) {
+  dir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-layered-'));
+  spawnSync('git', ['init', '-q'], { cwd: dir });
+  forge(['init', '--project', 'lp', ...initArgs]);
+  forge(['config', 'set', 'phase', 'build']);
+  forge(['config', 'set', 'verify.test', 'node -e "process.exit(0)"']);
+  forge(['config', 'set', 'options.graphify', 'skip']);
+  forge(['config', 'set', 'options.integration', 'manual', '--reason', 'test fixture']);
+  forge(['config', 'set', 'options.briefCheck', 'off']);
+}
+const rawCfg = () => JSON.parse(fs.readFileSync(path.join(dir, 'forge', 'config.json'), 'utf8'));
+const workJson = () => JSON.parse(fs.readFileSync(path.join(dir, 'forge', 'state', 'work.json'), 'utf8'));
+
+test('v0.24: a new project stores only its own choices; show names each value\'s layer; set records why and flags a value that differs from the recommendation', () => {
+  layeredProject();
+  const raw = rawCfg();
+  assert.strictEqual(raw.defaults.version, JSON.parse(fs.readFileSync(path.join(path.dirname(CLI), '..', '.claude-plugin', 'plugin.json'), 'utf8')).version);
+  assert.strictEqual(raw.options.fullVerifyEvery, undefined);
+  let r = forge(['config', 'show']);
+  assert.match(r.out, /options\.fullVerifyEvery\s+3\s+Forge [\d.]+ default/);
+  assert.match(r.out, /options\.graphify\s+skip\s+this project/);
+  r = forge(['config', 'set', 'options.fullVerifyEvery', '10', '--reason', 'suite takes 10 min']);
+  assert.match(r.out, /recommended: 3\)\. Back to the recommendation: forge config reset options\.fullVerifyEvery/);
+  assert.deepStrictEqual(Object.assign({}, rawCfg().provenance['options.fullVerifyEvery'], { ts: 'x' }), { origin: 'set', ts: 'x', reason: 'suite takes 10 min' });
+  r = forge(['config', 'show']);
+  assert.match(r.out, /options\.fullVerifyEvery\s+10\s+this project\s+← recommended: 3/);
+  assert.match(r.out, /1 value\(s\) differ from the recommendation/);
+  assert.strictEqual(JSON.parse(forge(['config', 'get', 'options.fullVerifyEvery', '--own']).out), '10');
+  // reset: back to the layers
+  r = forge(['config', 'reset', 'options.fullVerifyEvery']);
+  assert.strictEqual(r.code, 0, r.out); assert.match(r.out, /now 3 \(Forge [\d.]+ default\)/);
+  assert.strictEqual(rawCfg().options.fullVerifyEvery, undefined); assert.strictEqual(rawCfg().provenance['options.fullVerifyEvery'], undefined);
+  assert.notStrictEqual(forge(['config', 'reset', 'options.fullVerifyEvery']).code, 0);
+  // Forge-managed keys are not set by hand
+  assert.match(forge(['config', 'set', 'defaults.version', '9.9.9']).out, /managed by Forge/);
+  // a writer (autopilot on) never copies the merged view into the file
+  forge(['autopilot', 'on']); forge(['autopilot', 'off']);
+  assert.strictEqual(rawCfg().options.concurrency, undefined); assert.strictEqual(rawCfg().options.autopilot, 'off');
+});
+
+test('v0.24: reset --all drops every project value that differs from the recommendation, and only those', () => {
+  layeredProject();
+  forge(['config', 'set', 'options.fullVerifyEvery', '10']);
+  forge(['config', 'set', 'options.models.reviewer', 'claude-opus-5-5']);
+  forge(['config', 'set', 'options.concurrency', '4']);           // equal to the default: not "differing"
+  const r = forge(['config', 'reset', '--all', '--reason', 'follow Forge']);
+  assert.strictEqual(r.code, 0, r.out);
+  assert.match(r.out, /Reset 2 value\(s\)/); assert.match(r.out, /options\.fullVerifyEvery = 3/); assert.match(r.out, /options\.models\.reviewer = claude-sonnet-5-5/);
+  const raw = rawCfg();
+  assert.strictEqual(raw.options.fullVerifyEvery, undefined); assert.strictEqual(raw.options.models, undefined);
+  assert.strictEqual(raw.options.concurrency, '4'); assert.strictEqual(raw.options.graphify, 'skip');
+  assert.match(fs.readFileSync(path.join(dir, 'forge', 'decisions.md'), 'utf8'), /follow the recommendation/);
+});
+
+test('v0.24: a project created before v0.24 is read as it is until it adopts; adopt previews, drops values equal to the default, keeps the rest as its own and lists behaviour changes', () => {
+  // the fixture project is pre-v0.24: switches absent (off), concurrency 4 and fullVerifyEvery 3 written in the file
+  forge(['config', 'set', 'options.fullVerifyEvery', '10']);
+  assert.match(forge(['config', 'show']).out, /does not follow Forge's layered defaults yet/);
+  assert.strictEqual(effectiveCfg(dir).options.workerExplore, undefined);   // read as it is
+  let up = forge(['upgrade']).out;
+  assert.match(up, /layered-config .*Forge's layered defaults/); assert.match(up, /forge config adopt --dry-run \(what changes\), then forge config adopt/);
+  assert.doesNotMatch(up, /upgrade-layered-config\.sh/);
+  assert.match(forge(['config', 'profile', 'fast']).out, /Adopt first: forge config adopt/);
+  const before = fs.readFileSync(path.join(dir, 'forge', 'config.json'), 'utf8');
+  let r = forge(['config', 'adopt', '--dry-run']);
+  assert.strictEqual(r.code, 0, r.out);
+  assert.match(r.out, /value\(s\) equal to the default now follow it: .*concurrency/);
+  assert.match(r.out, /kept as this project's own: .*fullVerifyEvery/);
+  assert.match(r.out, /options\.workerExplore: \(not set — the code used off\) → bounded \(Forge [\d.]+ default\)/);
+  assert.doesNotMatch(r.out, /options\.redFirstTimeoutSec:/);   // 120 either way: not a behaviour change
+  assert.match(r.out, /dry run — nothing written/);
+  assert.strictEqual(fs.readFileSync(path.join(dir, 'forge', 'config.json'), 'utf8'), before);
+  r = forge(['config', 'adopt']);
+  assert.strictEqual(r.code, 0, r.out);
+  const raw = rawCfg();
+  assert.ok(raw.defaults); assert.strictEqual(raw.options.concurrency, undefined); assert.strictEqual(raw.options.fullVerifyEvery, '10');
+  assert.strictEqual(raw.provenance['options.fullVerifyEvery'].origin, 'set');            // set by command: its record stays
+  assert.strictEqual(raw.options.integration, 'manual');                                  // project facts stay
+  assert.strictEqual(effectiveCfg(dir).options.workerExplore, 'bounded');
+  assert.match(fs.readFileSync(path.join(dir, 'forge', 'decisions.md'), 'utf8'), /adopt the layered defaults/);
+  assert.match(forge(['config', 'adopt']).out, /Already layered/);
+  up = forge(['upgrade']).out;
+  assert.match(up, /Your own values that differ from the recommendation/); assert.match(up, /options\.fullVerifyEvery = 10 \(this project\) · recommended 3/);
+});
+
+test('v0.24: a profile applies at the milestone\'s first task start, is recorded on the milestone, and the project\'s own values win over it', () => {
+  layeredProject();
+  forge(['milestone', 'add', 'M1', '--name', 'Sign up and see your box']);
+  forge(['milestone', 'add', 'M2', '--name', 'Pay for the box', '--after', 'M1']);
+  forge(['config', 'set', 'options.fullVerifyEvery', '10']);
+  let r = forge(['config', 'profile', 'thorough']);
+  assert.strictEqual(r.code, 0, r.out);
+  assert.match(r.out, /applies at the next milestone's first task start/);
+  assert.match(r.out, /Your own values win over the profile for: options\.fullVerifyEvery = 10 \(this project\)/);
+  assert.strictEqual(effectiveCfg(dir).options.models.reviewer, 'claude-sonnet-5-5');      // not yet
+  addItem('P1', ['--milestone', 'M1']); addItem('P2', ['--milestone', 'M1']);
+  r = forge(['task', 'start', 'P1']);
+  assert.strictEqual(r.code, 0, r.out);
+  assert.match(r.out, /CONFIGURATION for milestone M1:/); assert.match(r.out, /profile: none → thorough/);
+  assert.match(r.out, /options\.models\.reviewer: claude-sonnet-5-5 → claude-opus-5-5 \(profile thorough\)/);
+  const eff = effectiveCfg(dir).options;
+  assert.strictEqual(eff.models.reviewer, 'claude-opus-5-5'); assert.strictEqual(eff.redFirst, 'all');
+  assert.strictEqual(eff.fullVerifyEvery, '10');                                           // the project's own value wins
+  assert.strictEqual(workJson().milestones.M1.config.profile, 'thorough');
+  assert.match(fs.readFileSync(path.join(dir, 'forge', 'decisions.md'), 'utf8'), /Configuration at milestone M1's first start/);
+  // a profile change mid-milestone waits for the next milestone…
+  forge(['config', 'profile', 'fast']);
+  assert.strictEqual(effectiveCfg(dir).options.models.reviewer, 'claude-opus-5-5');
+  assert.doesNotMatch(forge(['task', 'start', 'P2']).out, /CONFIGURATION/);                // not the first start
+  // …unless forced, with a reason
+  assert.notStrictEqual(forge(['config', 'profile', 'fast', '--now']).code, 0);
+  r = forge(['config', 'profile', 'fast', '--now', '--reason', 'tokens ran out']);
+  assert.strictEqual(r.code, 0, r.out); assert.match(r.out, /in effect now/);
+  assert.strictEqual(effectiveCfg(dir).options.models.reviewer, 'claude-sonnet-5-5');
+  // --clear drops the project values that block the profile
+  r = forge(['config', 'profile', 'thorough', '--clear', '--now', '--reason', 'risky milestone']);
+  assert.strictEqual(r.code, 0, r.out);
+  assert.strictEqual(rawCfg().options.fullVerifyEvery, undefined);
+  assert.strictEqual(effectiveCfg(dir).options.fullVerifyEvery, 3);
+  assert.match(forge(['config', 'profile']).out, /thorough — validation first/);
+  assert.notStrictEqual(forge(['config', 'profile', 'turbo']).code, 0);
+});
+
+test('v0.24: a milestone can run under its own profile; it is fixed once the milestone starts', () => {
+  layeredProject(['--profile', 'thorough']);
+  assert.strictEqual(rawCfg().profile, 'thorough');
+  forge(['milestone', 'add', 'M1', '--name', 'Polish the public pages']);
+  let r = forge(['milestone', 'update', 'M1', '--profile', 'fast']);
+  assert.strictEqual(r.code, 0, r.out); assert.match(r.out, /profile: project → fast/);
+  assert.notStrictEqual(forge(['milestone', 'update', 'M1', '--profile', 'turbo']).code, 0);
+  addItem('Q1', ['--milestone', 'M1']);
+  r = forge(['task', 'start', 'Q1']);
+  assert.match(r.out, /profile: thorough → fast/);
+  assert.strictEqual(effectiveCfg(dir).options.fullVerifyEvery, 10);
+  assert.strictEqual(workJson().milestones.M1.config.profile, 'fast');
+  r = forge(['milestone', 'update', 'M1', '--profile', 'thorough']);
+  assert.notStrictEqual(r.code, 0); assert.match(r.out, /has started — its profile was fixed at its first task start/);
+});
+
+test('v0.24: a project follows the defaults of the Forge version it is pinned to; a newer version\'s defaults wait for the next milestone\'s first start', () => {
+  layeredProject();
+  const cf = path.join(dir, 'forge', 'config.json');
+  const c = rawCfg(); c.defaults.version = '0.23.0'; fs.writeFileSync(cf, JSON.stringify(c, null, 2));   // pinned before the 0.24.0 defaults
+  assert.strictEqual(effectiveCfg(dir).options.concurrency, undefined);
+  const up = forge(['upgrade']).out;
+  assert.match(up, /Forge v[\d.]+ defaults apply at the next milestone's first task start:/); assert.match(up, /options\.concurrency: \(unset\) → 4/);
+  forge(['milestone', 'add', 'M1', '--name', 'Sign up and see your box']);
+  addItem('V1', ['--milestone', 'M1']);
+  const r = forge(['task', 'start', 'V1']);
+  assert.match(r.out, /Forge defaults: v0\.23\.0 → v/);
+  assert.strictEqual(effectiveCfg(dir).options.concurrency, 4);
+});
+
+test('v0.24: defects are recorded against the milestone that shipped them and reported per milestone and per profile', () => {
+  layeredProject(['--profile', 'fast']);
+  forge(['milestone', 'add', 'M1', '--name', 'Sign up and see your box']);
+  addItem('E1', ['--milestone', 'M1']);
+  forge(['task', 'start', 'E1']);
+  let r = forge(['defect', 'add', 'cart badge shows 0 after sign-in']);
+  assert.notStrictEqual(r.code, 0); assert.match(r.out, /say which milestone shipped it/);
+  r = forge(['defect', 'add', 'cart badge shows 0 after sign-in', '--item', 'E1', '--found', 'nowhere']);
+  assert.notStrictEqual(r.code, 0); assert.match(r.out, /--found must be one of/);
+  r = forge(['defect', 'add', 'cart badge shows 0 after sign-in', '--item', 'E1', '--found', 'milestone-test', '--severity', 'high']);
+  assert.strictEqual(r.code, 0, r.out); assert.match(r.out, /Defect D1 recorded against milestone M1 \(task E1\)/);
+  r = forge(['defect', 'add', 'typo on the about page', '--milestone', 'M1', '--found', 'staging', '--severity', 'low']);
+  assert.match(r.out, /Defect D2/);
+  const d = workJson().defects;
+  assert.strictEqual(d.length, 2); assert.strictEqual(d[0].profile, 'fast'); assert.strictEqual(d[0].milestone, 'M1');
+  assert.match(forge(['defect', 'list']).out, /D1 .* M1 \/ E1 {2}milestone-test {2}high {2}cart badge/);
+  r = forge(['defect', 'report']);
+  assert.strictEqual(r.code, 0, r.out);
+  assert.match(r.out, /M1\s+fast\s+0\s+—\s+[\d.]+\s+2\s+milestone-test 1, staging 1/);
+  assert.match(r.out, /fast\s+1 milestone\(s\) · 0 task\(s\) .* 2 defect\(s\) \(1 high\)/);
+  assert.notStrictEqual(forge(['defect', 'add', 'x', '--milestone', 'NOPE', '--found', 'staging']).code, 0);
+});
+
+// --- v0.24 review fixes ------------------------------------------------------------------------
+const lastJson = (out) => { try { return JSON.parse(out.trim().split('\n').pop()); } catch (_) { return null; } };
+
+test('v0.24 fix: hooks and doctor read the effective configuration — fixed routing is enforced in a new project, and follows the profile', () => {
+  layeredProject(['--profile', 'thorough']);
+  forge(['milestone', 'add', 'M1', '--name', 'Sign up and see your box']);
+  addItem('H1', ['--milestone', 'M1']); forge(['task', 'start', 'H1']);
+  let h = hook('pretooluse', { session_id: 's', tool_name: 'Agent', tool_input: { subagent_type: 'forge:forge-implementer', model: 'claude-haiku-4-5', prompt: '# Work brief — H1: x' } });
+  const d = lastJson(h.out);
+  assert.ok(d, h.out); assert.strictEqual(d.hookSpecificOutput.permissionDecision, 'deny');
+  assert.match(d.hookSpecificOutput.permissionDecisionReason, /runs on claude-sonnet-5-5/);
+  h = hook('pretooluse', { session_id: 's', tool_name: 'Agent', tool_input: { subagent_type: 'forge-reviewer', model: 'claude-opus-5-5', prompt: '# Review brief — H1: x' } });
+  assert.doesNotMatch(h.out, /deny/);                                   // thorough: the reviewer runs on Opus
+  const doc = forge(['doctor']).out;
+  assert.match(doc, /switch itemShape: "refuse"/); assert.doesNotMatch(doc, /switch itemShape: "warn"/);
+});
+
+test('v0.24 fix: Forge-managed records cannot be unset or reset; a damaged version falls back to the installed one', () => {
+  layeredProject();
+  for (const k of ['defaults', 'defaults.version', 'profile', 'provenance']) {
+    for (const a of ['unset', 'reset']) { const r = forge(['config', a, k]); assert.notStrictEqual(r.code, 0, `${a} ${k}`); assert.match(r.out, /managed by Forge/); }
+  }
+  const c = rawCfg(); delete c.defaults.version; fs.writeFileSync(path.join(dir, 'forge', 'config.json'), JSON.stringify(c));
+  assert.strictEqual(effectiveCfg(dir).options.concurrency, 4);
+});
+
+test('v0.24 fix: a first start refused after the boundary leaves the configuration and the decisions log as they were', () => {
+  layeredProject();
+  forge(['milestone', 'add', 'M1', '--name', 'Sign up and see your box']);
+  forge(['config', 'profile', 'thorough']);
+  const crit = []; for (let i = 0; i < 7; i++) crit.push('--criterion', `c${i}::node -e "process.exit(0)"`);
+  forge(['task', 'add', '--id', 'B1', '--title', 'b', '--milestone', 'M1', '--allowed', 'src/', ...crit]);
+  const before = fs.readFileSync(path.join(dir, 'forge', 'config.json'), 'utf8');
+  const r = forge(['task', 'start', 'B1', '--size-reason', 'x']);
+  assert.notStrictEqual(r.code, 0, r.out);
+  assert.match(r.out, /7 acceptance criteria \(limit 6, options\.itemShape=refuse\)/);   // refused AFTER the boundary point
+  assert.strictEqual(fs.readFileSync(path.join(dir, 'forge', 'config.json'), 'utf8'), before);
+  assert.doesNotMatch(fs.readFileSync(path.join(dir, 'forge', 'decisions.md'), 'utf8'), /first start/);
+  assert.strictEqual(workJson().milestones.M1.firstStart, undefined);
+  forge(['task', 'cancel', 'B1', '--reason', 'split instead']);
+  addItem('B2', ['--milestone', 'M1']);
+  const ok = forge(['task', 'start', 'B2']);
+  assert.strictEqual(ok.code, 0, ok.out); assert.match(ok.out, /CONFIGURATION for milestone M1/);
+  assert.strictEqual(rawCfg().defaults.profile, 'thorough');
+});
+
+test('v0.24 fix: adopt keeps a value equal to a machine default as the project\'s own (another machine reads the file without it)', () => {
+  const defs = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'forge-defs-')), 'defaults.json');
+  fs.writeFileSync(defs, JSON.stringify({ options: { concurrency: 2 } }));
+  forge(['config', 'set', 'options.concurrency', '2']);
+  const r = forge(['config', 'adopt'], { env: { FORGE_DEFAULTS: defs } });
+  assert.strictEqual(r.code, 0, r.out);
+  assert.strictEqual(rawCfg().options.concurrency, '2');
+  assert.strictEqual(effectiveCfg(dir).options.concurrency, '2');      // without the machine file: still 2
+});
+
+test('v0.24 fix: --clear needs --now and a reason, and the decision names the values it dropped', () => {
+  layeredProject();
+  forge(['config', 'set', 'options.fullVerifyEvery', '10']);
+  let r = forge(['config', 'profile', 'thorough', '--clear']);
+  assert.notStrictEqual(r.code, 0); assert.match(r.out, /--clear drops options\.fullVerifyEvery = 10 at once/);
+  assert.strictEqual(rawCfg().options.fullVerifyEvery, '10'); assert.strictEqual(rawCfg().profile, null);
+  r = forge(['config', 'profile', 'thorough', '--clear', '--now', '--reason', 'risky work ahead']);
+  assert.strictEqual(r.code, 0, r.out); assert.match(r.out, /Dropped this project's own options\.fullVerifyEvery = 10/);
+  assert.match(fs.readFileSync(path.join(dir, 'forge', 'decisions.md'), 'utf8'), /dropped this project's own options\.fullVerifyEvery = 10/);
+});
+
+test('v0.24 fix: facts about one project are refused in the machine file', () => {
+  const defs = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'forge-defs-')), 'defaults.json');
+  for (const [k, v] of [['baseBranch', 'main'], ['integration', 'manual'], ['protect', 'x/'], ['graphify', 'skip']]) {
+    const r = forge(['config', 'set', `options.${k}`, v, '--global'], { env: { FORGE_DEFAULTS: defs } });
+    assert.notStrictEqual(r.code, 0, k); assert.match(r.out, /is about one project/);
+  }
+  assert.strictEqual(forge(['config', 'set', 'options.fullVerifyEvery', '5', '--global'], { env: { FORGE_DEFAULTS: defs } }).code, 0);
+});
+
+test('v0.24 fix: a milestone\'s profile is fixed once its first start is recorded, even with no task in progress', () => {
+  layeredProject();
+  forge(['milestone', 'add', 'M1', '--name', 'Sign up and see your box']);
+  addItem('F1', ['--milestone', 'M1']); forge(['task', 'start', 'F1']); forge(['task', 'block', 'F1', '--reason', 'waiting on the owner']);
+  const r = forge(['milestone', 'update', 'M1', '--profile', 'thorough']);
+  assert.notStrictEqual(r.code, 0); assert.match(r.out, /has started/);
+});
+
+test('v0.24 fix: a profile switched mid-milestone is recorded on it; its defects and report say "mixed"', () => {
+  layeredProject(['--profile', 'fast']);
+  forge(['milestone', 'add', 'M1', '--name', 'Sign up and see your box']);
+  addItem('X1', ['--milestone', 'M1']); forge(['task', 'start', 'X1']);
+  const r = forge(['config', 'profile', 'thorough', '--now', '--reason', 'payments turned out risky']);
+  assert.strictEqual(r.code, 0, r.out);
+  const sw = workJson().milestones.M1.config.switches;
+  assert.strictEqual(sw.length, 1); assert.strictEqual(sw[0].from, 'fast'); assert.strictEqual(sw[0].to, 'thorough');
+  forge(['defect', 'add', 'wrong total', '--milestone', 'M1', '--found', 'milestone-test']);
+  assert.strictEqual(workJson().defects[0].profile, 'mixed');
+  assert.match(forge(['defect', 'report']).out, /M1\s+mixed/);
+});
+
+test('v0.24 fix: a milestone started before its first start was recorded gets no boundary mid-way', () => {
+  layeredProject();
+  forge(['milestone', 'add', 'M1', '--name', 'Sign up and see your box']);
+  addItem('L1', ['--milestone', 'M1']); addItem('L2', ['--milestone', 'M1', '--allowed', 'lib/']);
+  forge(['config', 'set', 'options.concurrency', '2']);
+  forge(['task', 'start', 'L1']);
+  const wf = path.join(dir, 'forge', 'state', 'work.json');
+  const w = JSON.parse(fs.readFileSync(wf, 'utf8')); delete w.milestones.M1.firstStart; delete w.milestones.M1.config; fs.writeFileSync(wf, JSON.stringify(w));
+  forge(['config', 'profile', 'thorough']);
+  const r = forge(['task', 'start', 'L2']);
+  assert.strictEqual(r.code, 0, r.out); assert.doesNotMatch(r.out, /CONFIGURATION/);
+  assert.strictEqual(rawCfg().defaults.profile, null);
+});
+
+test('v0.24 fix: in a project without milestones, a task start with nothing else in progress is the boundary', () => {
+  layeredProject();
+  forge(['config', 'profile', 'fast']);
+  addItem('N1');
+  const r = forge(['task', 'start', 'N1']);
+  assert.strictEqual(r.code, 0, r.out); assert.match(r.out, /CONFIGURATION for task N1/);
+  assert.strictEqual(effectiveCfg(dir).options.fullVerifyEvery, 10);
 });

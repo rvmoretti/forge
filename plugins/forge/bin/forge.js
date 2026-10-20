@@ -90,7 +90,19 @@ function out(msg) { process.stdout.write(msg + '\n'); }
 // v0.19: piping into head/less and quitting early is normal, not a crash
 process.stdout.on('error', e => { if (e && e.code === 'EPIPE') process.exit(0); });
 
-function loadConfig() { return readJson(CONFIG_FILE, null); }
+// v0.24: the EFFECTIVE configuration (Forge defaults → profile → machine → project, see configLayers);
+// a project that has not adopted the layers is read as it is. Writers use loadProjectConfig().
+function loadConfig() {
+  const raw = readJson(CONFIG_FILE, null);
+  if (!raw || !raw.defaults) return raw;
+  return Object.assign({}, raw, { options: effectiveOptions(configLayers(raw)) });
+}
+// Same, but throws on a missing or unreadable file instead of exiting — for hooks and doctor, which catch it.
+function loadConfigStrict() {
+  const raw = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
+  if (!raw || !raw.defaults) return raw;
+  return Object.assign({}, raw, { options: effectiveOptions(configLayers(raw)) });
+}
 function loadWork() { if (MUTATING) acquireWorkLock(); return readJson(WORK_FILE, { schema: 1, items: {}, order: [] }); }
 function saveWork(w) { ensureMilestones(w); writeJson(WORK_FILE, w); regenDashboard(); }
 
@@ -113,6 +125,8 @@ const MUTATING = (() => {
   if (c === 'arch') return ['add', 'update', 'link', 'unlink', 'confirm', 'remove', 'lanes'].includes(s) || (s === 'scan' && process.argv.includes('--write'));
   if (c === 'screen') return ['add', 'update', 'assign'].includes(s);
   if (c === 'upgrade') return ['apply', 'accept'].includes(s);
+  if (c === 'defect') return s === 'add';
+  if (c === 'config') return s === 'profile' && process.argv.includes('--now');
   if (c === 'autopilot') return ['on', 'off'].includes(s);
   return false;
 })();
@@ -1255,6 +1269,15 @@ const UPGRADE_STEPS = [
       }
       return { done: !f.length, findings: f };
     } },
+  // v0.24: forge/config.json keeps only the project's own choices; Forge's defaults, the profile and this
+  // machine's defaults are layers. A project created before v0.24 adopts them by command, after a preview.
+  { id: 'layered-config', since: '0.24.0', kind: 'review', direct: true, title: 'The project follows Forge\'s layered defaults (config.json keeps only its own choices)',
+    how: 'forge config adopt --dry-run (what changes), then forge config adopt',
+    check() {
+      const raw = loadProjectConfig();
+      if (!raw || raw.defaults) return { done: true, findings: [] };
+      return { done: false, findings: ['created before v0.24: every option is read from forge/config.json as it is; newer Forge defaults and the fast/thorough profiles never reach it'] };
+    } },
   { id: 'architecture', since: '0.19.0', kind: 'review', title: 'The architecture is drafted from the repo, screens belong to their app, and you confirmed it',
     how: 'forge-brownfield skill, "Architecture draft": forge arch scan --write, a forge-explorer pass to name/split/link parts and assign screens, then your confirmation',
     check() {
@@ -1270,6 +1293,27 @@ const UPGRADE_STEPS = [
       return { done: !f.length, findings: f };
     } },
 ];
+// v0.24: what an upgrade means for this project's configuration — the newer defaults waiting for the next
+// milestone's first start, and the project's own values that differ from the recommendation (never changed for you).
+function configUpgradeLines() {
+  const raw = loadProjectConfig();
+  if (!raw || !raw.defaults) return [];
+  const L = [];
+  if (cmpVer(raw.defaults.version, VERSION) < 0) {
+    const was = flatOptions(effectiveOptions(configLayers(raw))), will = flatOptions(effectiveOptions(configLayers(raw, { version: VERSION })));
+    const ch = [...new Set([...Object.keys(was), ...Object.keys(will)])].sort().filter(k => !sameVal(was[k], will[k]));
+    L.push(`\n# Configuration — Forge v${VERSION} defaults apply at the next milestone's first task start${ch.length ? ':' : ' (no value changes for this project)'}`);
+    for (const k of ch) L.push(`  - options.${k}: ${was[k] === undefined ? '(unset)' : was[k]} → ${will[k] === undefined ? '(unset)' : will[k]}`);
+  }
+  const src = optionSources(raw) || {};
+  const diff = Object.keys(src).filter(k => src[k].differs).sort();
+  if (diff.length) {
+    L.push(`\n# Your own values that differ from the recommendation (kept — an upgrade never changes them)`);
+    for (const k of diff) L.push(`  - options.${k} = ${src[k].value} (${src[k].label}) · recommended ${src[k].recommended}`);
+    L.push(`  Follow the recommendation: forge config reset options.<key> · all of them: forge config reset --all`);
+  }
+  return L;
+}
 function upgradeStatus() {
   const raw = readJson(WORK_FILE, { items: {}, order: [] });
   const accepted = (raw.upgrade || {}).accepted || {};
@@ -1603,6 +1647,144 @@ const MODEL_ROLES = ['implementer', 'tester', 'reviewer', 'explorer', 'architect
 const MODEL_DEFAULTS = { implementer: 'claude-sonnet-5-5', tester: 'claude-sonnet-5-5', reviewer: 'claude-sonnet-5-5',
   explorer: 'claude-haiku-4-5-20251001', architect: 'claude-opus-5-5', security: 'claude-opus-5-5', planner: 'claude-sonnet-5-5' };
 function modelRouting(cfg) { const v = (((cfg || {}).options) || {}).modelRouting; return v === 'fixed' ? 'fixed' : 'auto'; }
+// ============================================================================
+// v0.24: layered configuration. forge/config.json keeps only what was chosen for THIS project;
+// every other option is read, at run time, from layers (the higher one wins):
+//   1. Forge's built-in defaults, as of the Forge version the project follows (defaults.version)
+//   2. the profile (fast | thorough) — the real speed-vs-validation trade-offs, nothing else
+//   3. this machine's defaults (~/.config/forge/defaults.json, forge config set ... --global)
+//   4. the project's own values (forge config set)
+// A project created before v0.24 has no `defaults` record and reads exactly as before until it adopts
+// the layers by command (forge config adopt — an unset option there means the old behaviour). A newer
+// Forge's defaults and a profile change take effect at a milestone's first task start — one milestone
+// runs under one configuration, so its numbers compare with the next one's.
+// ============================================================================
+// Each change to a built-in default is one entry: the version it ships in, the values, and why.
+const DEFAULT_CHANGES = [
+  { since: '0.24.0', options: (() => { const o = initOptions(); delete o.graphify; delete o.web;
+      return Object.assign(o, { fullVerifyHighRisk: true, redFirst: 'smart' }); })(), // the last two: the code's own fallbacks, made visible
+    why: 'the options forge init wrote into every new project from v0.20 to v0.23 (delegation switches v0.21, model map v0.22, verification tiers v0.22.2)' },
+];
+// What the code does when an option is not set at all (a project created before v0.24) — so adopting
+// reports only real behaviour changes. Keys not listed here have no known fallback (reported as a change).
+function codeDefault(k, raw) {
+  if (k in SWITCH_OFF) return SWITCH_OFF[k];
+  if (k.startsWith('models.')) { const r = k.slice(7), map = ((raw || {}).options || {}).models || {};
+    return r === 'planner' && map.implementer ? map.implementer : MODEL_DEFAULTS[r]; }
+  return { concurrency: 1, fullVerifyEvery: 0, fullVerifyHighRisk: true, redFirst: 'smart', redFirstTimeoutSec: 120, slowLaneSec: 120,
+    gateTimeoutSec: 1800, modelRouting: 'auto', autopilotMode: 'session' }[k];
+}
+const PROFILES = {
+  fast: { what: 'speed and tokens first: the full suite every 10th task, no extra tester or design note on high-risk work, Sonnet reviews, red-first only where it proves something',
+    options: { fullVerifyEvery: 10, fullVerifyHighRisk: false, requireTester: false, architectPrepass: false, redFirst: 'smart', models: { reviewer: MODEL_DEFAULTS.reviewer } } },
+  thorough: { what: 'validation first: the full suite every 3rd task and after every high-risk task, an independent tester and an architect design note on high-risk work, Opus reviews, every red-first check',
+    options: { fullVerifyEvery: 3, fullVerifyHighRisk: true, requireTester: 'high-risk', architectPrepass: 'high-risk', redFirst: 'all', models: { reviewer: MODEL_DEFAULTS.architect } } },
+};
+function cmpVer(a, b) {
+  const pa = String(a || '0').split('.').map(n => parseInt(n, 10) || 0), pb = String(b || '0').split('.').map(n => parseInt(n, 10) || 0);
+  for (let i = 0; i < 3; i++) if ((pa[i] || 0) !== (pb[i] || 0)) return (pa[i] || 0) < (pb[i] || 0) ? -1 : 1;
+  return 0;
+}
+function mergeOptions(into, from) {
+  for (const [k, v] of Object.entries(from || {})) {
+    if (k === 'models' && v && typeof v === 'object' && !Array.isArray(v)) into.models = Object.assign({}, into.models || {}, v);
+    else into[k] = v;
+  }
+  return into;
+}
+function builtinDefaults(version) {
+  const o = {};
+  for (const c of DEFAULT_CHANGES) if (cmpVer(c.since, version) <= 0) mergeOptions(o, JSON.parse(JSON.stringify(c.options)));
+  return o;
+}
+function loadProjectConfig() { return readJson(CONFIG_FILE, null); }
+// The layers of an adopted project, lowest first; null for a project that has not adopted them.
+function configLayers(raw, over) {
+  if (!raw || !raw.defaults) return null;
+  const d = Object.assign({}, raw.defaults, over || {});
+  if (!/^\d+\.\d+\.\d+$/.test(String(d.version || ''))) d.version = VERSION; // a damaged record never turns the defaults off
+  const ud = loadUserDefaults();
+  const prof = d.profile && PROFILES[d.profile];
+  return [
+    { layer: 'forge', label: `Forge ${d.version} default`, options: builtinDefaults(d.version) },
+    { layer: 'profile', label: `profile ${d.profile}`, options: prof ? JSON.parse(JSON.stringify(prof.options)) : {} },
+    { layer: 'machine', label: 'machine default', options: (ud && ud.options) || {} },
+    { layer: 'project', label: 'this project', options: raw.options || {} },
+  ];
+}
+function effectiveOptions(layers) { const o = {}; for (const l of layers) mergeOptions(o, JSON.parse(JSON.stringify(l.options || {}))); return o; }
+// Flatten options into dotted keys (models.<role> are separate keys).
+function flatOptions(o) {
+  const f = {};
+  for (const [k, v] of Object.entries(o || {})) {
+    if (k === 'models' && v && typeof v === 'object' && !Array.isArray(v)) for (const [r, m] of Object.entries(v)) f[`models.${r}`] = m;
+    else f[k] = v;
+  }
+  return f;
+}
+const sameVal = (a, b) => String(a) === String(b);
+// Where each effective option comes from: { key: { value, layer, label, recommended, recommendedFrom } }.
+// recommended = what Forge's defaults + the profile give (machine and project values are your own choices).
+function optionSources(raw, over) {
+  const L = configLayers(raw, over); if (!L) return null;
+  const rec = flatOptions(effectiveOptions(L.slice(0, 2)));
+  const res = {};
+  for (const l of L) for (const [k, v] of Object.entries(flatOptions(l.options))) res[k] = { value: v, layer: l.layer, label: l.label };
+  for (const [k, s] of Object.entries(res)) if (k in rec) { s.recommended = rec[k]; s.differs = !sameVal(rec[k], s.value) && (s.layer === 'project' || s.layer === 'machine'); }
+  return res;
+}
+// The milestone boundary (a milestone's first task start): a layered project follows the installed Forge's
+// defaults and the milestone's profile from here on. Writes forge/config.json, records the snapshot on
+// the milestone and returns the option changes it caused, as lines.
+// A project created before v0.24 is left as it is until it adopts the layers by command (forge config adopt):
+// in such a project an unset option means the old behaviour, and adopting turns those on.
+// Returns { lines, previous } — previous is the file as it was, so a start refused after this point can put it back.
+function applyBoundary(w, m) {
+  const raw = loadProjectConfig(); if (!raw || !raw.defaults) return { lines: [], previous: null };
+  const previous = JSON.parse(JSON.stringify(raw));
+  const before = flatOptions((loadConfig() || {}).options);
+  const lines = [];
+  const ms = (m && (w.milestones || {})[m]) || {};
+  const prof = ms.profile !== undefined && ms.profile !== null ? (ms.profile === 'none' ? null : ms.profile) : (raw.profile || null);
+  const was = raw.defaults;
+  raw.defaults = { version: VERSION, profile: prof, milestone: m, ts: ts() };
+  writeJson(CONFIG_FILE, raw);
+  const after = flatOptions((loadConfig() || {}).options);
+  const keys = new Set([...Object.keys(before), ...Object.keys(after)]);
+  const src = optionSources(raw) || {};
+  for (const k of [...keys].sort()) if (!sameVal(before[k], after[k]))
+    lines.push(`options.${k}: ${before[k] === undefined ? '(code default)' : before[k]} → ${after[k] === undefined ? '(code default)' : after[k]} (${(src[k] || {}).label || 'removed'})`);
+  if (was && cmpVer(was.version, VERSION) !== 0) lines.unshift(`Forge defaults: v${was.version} → v${VERSION}`);
+  if ((was ? was.profile || null : null) !== prof) lines.unshift(`profile: ${was && was.profile ? was.profile : 'none'} → ${prof || 'none'}`);
+  if (m && w.milestones[m]) w.milestones[m].config = { profile: prof, defaultsVersion: VERSION, ts: ts() };
+  return { lines, previous };
+}
+// One-time move of a pre-v0.24 project onto the layers: values equal to what Forge's defaults give are
+// dropped (the project follows the default from now on); every other value stays as the project's own,
+// marked "set before v0.24". Mutates raw (caller writes). Returns what it did, as lines.
+function adoptLayers(raw) {
+  const out1 = [];
+  raw.defaults = { version: VERSION, profile: raw.profile || null, ts: ts() };
+  const L = configLayers(raw);
+  // only Forge's defaults and the profile: a value equal to a MACHINE default is still the project's own —
+  // init copied machine defaults into projects until v0.24, and another machine reads this file without them
+  const lower = flatOptions(effectiveOptions(L.slice(0, 2)));
+  const own = raw.options || {};
+  const dropped = [], kept = [];
+  for (const [k, v] of Object.entries(flatOptions(own))) {
+    if (!(k in lower)) continue; // project facts (graphify, integration, baseBranch …) have no default: they stay
+    if (sameVal(lower[k], v)) {
+      if (k.startsWith('models.')) { const r = k.slice(7); delete own.models[r]; if (!Object.keys(own.models).length) delete own.models; }
+      else delete own[k];
+      dropped.push(k);
+    } else kept.push(k);
+  }
+  raw.provenance = raw.provenance || {};
+  for (const k of kept) if (!raw.provenance[`options.${k}`]) raw.provenance[`options.${k}`] = { origin: 'set before v0.24', ts: ts() };
+  if (dropped.length) out1.push(`${dropped.length} value(s) equal to the default now follow it: ${dropped.join(', ')}`);
+  if (kept.length) out1.push(`${kept.length} value(s) kept as this project's own: ${kept.join(', ')}`);
+  return out1;
+}
 // Which role an agent plays. forge-reviewer is 'security' on the milestone security pass, 'reviewer' otherwise.
 function roleOf(agent, purposeOrPrompt) {
   const a = String(agent || '').replace(/^forge:/, '').toLowerCase();
@@ -1702,26 +1884,28 @@ function slowGateNote(cfg, lane, r) {
   if (r.ms > 0.75 * gateTimeoutMs(cfg)) out(`SLOW GATE LANE: gate.${lane} took ${Math.round(r.ms / 1000)} s of its ${Math.round(gateTimeoutMs(cfg) / 1000)} s limit (options.gateTimeoutSec).`);
 }
 function redFirstTimeoutMs(cfg) { const n = parseFloat((((cfg || {}).options) || {}).redFirstTimeoutSec); return (n > 0 ? n : 120) * 1000; }
-// v0.22.2: the options every NEW project starts with. The verification tiers are a default now, not a
+// v0.22.2: the options every NEW project started with. The verification tiers are a default now, not a
 // per-project setup step: fast lanes per task, a full run every third task, the red-first proof capped.
+// v0.24: these are Forge's built-in defaults as of 0.24.0 (DEFAULT_CHANGES). Do not edit them to change a
+// default — add a DEFAULT_CHANGES entry with the version and the evidence, so projects pinned to an older
+// version keep theirs until their next milestone's first start.
 function initOptions() {
   return Object.assign({ graphify: 'unset', web: 'unset', concurrency: 4 }, SWITCH_ON, // v0.20: 4 in parallel · v0.21: delegation switches on for new projects
     { modelRouting: 'fixed', models: Object.assign({}, MODEL_DEFAULTS), autopilotMode: 'session' }, // v0.22: every worker role pinned to a model id; the orchestrator is the session model
     { fullVerifyEvery: 3, redFirstTimeoutSec: 120, slowLaneSec: 120 }); // v0.22.2: verification tiers on by default
 }
-// v0.22.2: one defaults file per machine (options only), merged over the built-ins by `forge init` — so a
-// model map or a verification setting chosen once applies to every new project without a command.
+// v0.22.2: one defaults file per machine (options only) — so a model map or a verification setting chosen
+// once applies to every project without a command. v0.24: read live as a layer (configLayers), not copied at init.
 function userDefaultsFile() {
   return process.env.FORGE_DEFAULTS || path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'), 'forge', 'defaults.json');
 }
-function loadUserDefaults() { const d = readJson(userDefaultsFile(), null); return d && typeof d === 'object' && !Array.isArray(d) ? d : null; }
-function mergeUserDefaults(options, ud) {
-  const applied = [];
-  for (const [k, v] of Object.entries((ud || {}).options || {})) {
-    if (k === 'models' && v && typeof v === 'object') { options.models = Object.assign({}, options.models, v); applied.push(...Object.keys(v).map(r => `models.${r}`)); }
-    else { options[k] = v; applied.push(k); }
-  }
-  return applied;
+let UD_WARNED = false;
+function loadUserDefaults() {
+  // v0.24: read on every config load (a live layer) — a broken file is reported once and ignored, never fatal (hooks read it too)
+  let d = null;
+  try { d = JSON.parse(fs.readFileSync(userDefaultsFile(), 'utf8')); }
+  catch (e) { if (e.code !== 'ENOENT' && !UD_WARNED) { UD_WARNED = true; process.stderr.write(`forge: machine defaults ${userDefaultsFile()} is unreadable (${e.message}) — ignored.\n`); } return null; }
+  return d && typeof d === 'object' && !Array.isArray(d) ? d : null;
 }
 // v0.22.2: a verify.* lane that keeps taking longer than options.slowLaneSec (default 120 s) belongs in
 // gate.*. Measured from the recorded verifications (each check carries its ms), last ten runs of the lane.
@@ -1982,12 +2166,12 @@ function milestoneBase(w, m) {
 
 function regenDashboard() {
   if (process.env.FORGE_DEFER_REGEN === '1') return; // v0.19.1: a change script regenerates once, at its end
-  try { usageAutoRefresh(readJson(CONFIG_FILE, null)); } catch (_) { /* never block state ops */ }
+  try { usageAutoRefresh(loadConfig()); } catch (_) { /* never block state ops */ }
   try { generateDashboard(); } catch (_) { /* dashboard is best-effort; never block state ops */ }
 }
 
 function generateDashboard() {
-  const cfg = readJson(CONFIG_FILE, null);
+  const cfg = loadConfig(); // v0.24: the effective configuration
   if (!cfg) return; // no project yet
   const w = readJson(WORK_FILE, { items: {}, order: [] });
   const pf = readJson(PREFLIGHT_FILE, null);
@@ -4352,20 +4536,26 @@ const commands = {
   // -- init -----------------------------------------------------------------
   init() {
     fs.mkdirSync(STATE, { recursive: true });
-    const initOpts = initOptions();
-    const applied = mergeUserDefaults(initOpts, loadUserDefaults());
-    if (!loadConfig()) {
+    const prof = opt('profile');
+    if (prof && !PROFILES[prof]) die(`Unknown profile '${prof}'. Profiles: ${Object.keys(PROFILES).join(', ')}`);
+    if (!loadProjectConfig()) {
+      // v0.24: the project stores only its own choices; Forge's defaults, the profile and this machine's
+      // defaults are layers read at run time (forge config show lists where each value comes from)
       writeJson(CONFIG_FILE, {
         project: opt('project') || path.basename(PROJECT),
         phase: 'spec',                       // 'spec' until METHOD Step 7 sets verify commands
         specDir: opt('spec-dir') || null,    // discovered/declared later
         verify: {},                          // e.g. { test: "npm test", lint: "...", typecheck: "..." } — the fast lanes, every task
         gate: {},                            // v0.22.2: the slow lanes (e2e, db) — milestone gate, --full, every Nth task
-        options: initOpts
+        options: { graphify: 'unset', web: 'unset' }, // project facts, asked for at preflight
+        profile: prof || null,               // v0.24: fast | thorough | null — applied at each milestone's first task start
+        defaults: { version: VERSION, profile: prof || null, ts: ts() }
       });
-      out('Initialized forge/config.json (phase: spec).');
-      if (applied.length) out(`Applied your defaults from ${userDefaultsFile()}: ${applied.join(', ')}`);
-    } else out('forge/config.json already exists — left untouched (init is idempotent).');
+      out(`Initialized forge/config.json (phase: spec) — it follows Forge v${VERSION}'s defaults${prof ? ` and the ${prof} profile` : ''}; forge config show lists every value and where it comes from.`);
+      const ud = loadUserDefaults();
+      const mine = Object.keys(flatOptions((ud || {}).options));
+      if (mine.length) out(`Your machine defaults (${userDefaultsFile()}) apply on top: ${mine.join(', ')}`);
+    } else out(`forge/config.json already exists — left untouched (init is idempotent).${prof ? ` To choose a profile: forge config profile ${prof}` : ''}`);
     if (!fs.existsSync(WORK_FILE)) { saveWork(loadWork()); out('Initialized forge/state/work.json.'); }
     appendMd(DECISIONS_FILE, '# Decisions log (append-only, via forge CLI)', '');
     appendMd(DISCOVERIES_FILE, '# Discoveries log (append-only, via forge CLI)', '');
@@ -4385,13 +4575,17 @@ const commands = {
       if (action !== 'set' && action !== 'unset') die('Usage: forge config get [path] --global | set options.<key> <value> --global | unset options.<key> --global');
       const keyPath = pos[2];
       if (!keyPath || !/^options\.[A-Za-z]/.test(keyPath)) die(`--global takes options.* keys only (verify.* and gate.* are per project). Got: ${keyPath || '(none)'}`);
+      // v0.24: the machine file is a live layer for every project — facts about one project (and settings whose
+      // project-level change needs a recorded reason or is refused) stay per project
+      const PROJECT_ONLY = ['integration', 'baseBranch', 'remote', 'protect', 'graphify', 'web', 'scopeExempt', 'gateSteps', 'versionStart', 'autopilot', 'autopilotMaxItems', 'autopilotMaxHours', 'gates', 'security'];
+      if (action === 'set' && PROJECT_ONLY.includes(keyPath.split('.')[1])) die(`Refused: ${keyPath} is about one project — set it there: forge config set ${keyPath} <value>`);
       const keys = keyPath.split('.');
       if (action === 'set') {
         const value = pos[3]; if (value === undefined) die('Usage: forge config set options.<key> <value> --global');
         let node = ud; keys.slice(0, -1).forEach(k => { node[k] = node[k] || {}; node = node[k]; });
         node[keys[keys.length - 1]] = value === 'true' ? true : value === 'false' ? false : (/^\d+$/.test(value) ? parseInt(value, 10) : value);
         fs.mkdirSync(path.dirname(f), { recursive: true }); writeJson(f, ud);
-        out(`Set ${keyPath} = ${value} in ${f} — every forge init on this machine starts with it (existing projects: forge config set ${keyPath} ${value}).`);
+        out(`Set ${keyPath} = ${value} in ${f} — every project on this machine that follows the layered defaults uses it, unless the project sets its own (projects created before v0.24: forge config adopt first).`);
       } else {
         let node = ud; for (const k of keys.slice(0, -1)) node = node ? node[k] : undefined;
         if (!node || !(keys[keys.length - 1] in node)) die(`'${keyPath}' is not set in ${f}.`);
@@ -4399,13 +4593,18 @@ const commands = {
       }
       return;
     }
-    const cfg = loadConfig();
+    const cfg = loadConfig();       // effective (v0.24: Forge defaults → profile → machine → project)
+    const raw = loadProjectConfig(); // the project's own values — the only thing set/unset write
     if (!cfg) die('No forge/config.json. Run: forge init');
+    const getPath = (o, p) => p.split('.').reduce((x, k) => (x || {})[k], o);
+    const parseVal = v => v === 'true' ? true : v === 'false' ? false : v;
     if (action === 'get') {
-      out(JSON.stringify(argv[2] ? argv[2].split('.').reduce((o, k) => (o || {})[k], cfg) : cfg, null, 2));
+      const src = flag('own') ? raw : cfg;
+      out(JSON.stringify(argv[2] && !String(argv[2]).startsWith('--') ? getPath(src, argv[2]) : src, null, 2));
     } else if (action === 'set') {
       const [keyPath, value] = [argv[2], argv[3]];
-      if (!keyPath || value === undefined) die('Usage: forge config set <dot.path> <value>');
+      if (!keyPath || value === undefined) die('Usage: forge config set <dot.path> <value> [--reason "..."]');
+      if (['defaults', 'profile', 'provenance'].includes(keyPath.split('.')[0])) die(`'${keyPath}' is managed by Forge: forge config profile <fast|thorough|none> · forge config adopt`);
       // v0.17: leaving the per-milestone git flow is a recorded human decision
       if (keyPath === 'options.integration') {
         if (!['per-milestone', 'manual'].includes(value)) die(`options.integration must be 'per-milestone' (default) or 'manual' (Forge runs no git; the orchestrator follows a project convention).`);
@@ -4418,25 +4617,138 @@ const commands = {
       if (keyPath === 'options.baseBranch' && /^(main|master|prod|production)$/i.test(value))
         die(`Refused: '${value}' looks like a production branch. Milestone branches merge into an integration branch (staging, develop); production is released from it, never built on directly.`);
       const keys = keyPath.split('.');
-      let node = cfg;
+      let node = raw;
       keys.slice(0, -1).forEach(k => { node[k] = node[k] || {}; node = node[k]; });
-      node[keys[keys.length - 1]] = value === 'true' ? true : value === 'false' ? false : value;
-      writeJson(CONFIG_FILE, cfg);
+      node[keys[keys.length - 1]] = parseVal(value);
+      // v0.24: a value set here is this project's own choice — recorded, and it wins over every layer
+      if (keyPath.startsWith('options.')) (raw.provenance = raw.provenance || {})[keyPath] = { origin: 'set', ts: ts(), reason: opt('reason') || null };
+      writeJson(CONFIG_FILE, raw);
       regenDashboard();
       out(`Set ${keyPath} = ${value}`);
-    } else if (action === 'unset') {
+      const so = keyPath.startsWith('options.') ? (optionSources(raw) || {})[keyPath.slice(8)] : null;
+      if (so && so.recommended !== undefined && !sameVal(so.recommended, so.value))
+        out(`This project's own value now (recommended: ${so.recommended}). Back to the recommendation: forge config reset ${keyPath}`);
+    } else if (action === 'unset' || action === 'reset') {
       // v0.22.1: remove a key (moving a lane from verify.* to gate.* needs it)
+      // v0.24: reset = drop the project's own value and follow the layers again
+      const drop = (keyPath) => {
+        const keys = keyPath.split('.');
+        let node = raw;
+        for (const k of keys.slice(0, -1)) { node = node ? node[k] : undefined; }
+        if (!node || !(keys[keys.length - 1] in node)) return false;
+        delete node[keys[keys.length - 1]];
+        if (keys[0] === 'options' && keys[1] === 'models' && raw.options.models && !Object.keys(raw.options.models).length) delete raw.options.models;
+        if (raw.provenance) delete raw.provenance[keyPath];
+        return true;
+      };
+      if (action === 'reset' && flag('all')) {
+        if (!raw.defaults) die('This project does not follow the layered defaults yet: forge config adopt');
+        const src = optionSources(raw) || {};
+        const keys = Object.keys(src).filter(k => src[k].layer === 'project' && src[k].differs);
+        if (!keys.length) { out('No project value differs from the recommendation — nothing to reset.'); return; }
+        for (const k of keys) drop(`options.${k}`);
+        writeJson(CONFIG_FILE, raw);
+        appendMd(DECISIONS_FILE, '# Decisions log (append-only, via forge CLI)', `\n### ${ts()} — Configuration: follow the recommendation\n- Authority: human\n- Decision: dropped this project's own values for ${keys.map(k => `options.${k}`).join(', ')}\n- Why: ${opt('reason') || 'forge config reset --all'}\n`);
+        regenDashboard();
+        const now = optionSources(raw) || {};
+        out(`Reset ${keys.length} value(s) to the recommendation:\n` + keys.map(k => `  - options.${k} = ${now[k] ? now[k].value : '(unset)'} (${now[k] ? now[k].label : 'code default'})`).join('\n'));
+        return;
+      }
       const keyPath = argv[2];
-      if (!keyPath) die('Usage: forge config unset <dot.path>');
-      const keys = keyPath.split('.');
-      let node = cfg;
-      for (const k of keys.slice(0, -1)) { node = node ? node[k] : undefined; }
-      if (!node || !(keys[keys.length - 1] in node)) die(`'${keyPath}' is not set.`);
-      delete node[keys[keys.length - 1]];
-      writeJson(CONFIG_FILE, cfg);
+      if (keyPath && ['defaults', 'profile', 'provenance'].includes(String(keyPath).split('.')[0])) die(`'${keyPath}' is managed by Forge: forge config profile <fast|thorough|none> · forge config adopt`);
+      if (!keyPath || String(keyPath).startsWith('--')) die(`Usage: forge config ${action} <dot.path>${action === 'reset' ? '   ·   forge config reset --all (every project value that differs from the recommendation)' : ''}`);
+      if (!drop(keyPath)) die(`'${keyPath}' is not set${action === 'reset' ? ' in this project — it already follows the layers' : ''}.`);
+      writeJson(CONFIG_FILE, raw);
       regenDashboard();
-      out(`Unset ${keyPath}`);
-    } else die('Usage: forge config get [path] | forge config set <path> <value> | forge config unset <path>');
+      const so = keyPath.startsWith('options.') ? (optionSources(raw) || {})[keyPath.slice(8)] : null;
+      out(action === 'reset' ? `Reset ${keyPath}${so ? ` — now ${so.value} (${so.label})` : ' — now the code default'}` : `Unset ${keyPath}`);
+    } else if (action === 'show') {
+      // v0.24: every option, its value and the layer it comes from; project values that differ from the recommendation
+      if (!raw.defaults) {
+        out(`This project does not follow Forge's layered defaults yet (created before v0.24): every value is read from forge/config.json as it is.`);
+        out(`Adopt them with: forge config adopt   (forge config adopt --dry-run previews what changes)`);
+        return;
+      }
+      const src = optionSources(raw);
+      const d = raw.defaults;
+      out(`# Configuration — follows Forge v${d.version} defaults · profile ${d.profile || 'none'}${d.milestone ? ` (since milestone ${d.milestone}'s first start)` : ''}`);
+      if (cmpVer(d.version, VERSION) !== 0) out(`  Forge v${VERSION} is installed: its defaults apply at the next milestone's first task start.`);
+      if ((raw.profile || null) !== (d.profile || null)) out(`  Profile ${raw.profile || 'none'} is chosen: it applies at the next milestone's first task start.`);
+      const rows = Object.keys(src).sort();
+      const w0 = Math.max(...rows.map(k => k.length), 10);
+      for (const k of rows) {
+        const x = src[k];
+        out(`  ${('options.' + k).padEnd(w0 + 8)} ${String(x.value).padEnd(28)} ${x.label}${x.differs ? `   ← recommended: ${x.recommended}` : ''}`);
+      }
+      const diff = rows.filter(k => src[k].differs);
+      if (diff.length) out(`\n${diff.length} value(s) differ from the recommendation. Keep them, or follow it: forge config reset options.<key> · forge config reset --all`);
+    } else if (action === 'adopt') {
+      if (raw.defaults) { out(`Already layered — follows Forge v${raw.defaults.version} defaults, profile ${raw.defaults.profile || 'none'}. forge config show lists the values.`); return; }
+      const before = flatOptions(cfg.options);
+      const trial = JSON.parse(JSON.stringify(raw));
+      const lines = adoptLayers(trial);
+      const after = flatOptions(effectiveOptions(configLayers(trial)));
+      const was = k => before[k] !== undefined ? before[k] : codeDefault(k, raw);
+      const changes = [...new Set([...Object.keys(before), ...Object.keys(after)])].sort().filter(k => !sameVal(was(k), after[k]))
+        .map(k => `options.${k}: ${before[k] !== undefined ? before[k] : `(not set — the code used ${was(k) === undefined ? 'nothing' : was(k)})`} → ${after[k]} (${((optionSources(trial) || {})[k] || {}).label || 'layers'})`);
+      out(`# Adopting the layered configuration (Forge v${VERSION})`);
+      for (const l of lines) out(`  ${l}`);
+      out(changes.length ? `Behaviour changes — options this project never set now come from the layers:\n` + changes.map(c => `  - ${c}`).join('\n') : 'No behaviour change: every effective value stays the same.');
+      if (flag('dry-run')) { out('\n(dry run — nothing written)'); return; }
+      writeJson(CONFIG_FILE, trial);
+      appendMd(DECISIONS_FILE, '# Decisions log (append-only, via forge CLI)', `\n### ${ts()} — Configuration: adopt the layered defaults\n- Authority: human\n- Decision: forge/config.json keeps only this project's own values; Forge v${VERSION} defaults apply to the rest\n- Changes: ${changes.length ? changes.join('; ') : 'none'}\n`);
+      regenDashboard();
+      out('\nWritten. forge config show lists every value and where it comes from.');
+    } else if (action === 'profile') {
+      const name = argv[2] && !String(argv[2]).startsWith('--') ? argv[2] : null;
+      if (!name) {
+        out(`# Profiles — chosen: ${raw.profile || 'none'} · in effect: ${raw.defaults ? raw.defaults.profile || 'none' : '(project not layered yet)'}`);
+        for (const [k, p] of Object.entries(PROFILES)) {
+          out(`\n  ${k} — ${p.what}`);
+          for (const [ok, ov] of Object.entries(flatOptions(p.options))) out(`    options.${ok} = ${ov}`);
+        }
+        out(`\nforge config profile fast|thorough|none [--now --reason ".."] · per milestone: forge milestone update <m> --profile fast|thorough|none`);
+        return;
+      }
+      if (name !== 'none' && !PROFILES[name]) die(`Unknown profile '${name}'. Profiles: ${Object.keys(PROFILES).join(', ')}, none`);
+      const prof = name === 'none' ? null : name;
+      const now = flag('now');
+      if (!raw.defaults) die('Refused: this project does not follow the layered defaults yet — a profile is one of those layers. Adopt first: forge config adopt   (--dry-run previews it)');
+      raw.profile = prof;
+      // values set by hand (project or machine) win over a profile — say which ones block it
+      const src = optionSources(raw, { profile: prof }) || {};
+      const blocked = prof ? Object.keys(flatOptions(PROFILES[prof].options)).filter(k => src[k] && (src[k].layer === 'project' || src[k].layer === 'machine') && !sameVal(src[k].value, flatOptions(PROFILES[prof].options)[k])) : [];
+      const clearing = flag('clear') ? blocked.filter(k => src[k].layer === 'project') : [];
+      if (clearing.length && !(flag('now') && opt('reason')))
+        die(`Refused: --clear drops ${clearing.map(k => `options.${k} = ${src[k].value}`).join(', ')} at once — that changes this milestone's configuration.\n` +
+            `Do it with the profile, now: forge config profile ${name} --clear --now --reason "..."   ·   or keep them and let the profile apply around them: forge config profile ${name}`);
+      const cleared = clearing.map(k => `options.${k} = ${src[k].value}`);
+      if (clearing.length) {
+        for (const k of clearing) {
+          if (k.startsWith('models.')) { if (raw.options.models) { delete raw.options.models[k.slice(7)]; if (!Object.keys(raw.options.models).length) delete raw.options.models; } } else delete raw.options[k];
+          if (raw.provenance) delete raw.provenance[`options.${k}`];
+        }
+      }
+      if (now && !opt('reason')) die('Refused: a profile change mid-milestone needs --reason "..." (the milestone\'s numbers then mix two configurations).');
+      if (now) raw.defaults = Object.assign({}, raw.defaults, { profile: prof, ts: ts() });
+      writeJson(CONFIG_FILE, raw);
+      // the running milestone records the switch, so defects found later are not credited to one profile alone
+      let switchedIn = null;
+      if (now && raw.defaults.milestone) {
+        const w = loadWork(); const mm = (w.milestones || {})[raw.defaults.milestone];
+        if (mm && mm.config && !milestoneComplete(w, raw.defaults.milestone)) {
+          (mm.config.switches = mm.config.switches || []).push({ ts: ts(), from: mm.config.switches && mm.config.switches.length ? mm.config.switches[mm.config.switches.length - 1].to : (mm.config.profile || null), to: prof, reason: opt('reason') });
+          saveWork(w); switchedIn = raw.defaults.milestone;
+        }
+      }
+      appendMd(DECISIONS_FILE, '# Decisions log (append-only, via forge CLI)', `\n### ${ts()} — Configuration: profile ${prof || 'none'}\n- Authority: human\n- Decision: profile ${prof || 'none'}${now ? `, from now${switchedIn ? ` (milestone ${switchedIn} now runs mixed)` : ''}` : ', from the next milestone\'s first task start'}${cleared.length ? `; dropped this project's own ${cleared.join(', ')}` : ''}\n- Why: ${opt('reason') || '—'}\n`);
+      regenDashboard();
+      out(`Profile ${prof || 'none'} chosen — ${now ? 'in effect now' : 'it applies at the next milestone\'s first task start (forge config profile ' + (prof || 'none') + ' --now --reason ".." to apply it mid-milestone)'}.`);
+      if (cleared.length) out(`Dropped this project's own ${cleared.join(', ')} (recorded in forge/decisions.md).`);
+      const still = flag('clear') ? blocked.filter(k => src[k].layer === 'machine') : blocked;
+      if (still.length) out(`Your own values win over the profile for: ${still.map(k => `options.${k} = ${src[k].value} (${src[k].label})`).join(', ')}.\n` +
+        (flag('clear') ? `Machine defaults: forge config unset options.<key> --global` : `Let the profile set them: forge config profile ${prof} --clear   (drops these project values)`));
+    } else die('Usage: forge config get [path] [--own] | set <path> <value> [--reason ..] | unset <path> | reset <path>|--all | show | adopt [--dry-run] | profile [fast|thorough|none] [--now --reason ..] [--clear]');
   },
 
   // -- preflight --------------------------------------------------------------
@@ -4791,8 +5103,26 @@ const commands = {
         }
       }
       // v0.23: the milestone's first start is recorded once (moving a started task in or out does not change it)
-      if (item.milestone && w.milestones[item.milestone] && !w.milestones[item.milestone].firstStart)
-        w.milestones[item.milestone].firstStart = milestoneFirstStart(w, item.milestone) || ts();
+      let boundary = null;
+      if (item.milestone && w.milestones[item.milestone] && !w.milestones[item.milestone].firstStart) {
+        const prior = milestoneFirstStart(w, item.milestone); // a milestone started before v0.23 has attempts but no record
+        w.milestones[item.milestone].firstStart = prior || ts();
+        // v0.24: the milestone boundary — the installed Forge's defaults and the milestone's profile take effect here,
+        // for this start's own checks too; a start refused after this point puts the file back as it was
+        if (!prior) {
+          boundary = applyBoundary(w, item.milestone);
+          if (boundary.previous) { const prev = boundary.previous;
+            process.on('exit', code => { if (code !== 0 && !boundary.committed) { try { writeJson(CONFIG_FILE, prev); } catch (_) { /* best effort */ } } }); }
+        }
+      } else if (!item.milestone && !w.order.some(id => id !== item.id && w.items[id].status === 'IN_PROGRESS')) {
+        // v0.24: a task outside any milestone, with nothing else in progress, is the boundary for projects that use none
+        const rawB = loadProjectConfig();
+        if (rawB && rawB.defaults && (cmpVer(rawB.defaults.version, VERSION) !== 0 || (rawB.profile || null) !== (rawB.defaults.profile || null))) {
+          boundary = applyBoundary(w, null);
+          if (boundary.previous) { const prev = boundary.previous;
+            process.on('exit', code => { if (code !== 0 && !boundary.committed) { try { writeJson(CONFIG_FILE, prev); } catch (_) { /* best effort */ } } }); }
+        }
+      }
       // v0.21 (C1): oversized tasks are refused, not warned. Field evidence: the six 4wines items with
       // 8–12 criteria went 1/6 first-pass; items with 1–3 criteria went 94%. The warning was overridden every time.
       const shapeReason = (sw(loadConfig(), 'itemShape') === 'refuse' && (item.criteria || []).length > 6) ? opt('reason') : null;
@@ -4841,6 +5171,14 @@ const commands = {
       item.updated = ts();
       if (item.milestone) freezeLabels(w); // v0.18: the version label freezes when work starts
       saveWork(w);
+      if (boundary) {
+        boundary.committed = true;
+        if (boundary.lines.length) {
+          const where = item.milestone ? `milestone ${item.milestone}` : `task ${item.id} (no milestone, nothing else in progress)`;
+          out(`CONFIGURATION for ${where}:\n` + boundary.lines.map(l => `  - ${l}`).join('\n'));
+          appendMd(DECISIONS_FILE, '# Decisions log (append-only, via forge CLI)', `\n### ${ts()} — Configuration at ${item.milestone ? `milestone ${item.milestone}'s first start` : `the start of ${item.id}`}\n- Authority: forge (boundary)\n- Changes: ${boundary.lines.join('; ')}\n`);
+        }
+      }
       out(`${item.id}${item.label ? ` (${item.label})` : ''} → IN_PROGRESS${opt('escalate') ? ` (escalation: ${opt('escalate')})` : ''}`);
       // v0.21 (C9): a high-risk task gets an architect's design note BEFORE its first worker dispatch
       if (sw(loadConfig(), 'architectPrepass') === 'high-risk' && isHighRisk(item)
@@ -5704,6 +6042,80 @@ const commands = {
     out('Discovery recorded. If it invalidates planned work, update the work graph now (block/cancel/add items) — a logged discovery with unhandled consequences is a failure.');
   },
 
+  // -- defects (v0.24): what got past Forge — the quality measure the profiles are compared on ------
+  // A defect is something wrong that Forge's checks let through: found when you test the milestone,
+  // on staging or in production. It is recorded against the milestone that shipped it, which carries
+  // the profile it ran under — so fast vs thorough can be compared on what escaped, not only on time.
+  defect() {
+    const sub = argv[1] && !argv[1].startsWith('--') ? argv[1] : 'list';
+    const w = loadWork(); ensureMilestones(w);
+    const FOUND = ['milestone-test', 'staging', 'production', 'other'];
+    const SEV = ['low', 'medium', 'high'];
+    if (sub === 'add') {
+      const what = argv[2] && !argv[2].startsWith('--') ? argv[2] : opt('what');
+      if (!what) die('Usage: forge defect add "<what is wrong>" --milestone <m> | --item <id>  --found milestone-test|staging|production|other [--severity low|medium|high]');
+      let m = opt('milestone'); const itemId = opt('item');
+      if (itemId) { const it = getItem(w, itemId); if (m && it.milestone && m !== it.milestone) die(`'${itemId}' belongs to milestone '${it.milestone}', not '${m}'.`); m = m || it.milestone; }
+      if (!m) die('Refused: say which milestone shipped it: --milestone <m> (or --item <id> of the task that did).');
+      if (!w.milestones[m]) die(`Unknown milestone '${m}'. See: forge milestone list`);
+      const found = opt('found');
+      if (!FOUND.includes(found)) die(`--found must be one of: ${FOUND.join(', ')}`);
+      const severity = opt('severity') || 'medium';
+      if (!SEV.includes(severity)) die(`--severity must be one of: ${SEV.join(', ')}`);
+      w.defects = w.defects || [];
+      const id = `D${w.defects.length + 1}`;
+      const mc = (w.milestones[m] || {}).config || {};
+      const prof = (mc.switches || []).length ? 'mixed' : mc.profile;   // a milestone whose profile changed mid-way is not one profile's
+      w.defects.push({ id, ts: ts(), milestone: m, item: itemId || null, found, severity, what, profile: prof === undefined ? null : prof });
+      saveWork(w);
+      out(`Defect ${id} recorded against milestone ${m}${itemId ? ` (task ${itemId})` : ''} — found ${found}, ${severity}.`);
+      out(`If it needs fixing, add the fix as a task: forge task add ... --origin human`);
+      return;
+    }
+    if (sub === 'list') {
+      const ds = (w.defects || []).filter(d => !opt('milestone') || d.milestone === opt('milestone'));
+      if (!ds.length) { out('No defects recorded. forge defect add "<what>" --milestone <m> --found milestone-test|staging|production'); return; }
+      for (const d of ds) out(`${d.id}  ${d.ts.slice(0, 10)}  ${d.milestone}${d.item ? ` / ${d.item}` : ''}  ${d.found}  ${d.severity}  ${d.what}`);
+      return;
+    }
+    if (sub === 'report') {
+      // per milestone: the profile it ran under, tasks done, first pass, verification time, defects that escaped
+      const verifyMs = (m) => {
+        let ms = 0;
+        for (const id of w.order) { const t = w.items[id]; if (!t || t.milestone !== m) continue;
+          for (const v of (t.verifications || [])) ms += v.wallMs || (v.results || []).reduce((a, r) => a + (r.durationMs || r.ms || 0), 0); }
+        const g = ((w.gates || {})[m] || {}).verify; if (g) ms += g.wallMs || (g.results || []).reduce((a, r) => a + (r.durationMs || r.ms || 0), 0);
+        return ms;
+      };
+      const rows = [];
+      for (const m of milestoneSeq(w)) {
+        const done = w.order.map(id => w.items[id]).filter(t => t && t.milestone === m && t.status === 'DONE');
+        const ds = (w.defects || []).filter(d => d.milestone === m);
+        if (!done.length && !ds.length) continue;
+        const c = (w.milestones[m] || {}).config;
+        const label = !c ? 'before v0.24' : (c.switches || []).length ? 'mixed' : (c.profile || 'none');
+        rows.push({ m, profile: label, done: done.length, fp: done.filter(firstPass).length, vh: verifyMs(m) / 3.6e6, ds });
+      }
+      if (!rows.length) { out('Nothing to report yet: no milestone has finished tasks or recorded defects.'); return; }
+      const pct = (a, b) => b ? `${Math.round(100 * a / b)}%` : '—';
+      out(`# Defects and first pass by milestone (defects = what Forge's checks let through)`);
+      out(`  ${'milestone'.padEnd(24)} ${'profile'.padEnd(13)} ${'tasks'.padStart(5)} ${'1st pass'.padStart(8)} ${'verify h'.padStart(8)} ${'defects'.padStart(7)}  found`);
+      for (const r of rows) {
+        const by = {}; for (const d of r.ds) by[d.found] = (by[d.found] || 0) + 1;
+        out(`  ${r.m.padEnd(24)} ${r.profile.padEnd(13)} ${String(r.done).padStart(5)} ${pct(r.fp, r.done).padStart(8)} ${r.vh.toFixed(1).padStart(8)} ${String(r.ds.length).padStart(7)}  ${Object.entries(by).map(([k, n]) => `${k} ${n}`).join(', ') || '—'}`);
+      }
+      const byP = {};
+      for (const r of rows) { const p = byP[r.profile] = byP[r.profile] || { ms: 0, done: 0, fp: 0, vh: 0, ds: 0, hi: 0 };
+        p.ms++; p.done += r.done; p.fp += r.fp; p.vh += r.vh; p.ds += r.ds.length; p.hi += r.ds.filter(d => d.severity === 'high').length; }
+      out(`\n# By profile`);
+      for (const [k, p] of Object.entries(byP))
+        out(`  ${k.padEnd(13)} ${p.ms} milestone(s) · ${p.done} task(s) · first pass ${pct(p.fp, p.done)} · verify ${(p.done ? 60 * p.vh / p.done : 0).toFixed(1)} min/task · ${p.ds} defect(s) (${p.hi} high) = ${p.done ? (10 * p.ds / p.done).toFixed(1) : '—'} per 10 tasks`);
+      out(`\nA comparison needs a few milestones under each profile; one milestone is an anecdote.`);
+      return;
+    }
+    die('Usage: forge defect add "<what>" --milestone <m>|--item <id> --found milestone-test|staging|production|other [--severity low|medium|high] | list [--milestone m] | report');
+  },
+
   // -- components (v0.10; v0.19 routes into architecture / screens / tags) --------
   component() {
     const sub = argv[1];
@@ -5904,13 +6316,18 @@ const commands = {
     const sub = argv[1] || 'status';
     const cfg = loadConfig();
     if (!cfg) die('No forge/config.json. Run: forge init');
+    const raw = loadProjectConfig(); // v0.24: writes go to the project's own values, never the merged view
     const w = loadWork(); ensureMilestones(w);
     if (sub === 'on') {
+      raw.options = raw.options || {};
+      raw.options.autopilot = 'on';
+      if (opt('max-items') !== null) raw.options.autopilotMaxItems = parseInt(opt('max-items'), 10) || 0;
+      if (opt('hours') !== null) raw.options.autopilotMaxHours = parseFloat(opt('hours')) || 0;
+      writeJson(CONFIG_FILE, raw);
       cfg.options = cfg.options || {};
       cfg.options.autopilot = 'on';
       if (opt('max-items') !== null) cfg.options.autopilotMaxItems = parseInt(opt('max-items'), 10) || 0;
       if (opt('hours') !== null) cfg.options.autopilotMaxHours = parseFloat(opt('hours')) || 0;
-      writeJson(CONFIG_FILE, cfg);
       writeJson(AUTOPILOT_FILE, { since: ts(), startDone: doneCount(w), continues: 0, nudges: 0 });
       traceEvent({ outcome: 'autopilot-on', maxItems: cfg.options.autopilotMaxItems || 0, maxHours: cfg.options.autopilotMaxHours || 0 });
       regenDashboard();
@@ -5921,9 +6338,9 @@ const commands = {
       out(d.go ? `Next: ${d.label} — ${d.next.title}` : `Right now it would stop: ${d.reason}`);
       out(`\nTo follow it from your phone:\n  1. run the session with Remote Control:  claude --remote-control   (or /remote-control inside a session)\n  2. in /config enable "Push when actions required" and "Push when Claude decides"\n  3. keep the Mac awake while it runs:      caffeinate -i\n  4. make sure the build loop's commands are allowed without prompts — any permission prompt pauses the run until you answer it\nThen say "continue" in the session. Turn it off with: forge autopilot off`);
     } else if (sub === 'off') {
-      cfg.options = cfg.options || {};
-      cfg.options.autopilot = 'off';
-      writeJson(CONFIG_FILE, cfg);
+      raw.options = raw.options || {};
+      raw.options.autopilot = 'off';
+      writeJson(CONFIG_FILE, raw);
       const run = readJson(AUTOPILOT_FILE, {});
       writeJson(AUTOPILOT_FILE, Object.assign(run, { stopped: { kind: 'user', reason: opt('reason') || 'turned off', ts: ts() } }));
       traceEvent({ outcome: 'autopilot-off', reason: opt('reason') || null });
@@ -6021,12 +6438,13 @@ const commands = {
         out(`  ${s.done ? '✓' : s.kind === 'auto' ? '✗' : '!'} ${s.id} (since ${s.since}, ${s.kind === 'auto' ? 'automatic' : 'needs judgement'}) — ${s.title}${s.accepted ? ` · accepted as-is: ${s.accepted.reason}` : ''}`);
         for (const f of s.findings) out(`      - ${f}`);
       }
+      for (const l of configUpgradeLines()) out(l);
       const autoLeft = st.filter(s => !s.done && s.kind === 'auto');
       const revLeft = st.filter(s => !s.done && s.kind === 'review');
       if (!autoLeft.length && !revLeft.length) { out('\nThis plan meets every standard of the installed Forge.'); return; }
       out('\nNext:');
       if (autoLeft.length) out(`  forge upgrade apply   — ${autoLeft.length} automatic step(s); state is backed up first`);
-      for (const s of revLeft) out(`  ${s.id}: ${s.how}\n     → the agent writes forge/changes/<date>-upgrade-${s.id}.sh; you review it with: forge upgrade dry-run <script>; then: forge upgrade run <script>\n     → or keep the plan as it is: forge upgrade accept ${s.id} --reason "..."`);
+      for (const s of revLeft) out(UPGRADE_STEPS.find(x => x.id === s.id).direct ? `  ${s.id}: ${s.how}\n     → or keep it as it is: forge upgrade accept ${s.id} --reason "..."` : `  ${s.id}: ${s.how}\n     → the agent writes forge/changes/<date>-upgrade-${s.id}.sh; you review it with: forge upgrade dry-run <script>; then: forge upgrade run <script>\n     → or keep the plan as it is: forge upgrade accept ${s.id} --reason "..."`);
       return;
     }
     if (sub === 'apply') {
@@ -6177,8 +6595,8 @@ const commands = {
       writeJson(BASELINE_FILE, { ts: ts(), results });
       // P3: brownfield projects that skip the spec phase must still get build-phase gates
       if (cfg.phase === 'spec') {
-        cfg.phase = 'build';
-        writeJson(CONFIG_FILE, cfg);
+        const raw = loadProjectConfig(); raw.phase = 'build'; // v0.24: write the project's own values
+        writeJson(CONFIG_FILE, raw);
         out("Phase advanced spec → build (baseline captured implies build work is starting).");
       }
       regenDashboard();
@@ -6387,11 +6805,11 @@ const commands = {
     } catch (e) { check('hooks/hooks.json', false, e.message); }
     // project state
     if (fs.existsSync(CONFIG_FILE)) {
-      try { const c = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')); check('config.json', true, `phase: ${c.phase}`); }
+      try { const c = loadConfigStrict(); check('config.json', true, `phase: ${c.phase}`); }
       catch (e) { check('config.json', false, 'CORRUPT: ' + e.message); }
       // v0.21 (C10): one line per delegation switch — absent means off (today's behaviour)
       try {
-        const c = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
+        const c = loadConfigStrict();
         for (const k of Object.keys(SWITCH_ON)) {
           const raw = ((c.options || {})[k]);
           check(`switch ${k}`, true, `${JSON.stringify(sw(c, k))}${raw === undefined ? ' (not set — off; new projects start with ' + JSON.stringify(SWITCH_ON[k]) + ': forge config set options.' + k + ' ' + SWITCH_ON[k] + ')' : ''}`);
@@ -6399,7 +6817,7 @@ const commands = {
       } catch (_) { }
       // v0.22: model routing — one line per role, and the orchestrator reminder
       try {
-        const c = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
+        const c = loadConfigStrict();
         const rt = modelRouting(c);
         check('model routing', true, `${rt}${rt === 'auto' ? ' — agent aliases decide (sonnet/haiku/inherit); fixed pins every role: forge config set options.modelRouting fixed' : ''} · orchestrator = the session model`);
         if (rt === 'fixed') {
@@ -6413,7 +6831,7 @@ const commands = {
       } catch (_) { }
       // v0.22.2: verification tiers — a slow verify.* lane is the single biggest wall-clock cost per task
       try {
-        const c = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
+        const c = loadConfigStrict();
         const sl = slowLanes(c, readJson(WORK_FILE, { items: {}, order: [] }));
         const gk = Object.keys(gateCmds(c));
         check('verification tiers', !sl.length, sl.length ? sl.map(x => slowLaneLine(c, x)).join(' | ') : `verify.* ${Object.keys(c.verify || {}).join(', ') || '(none)'} · gate.* ${gk.join(', ') || '(none)'} · full run every ${fullVerifyEvery(c) || '— (gate only)'} task(s)`, !!sl.length);
@@ -6422,7 +6840,7 @@ const commands = {
       } catch (_) { }
       // v0.21 (C6): parallel tasks + a shared local database: verifies are serialised by the verify lock
       try {
-        const c = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
+        const c = loadConfigStrict();
         const conc = parseInt((c.options || {}).concurrency, 10) || 1;
         const shared = !!((c.verify || {}).db || (c.verify || {}).e2e) || fs.existsSync(path.join(PROJECT, 'supabase'));
         if (conc > 1 && shared) check('parallel verify', false, `concurrency ${conc} with a shared local database/servers — verifies run one at a time under forge/state/verify.lock (a second one waits); tests must still isolate their own data, because implementers run in parallel`, true);
@@ -6433,7 +6851,7 @@ const commands = {
         check('work.json', true, `${w.order.length} items · ${inProg.length} IN_PROGRESS`);
         // v0.17: git flow — the default changed; existing projects are told what to confirm
         try {
-          const c2 = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
+          const c2 = loadConfigStrict();
           const gc2 = gitCfg(c2);
           if (gc2.integration === 'per-milestone' && !gc2.base)
             check('git flow', false, `v0.17 makes the per-milestone git flow Forge's default (one branch per milestone, one commit per item by 'task done', one PR per milestone by 'milestone ship'). Confirm the base branch: forge config set options.baseBranch <branch> — or opt out: forge config set options.integration manual --reason "..."`, true);
@@ -6942,6 +7360,14 @@ const commands = {
       const changes = [];
       if (opt('name') !== null) { changes.push(`name: '${r.name || ''}' → '${opt('name')}'`); r.name = opt('name'); delete r.unnamed; }
       if (opt('demo') !== null) { changes.push(`demo updated`); r.demo = opt('demo'); }
+      if (opt('profile') !== null) {
+        // v0.24: this milestone runs under its own profile (applied at its first task start)
+        const pv = opt('profile');
+        if (pv !== 'none' && pv !== 'project' && !PROFILES[pv]) die(`Unknown profile '${pv}'. Profiles: ${Object.keys(PROFILES).join(', ')}, none (no profile), project (the project's choice)`);
+        if (milestoneStarted(w, m) || r.firstStart || milestoneFirstStart(w, m)) die(`Refused: '${m}' has started — its profile was fixed at its first task start. Change the project's profile (forge config profile) for later milestones, or forge config profile <p> --now --reason ".." for this one.`);
+        changes.push(`profile: ${r.profile || 'project'} → ${pv}`);
+        if (pv === 'project') delete r.profile; else r.profile = pv;
+      }
       if (opt('release') !== null) {
         const nr = opt('release') === 'none' ? null : opt('release');
         if (nr && !(w.releases || {})[nr]) die(`Unknown release '${nr}'. See: forge release list`);
@@ -6957,7 +7383,7 @@ const commands = {
           die(`Refused: that release sits before work that has already started ('${trial[lockedIdx]}') — '${m}' would jump ahead of it.`); }
         changes.push(`release: ${was || 'none'} → ${nr || 'none'}`);
       }
-      if (!changes.length) die('Nothing to update: forge milestone update <id> --name "..." [--demo "..."] [--reason "..."]');
+      if (!changes.length) die('Nothing to update: forge milestone update <id> --name "..." [--demo "..."] [--profile fast|thorough|none|project] [--reason "..."]');
       (r.history = r.history || []).push({ ts: ts(), change: changes.join('; '), reason: opt('reason') || null });
       saveWork(w);
       out(`Milestone ${m} updated:\n` + changes.map(c => `  - ${c}`).join('\n'));
@@ -7341,7 +7767,7 @@ const commands = {
         // v0.13: deterministic "next step" — the user is guided by the hand, every session.
         try {
           const wNS = JSON.parse(fs.readFileSync(WORK_FILE, 'utf8'));
-          const cfgNS = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
+          const cfgNS = loadConfigStrict();
           const items = wNS.order.map(id => wNS.items[id]);
           const inProg = wNS.order.filter(id => wNS.items[id].status === 'IN_PROGRESS');
           const blocked = wNS.order.filter(id => wNS.items[id].status === 'BLOCKED');
@@ -7432,7 +7858,7 @@ const commands = {
         const seenFile = path.join(STATE, 'agent-id.seen');
         if (input.agent_id) { if (fs.existsSync(STATE) && !fs.existsSync(seenFile)) fs.writeFileSync(seenFile, ts() + '\n'); }
         else if (fs.existsSync(seenFile)) {
-          let cfgH = null; try { cfgH = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')); } catch (_) { }
+          let cfgH = null; try { cfgH = loadConfigStrict(); } catch (_) { }
           const mode = handsOffMode(cfgH);
           const why = cfgH && mode !== 'off' ? handsOffViolation(cfgH, tool, input.tool_input || {}) : null;
           if (why) {
@@ -7450,7 +7876,7 @@ const commands = {
       // model it should run on. Never crashes; without a config or in auto mode it stays silent.
       if (tool === 'Agent' || tool === 'Task') {
         try {
-          const cfgA = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
+          const cfgA = loadConfigStrict();
           const ti = input.tool_input || {};
           const role = roleOf(ti.subagent_type || '', String(ti.prompt || '').split('\n')[0]);
           if (modelRouting(cfgA) === 'fixed' && role) {
@@ -7512,7 +7938,7 @@ const commands = {
           }
           return rel === pat || rel.startsWith(pat + '/');
         };
-        let cfg = null; try { cfg = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')); } catch (_) { }
+        let cfg = null; try { cfg = loadConfigStrict(); } catch (_) { }
         const prot = String(((cfg || {}).options || {}).protect || '').split(',').map(s => s.trim()).filter(Boolean);
         const hitProt = prot.find(p => matches(p));
         if (hitProt) {
@@ -7585,7 +8011,7 @@ const commands = {
       // v0.20: what the compaction summary must keep — the plan itself lives on disk
       let note = 'Forge: the plan, its order and every task\'s state live in forge/state — after this compaction, re-read them with `forge status` and `forge task next` instead of trusting the summary. Keep in the summary: the active milestone, any IN_PROGRESS task id with its last verification result and what remains, open questions to the user, decisions taken in this conversation that are not yet recorded with `forge decision add`.';
       try {
-        const cfgC = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
+        const cfgC = loadConfigStrict();
         const wC = JSON.parse(fs.readFileSync(WORK_FILE, 'utf8')); ensureMilestones(wC);
         const ipC = wC.order.filter(id => wC.items[id].status === 'IN_PROGRESS');
         note += ` Now: milestone ${activeMilestone(wC) || '—'}${ipC.length ? `, in progress ${ipC.join(', ')}` : ''}${autopilotCfg(cfgC).on ? '; AUTOPILOT IS ON — keep taking the next task after compaction' : ''}.`;
@@ -7601,7 +8027,7 @@ const commands = {
         const l = loadLock();
         if (sid && l && l.sessionId === sid && !l.released) saveLock(Object.assign({}, l, { released: true, lastBeat: ts() }));
       };
-      let cfgS = null; try { cfgS = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')); } catch (_) { }
+      let cfgS = null; try { cfgS = loadConfigStrict(); } catch (_) { }
       const ap = autopilotCfg(cfgS);
       // v0.22 runner mode: each task runs in its own claude process; this session does ONE task and
       // ends. In here that means: the dangling-work guard applies, nothing nudges on to the next task.
@@ -7695,10 +8121,21 @@ const commands = {
 
   help() {
     out(`forge — Forge v0 state CLI
-  init [--project name]                  create forge/ state (idempotent)
+  init [--project name] [--profile fast|thorough]   create forge/ state (idempotent)
   preflight [--full]                     check git, verify commands, graphify, playwright
-  config get [path] | set <path> <val> | unset <path>   read/write forge config (gate.* = lanes run at the milestone gate, v0.22.1)
-  config set options.<key> <val> --global   v0.22.2: per-machine default for every future forge init (~/.config/forge/defaults.json)
+  config get [path] [--own] | set <path> <val> [--reason r] | unset <path>
+                                         read/write forge config (gate.* = lanes run at the milestone gate, v0.22.1);
+                                         v0.24: get shows the effective value, --own only this project's file
+  config show                            v0.24: every option, its value and its layer (Forge default → profile →
+                                         machine → this project); flags your values that differ from the recommendation
+  config reset <path> | reset --all      v0.24: drop this project's own value(s) and follow the recommendation
+  config adopt [--dry-run]               v0.24: move a pre-v0.24 project onto the layered defaults (preview first)
+  config profile [fast|thorough|none] [--clear] [--now --reason r]
+                                         v0.24: the speed-vs-validation trade-offs in one choice; applies at the next
+                                         milestone's first task start (--now mid-milestone); --clear drops your values that block it
+  config set options.<key> <val> --global   per-machine default (~/.config/forge/defaults.json) — v0.24: a live layer
+  defect add "<what>" --milestone <m>|--item <id> --found milestone-test|staging|production|other [--severity ..]
+  defect list [--milestone m] | report   v0.24: what got past Forge, per milestone and per profile
   task add --id T1 --title .. --objective .. [--milestone M1] [--deps A,B]
            [--criterion "desc::check-cmd"]... [--allowed glob,..] [--forbidden glob,..] [--mock spec/mocks/x.png]
            [--origin plan|split|review|discovery|human --parent <id>]   (v0.22: where the task came from)
@@ -7729,7 +8166,7 @@ const commands = {
                                          options.modelRouting fixed fills/refuses --model by role
   task block <id> --reason | unblock <id> [--note "answer"] | cancel <id> --reason [--dependents drop|cancel]
   milestone add <m> --name "<feature it enables>" [--demo "<how to try it>"] [--before|--after <M>]
-  milestone update <m> [--name ..] [--demo ..] [--reason ..]
+  milestone update <m> [--name ..] [--demo ..] [--profile fast|thorough|none|project] [--reason ..]
   milestone move <m> --before|--after <M> --reason ".." [--pull-deps]
   milestone remove <m> --reason ".."     only an empty milestone with no gate record
   milestone check <m> [--brief]          v0.23: one surface per task, criteria limit; --brief = the forge-planner brief

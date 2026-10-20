@@ -936,7 +936,10 @@ claude</span>
     <thead><tr><th>Command</th><th>Does</th></tr></thead>
     <tbody>
       <tr><td><code>init</code></td><td>Create the project's <code>forge/</code> state.</td></tr>
-      <tr><td><code>config get [path] · set &lt;path&gt; &lt;value&gt;</code></td><td>Read/write project settings (see options below).</td></tr>
+      <tr><td><code>config get [path] · set &lt;path&gt; &lt;value&gt; [--reason]</code></td><td>Read/write project settings (see options below). <code>get</code> shows the effective value (v0.24), <code>--own</code> only what the project file says.</td></tr>
+      <tr><td><code>config show · reset &lt;key&gt; · reset --all · adopt [--dry-run]</code></td><td>v0.24: every option with the layer it comes from; drop your own value(s) and follow the recommendation; move a project created before v0.24 onto the layers (preview first).</td></tr>
+      <tr><td><code>config profile [fast|thorough|none] [--clear] [--now --reason]</code></td><td>v0.24: the speed-vs-validation trade-offs in one choice, applied at the next milestone's first task start (<code>--now --reason</code> mid-milestone; <code>--clear</code> needs both). Per milestone, before it starts: <code>milestone update &lt;M&gt; --profile fast|thorough|none|project</code>.</td></tr>
+      <tr><td><code>defect add "what" --milestone|--item --found … · list · report</code></td><td>v0.24: record what got past Forge (found at milestone testing, staging or production) and compare milestones and profiles on it.</td></tr>
       <tr><td><code>preflight [--full]</code></td><td>Readiness checks; <code>--full</code> also executes the verify commands.</td></tr>
       <tr><td><code>task add · list · show · start · dispatch · verify · done · fail · block · cancel · update</code></td><td>The work-item lifecycle. <code>start</code> refuses an item with no <code>--allowed</code> file scope (deliberate: <code>--whole-tree --reason</code>) and enforces the concurrency cap; <code>dispatch --agent</code> records the handoff to a worker in state (<code>--kind message</code> audits a mid-flight message); <code>verify --artifact &lt;file&gt;</code> attaches evidence (screenshots); <code>fail --note</code> requires a diagnosis; <code>update</code> is the audited way to change an item.</td></tr>
       <tr><td><code>brief &lt;id&gt;</code></td><td>Generate the worker-brief skeleton for an item.</td></tr>
@@ -968,6 +971,29 @@ claude</span>
         small well-briefed items go to fast cheap models.</td></tr>
     </tbody>
   </table></div>
+
+  <h3>Where a setting comes from (v0.24)</h3>
+  <p>Your project's <code>forge/config.json</code> keeps only what you chose for it. Everything else
+  comes from layers, the higher one winning: <b>Forge's defaults</b> (for the Forge version the project
+  follows) → <b>the profile</b> (<code>fast</code> or <code>thorough</code>) → <b>this machine's defaults</b>
+  (<code>~/.config/forge/defaults.json</code>) → <b>the project's own values</b>. Upgrading Forge never
+  changes a value you set: a newer version's defaults arrive at the next milestone's first task start,
+  and <code>forge upgrade</code> lists them first, together with your own values that differ from the
+  recommendation. <code>forge config show</code> is the whole picture. A project created before v0.24
+  stays as it is until you run <code>forge config adopt</code> (<code>--dry-run</code> previews it).</p>
+  <div class="tblwrap"><table>
+    <thead><tr><th>Option</th><th><code>fast</code></th><th><code>thorough</code></th></tr></thead>
+    <tbody>
+      <tr><td>Full suite inside task verifies (<code>fullVerifyEvery</code>)</td><td>every 10th task</td><td>every 3rd</td></tr>
+      <tr><td>Full suite after high-risk tasks (<code>fullVerifyHighRisk</code>)</td><td>off</td><td>on</td></tr>
+      <tr><td>Independent tester on high-risk work (<code>requireTester</code>)</td><td>off</td><td>high-risk</td></tr>
+      <tr><td>Opus design note before high-risk work (<code>architectPrepass</code>)</td><td>off</td><td>high-risk</td></tr>
+      <tr><td>Reviewer model (<code>models.reviewer</code>)</td><td>Sonnet</td><td>Opus</td></tr>
+      <tr><td>Red-first checks at task start (<code>redFirst</code>)</td><td>smart</td><td>all</td></tr>
+    </tbody>
+  </table></div>
+  <p>Compare the two on <b>defects</b> (<code>forge defect report</code>), not on first pass alone:
+  more validation catches more, and each catch is a task that did not pass first time.</p>
 
   <h3>What lives in your project</h3>
   <div class="tblwrap"><table>

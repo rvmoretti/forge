@@ -300,10 +300,9 @@ lane lands in `verify.*` anyway, its recorded runs tell on it: `forge preflight`
 than `options.slowLaneSec` over its last ten runs — with the exact `config set gate.<lane>` /
 `config unset verify.<lane>` to paste. Lanes named like slow suites (`e2e`, `db`, `integration`,
 `playwright` …) are reported before their first run too. A per-machine defaults file
-(`~/.config/forge/defaults.json`, `options.*` only) is merged over the built-ins by every `forge
-init`: `forge config set options.models.explorer claude-sonnet-5-5 --global`, `forge config get
---global`, `forge config unset <key> --global`. Existing projects are not changed by it — the
-session-start hook names the open upgrade steps instead.
+(`~/.config/forge/defaults.json`, `options.*` only): `forge config set options.models.explorer
+claude-sonnet-5-5 --global`, `forge config get --global`, `forge config unset <key> --global`.
+Since v0.24 it is a live layer (next section), not copied at `forge init`.
 
 The Usage page has a **scope** selector: the whole project or one milestone. A milestone's token
 table and per-item strip are built from what was attributed to its tasks — the worker transcripts
@@ -311,6 +310,63 @@ tied to them and the orchestrator calls made while they ran, per model — and t
 between tasks (briefs, planning, gates) are stated beside the selector, never spread across
 milestones. The per-milestone rollup row is highlighted for the selected scope. The usage cache is
 rebuilt once for this (v8); `forge usage --rescan` does it in one go.
+
+## Configuration in layers, profiles, defects (v0.24)
+
+`forge/config.json` keeps only what you chose for the project. Every other option is read at run
+time from layers — the higher one wins:
+
+1. **Forge's built-in defaults**, as of the Forge version the project follows
+2. **the profile** — `fast` or `thorough`, or none
+3. **this machine's defaults** (`~/.config/forge/defaults.json`, `forge config set … --global`)
+4. **the project's own values** (`forge config set`, optionally `--reason "…"`, recorded)
+
+`forge config show` lists every option, its value and the layer it comes from, and flags your own
+values — project or machine — that differ from the recommendation (Forge default + profile). `forge config get` shows the
+effective value (`--own`: only the file). `forge config reset <key>` drops a project value and
+follows the layers again; `forge config reset --all` does it for every value that differs.
+
+**Upgrading never changes a value you set.** A newer Forge's defaults reach the project at the next
+milestone's first task start — the milestone runs under one configuration, so its numbers compare
+with the next one's. (A project without milestones: at a task start with nothing else in
+progress.) A start refused after that point leaves the configuration as it was. Facts about one
+project (`integration`, `baseBranch`, `protect`, `graphify` …) are refused in the machine file. `forge upgrade` lists, before that, which values will change and which of
+your own values differ from the recommendation. The change is logged as a decision and the
+milestone records the profile and the defaults version it ran under.
+
+**Projects created before v0.24** are read exactly as before — in them an unset option means the
+old behaviour. `forge config adopt --dry-run` shows what adopting changes (values equal to the
+default follow it from then on — a value equal to a machine default stays the project's own,
+because another machine reads the file without it; the others stay as the project's own; options
+never set take the layers' value); `forge config adopt` writes it.
+
+**Profiles** set the real speed-vs-validation trade-offs in one command — nothing that only repeats
+a check (that is removed in both):
+
+| option | `fast` | `thorough` |
+|---|---|---|
+| `fullVerifyEvery` (full suite inside task verifies) | every 10th task | every 3rd |
+| `fullVerifyHighRisk` (full suite after high-risk tasks) | off | on |
+| `requireTester` (independent tester on high-risk work) | off | high-risk |
+| `architectPrepass` (Opus design note before high-risk work) | off | high-risk |
+| `models.reviewer` | Sonnet | Opus |
+| `redFirst` | smart | all |
+
+`forge config profile fast|thorough|none` applies it at the next milestone's first task start
+(`--now --reason "…"` mid-milestone — the milestone then records the switch and reports as
+"mixed"). Your own values — project or machine — win over a profile; the command lists them, and
+`--clear --now --reason "…"` drops the project ones (named in the decision). A milestone can run
+under its own: `forge milestone update <m> --profile fast|thorough|none|project` (before its first
+start; `project` = follow the project's choice). `forge init --profile fast`
+starts a project with one. "Thorough" does not raise first pass by itself: more validation catches
+more, and every catch is a task that did not pass first time — compare profiles on defects.
+
+**Defects** are what Forge's checks let through — found when you test a milestone, on staging or in
+production. `forge defect add "<what>" --milestone <m> | --item <id> --found
+milestone-test|staging|production|other [--severity low|medium|high]` records one against the
+milestone that shipped it (and its profile). `forge defect report` shows, per milestone, the
+profile, tasks, first pass, verification hours and defects, and per profile the defects per 10
+tasks. A few milestones under each profile are needed before the comparison means anything.
 
 ## Less waiting, honest plans (v0.23)
 
@@ -437,7 +493,7 @@ and `forge trace --refusals` (flight recorder: every CLI call + hook decision, v
 
 ## CLI reference (run as `node <plugin>/bin/forge.js <cmd>` from project root)
 
-`init` · `config get|set` · `preflight [--full]` ·
+`init [--profile fast|thorough]` · `config get [--own]|set [--reason]|unset|reset <key>|--all|show|adopt [--dry-run]|profile [fast|thorough|none] [--clear] [--now --reason]` (v0.24) · `defect add|list|report` (v0.24) · `preflight [--full]` ·
 `task add|list|show|start|dispatch|verify|done|fail|block|cancel|update` (start: `--agent`,
 `--escalate`, `--whole-tree --reason`; dispatch: `--agent` (REQUIRED on a launch; a
 `--kind message` inherits the launch's agent), `--kind launch|message`, `--note`;
