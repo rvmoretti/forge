@@ -128,6 +128,8 @@ const MUTATING = (() => {
   if (c === 'defect') return s === 'add';
   if (c === 'config') return s === 'profile' && process.argv.includes('--now');
   if (c === 'autopilot') return ['on', 'off'].includes(s);
+  if (c === 'question') return s === 'answer'; // v0.25
+  if (c === 'note') return ['add', 'drop'].includes(s); // v0.25
   return false;
 })();
 function pidAlive(pid) { try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; } }
@@ -1410,11 +1412,11 @@ function autopilotDecision(w, cfg, run) {
   const qKey = t => `${t.id}::${t.blockReason || ''}`;
   const questionStop = () => { const t = w.items[blocked[0]];
     return { go: false, kind: 'question', reason: `${lab(t.id)} is blocked: ${t.blockReason || 'no reason recorded'}`,
-      ask: `Ask the user the exact question behind ${t.id} (one question, the options you see, your recommendation). When they answer: forge task unblock / update, then continue.` }; };
+      ask: `Ask the user the exact question behind ${t.id} (one question, the options you see, your recommendation). When they answer: forge question answer ${t.id} --choice <key> (or --note), then continue.` }; };
   if (blocked.length && !qContinue) {
     const t = w.items[blocked[0]];
     return { go: false, kind: 'question', reason: `${lab(t.id)} is blocked: ${t.blockReason || 'no reason recorded'}`,
-      ask: `Ask the user the exact question behind ${t.id} (one question, the options you see, your recommendation). When they answer: forge task unblock / update, then continue.` };
+      ask: `Ask the user the exact question behind ${t.id} (one question, the options you see, your recommendation). When they answer: forge question answer ${t.id} --choice <key> (or --note), then continue.` };
   }
   const esc = w.order.filter(id => { const t = w.items[id]; return t.status === 'TODO' && (t.attempts || []).filter(a => a.outcome === 'failed').length >= 2; });
   if (esc.length) return { go: false, kind: 'escalation', reason: `${lab(esc[0])} failed twice — a third attempt needs an escalation decision`,
@@ -1555,7 +1557,7 @@ const CONFIG_DOCS = [
 const COMMAND_DOCS = [
   { group: 'Start and status', items: [
     ['forge init', 'Create forge/ state in a project (idempotent).'],
-    ['forge status', 'Phase, counts, what is in progress or blocked, what needs you.'],
+    ['forge status [--json]', 'Phase, counts, what is in progress or blocked, what needs you (--json: one machine-readable snapshot, v0.25).'],
     ['forge dashboard', 'Regenerate this page (it also refreshes on every change).'],
     ['forge preflight [--full]', 'Check git, verify commands, Graphify, Playwright before building.'],
     ['forge doctor', 'Self-check of the install and the project state.'] ] },
@@ -1566,7 +1568,9 @@ const COMMAND_DOCS = [
     ['forge task update <id> --criterion-add "d::cmd" --allowed …', 'Flesh out a task: criteria, scope, deps.'],
     ['forge task verify <id>', 'Run the project and criterion checks; records evidence.'],
     ['forge task done <id>', 'Close a verified task (commits it under the git flow).'],
-    ['forge task block <id> --reason "question: …"', 'Park a task on a question for you.'],
+    ['forge task block <id> --question "…" --option a="…" --option b="…" [--recommend a]', 'v0.25: park a task on a question for you, with its options and the recommendation.'],
+    ['forge question list [--json] | answer <id> --choice <key> [--note "…"]', 'v0.25: the open questions; record your answer (the task resumes).'],
+    ['forge note add "…" [--for <id>|next] | list | drop <n>', 'v0.25: a note from you for the next task\'s brief (read at the task boundary).'],
     ['forge task unblock <id> [--note "answer"]', 'Resume a blocked task; one blocked mid-work keeps its attempt and verification.'],
     ['forge task fail <id> --note …', 'Record a failed attempt with its diagnosis.'],
     ['forge task move <id> --before|--after <id>', 'Reorder unstarted tasks (dependency-checked).'],
@@ -1828,6 +1832,129 @@ function liveWorkers(w, cfg, now) {
 }
 // A question for the user is a block whose reason starts with "question:"; a dependency wait is not.
 function isQuestionBlock(item) { return !!item && item.status === 'BLOCKED' && /^\s*question\s*:/i.test(String(item.blockReason || '')); }
+// v0.25: a question to the owner carries its options and the CTO's recommendation as data, so the dashboard and
+// the cockpit can show the choice instead of a sentence. Options are key=label pairs; the key is what an answer picks.
+function parseQuestion(text, rawOpts, recommend) {
+  const t = String(text || '').replace(/^\s*question\s*:\s*/i, '').trim();
+  if (!t) die('--question needs the question itself: --question "Checkout add-ons: mock or spec?"');
+  const options = [];
+  for (const r of rawOpts) {
+    const m = /^([a-z0-9][a-z0-9_-]{0,23})=([\s\S]+)$/i.exec(String(r));
+    if (!m || !m[2].trim()) die(`--option must be key="label" (key: letters, digits, - or _, up to 24 characters), got: ${r}`);
+    const key = m[1].toLowerCase();
+    if (options.some(o => o.key === key)) die(`--option key '${key}' is given twice.`);
+    options.push({ key, label: m[2].trim() });
+  }
+  if (options.length === 1) die('A question with options needs at least two of them (or none, for an open answer).');
+  let rec = null;
+  if (recommend) {
+    rec = String(recommend).toLowerCase();
+    if (!options.some(o => o.key === rec)) die(`--recommend '${recommend}' is not one of the options (${options.map(o => o.key).join(', ') || 'none given'}).`);
+  }
+  return { text: t, options, recommend: rec };
+}
+// The open questions, as the CLI, the dashboard and the cockpit show them. A pre-v0.25 block ("question: …"
+// with no structured record) is still a question: it just has no options.
+function openQuestions(w) {
+  return (w.order || []).filter(id => isQuestionBlock(w.items[id])).map(id => {
+    const t = w.items[id], q = t.question || null;
+    return { id, title: t.title, milestone: t.milestone || null,
+      question: q ? q.text : String(t.blockReason || '').replace(/^\s*question\s*:\s*/i, ''),
+      options: q ? q.options.map(o => ({ key: o.key, label: o.label, recommended: o.key === q.recommend })) : [],
+      recommend: q ? q.recommend : null, since: t.blockedAt || (q && q.ts) || t.updated || null,
+      blockedFrom: t.blockedFrom || null };
+  });
+}
+// The way back from any block (task unblock, question answer): an item blocked mid-attempt resumes that attempt.
+function unblockItem(w, item, answer, choice) {
+  if (item.status !== 'BLOCKED') die(`'${item.id}' is ${item.status}, not BLOCKED.`);
+  const back = item.blockedFrom === 'IN_PROGRESS' ? 'IN_PROGRESS' : 'TODO';
+  if (back === 'IN_PROGRESS') {
+    const cfgU = loadConfig() || {};
+    const conc = parseInt(((cfgU.options || {}).concurrency), 10) || 1;
+    const running = w.order.filter(id2 => w.items[id2].status === 'IN_PROGRESS').length;
+    if (running >= conc) die(`Refused: ${running} task(s) already IN_PROGRESS (options.concurrency ${conc}). Settle one first.`);
+  }
+  const rec = { ts: ts(), reason: item.blockReason, answer: answer || null, to: back };
+  if (choice) rec.choice = choice;
+  if (item.question) rec.question = item.question;
+  (item.unblocks = item.unblocks || []).push(rec);
+  item.status = back;
+  delete item.blockReason; delete item.blockedFrom; delete item.question; delete item.blockedAt;
+  item.updated = ts();
+  saveWork(w);
+  return back;
+}
+// v0.25: which Claude Code session is waiting on the owner, and for what — written by the Notification hook,
+// cleared when that session moves on (a prompt, a main-thread tool call, session end). Generated, not committed.
+const ATTENTION_FILE = path.join(STATE, 'attention.json');
+function readAttention() { try { const a = JSON.parse(fs.readFileSync(ATTENTION_FILE, 'utf8')); a.sessions = a.sessions || {}; return a; } catch (_) { return { sessions: {} }; } }
+function writeAttention(a) {
+  const tmp = ATTENTION_FILE + '.' + process.pid + '.tmp'; // hooks of several sessions may write at once
+  fs.writeFileSync(tmp, JSON.stringify(a, null, 2) + '\n'); fs.renameSync(tmp, ATTENTION_FILE);
+}
+function setAttention(sid, rec) { const a = readAttention(); a.sessions[sid || 'unknown'] = rec; writeAttention(a); }
+function clearAttention(sid) {
+  if (!fs.existsSync(ATTENTION_FILE)) return;
+  const a = readAttention(); const k = sid || 'unknown';
+  if (!a.sessions[k]) return;
+  delete a.sessions[k]; writeAttention(a);
+}
+// v0.25: one compact, machine-readable picture of the project for the dashboard, the cockpit and scripts
+// (forge status --json). Read-only: it takes no lock and writes nothing. schema bumps on breaking changes.
+function statusSnapshot() {
+  const cfg = loadConfig();
+  if (!cfg) return { schema: 1, forge: VERSION, initialized: false };
+  const w = readJson(WORK_FILE, { schema: 1, items: {}, order: [] });
+  const counts = {}; STATUSES.forEach(st => counts[st] = 0);
+  let ready = 0;
+  for (const id of w.order) {
+    const t = w.items[id]; counts[t.status]++;
+    if (t.status === 'TODO' && depsSatisfied(w, t).length === 0 && t.criteria.length > 0) ready++;
+  }
+  counts.READY = ready;
+  const am = activeMilestone(w);
+  let milestone = null;
+  if (am) {
+    const mc = {}; STATUSES.forEach(st => mc[st] = 0);
+    const ids = w.order.filter(id => w.items[id].milestone === am);
+    ids.forEach(id => mc[w.items[id].status]++);
+    milestone = { id: am, total: ids.length, counts: mc };
+  }
+  const awaitingReview = milestoneSeq(w).filter(m => milestoneComplete(w, m) && !(((w.gates || {})[m]) || {}).approved);
+  const live = liveWorkers(w, cfg);
+  const inProgress = w.order.filter(id => w.items[id].status === 'IN_PROGRESS').map(id => {
+    const t = w.items[id], lw = live.find(x => x.id === id);
+    return { id, title: t.title, milestone: t.milestone || null, failedAttempts: failedAttempts(t),
+      worker: lw ? { agent: lw.agent, since: new Date(lw.since).toISOString() } : null };
+  });
+  let verify = null;
+  try {
+    const v = JSON.parse(fs.readFileSync(VERIFY_LOCK, 'utf8'));
+    if (!v.released) verify = { item: v.item || null, since: v.ts || null, alive: v.pid ? pidAlive(v.pid) : null };
+  } catch (_) { }
+  const ap = autopilotCfg(cfg);
+  let autopilot = { on: !!ap.on };
+  if (ap.on) {
+    const run = readJson(AUTOPILOT_FILE, {});
+    let d = null; try { d = autopilotDecision(w, cfg, run); } catch (_) { }
+    autopilot = { on: true, since: run.since || null,
+      next: d && d.go ? (d.next ? d.next.id : null) : null,
+      stop: d && !d.go ? { kind: d.kind, reason: d.reason, ask: d.ask || null } : null };
+  }
+  const questions = openQuestions(w);
+  const notes = (w.notes || []).filter(x => !x.consumedBy);
+  const att = readAttention();
+  const attention = Object.keys(att.sessions).map(sid => Object.assign({ session: sid }, att.sessions[sid]));
+  const needsYou = [
+    ...questions.map(q => ({ kind: 'question', item: q.id, text: q.question })),
+    ...awaitingReview.map(m => ({ kind: 'milestone-review', milestone: m, text: `milestone ${m} is complete and waits for your review` })),
+    ...(autopilot.stop && !['waiting', 'question'].includes(autopilot.stop.kind) ? [{ kind: 'autopilot', text: autopilot.stop.reason }] : []),
+    ...attention.map(a => ({ kind: 'claude', session: a.session, type: a.type || null, text: a.message || a.title || 'Claude Code is waiting for you', since: a.ts || null })),
+  ];
+  return { schema: 1, forge: VERSION, ts: ts(), project: cfg.project || path.basename(PROJECT), phase: cfg.phase || null,
+    counts, milestone, awaitingReview, inProgress, verify, autopilot, questions, notes, attention, needsYou };
+}
 // First pass: done with no failed attempt AND no attempt corrected mid-flight by review findings.
 // Clean run (unchanged): one start, no failed attempt, no failed verify run.
 function firstPass(item) {
@@ -4436,7 +4563,7 @@ const FORGE_AUTHORITATIVE = ['forge/config.json', 'forge/state/work.json', 'forg
   'forge/decisions.md', 'forge/discoveries.md', 'forge/briefs/', 'forge/changes/', 'forge/evidence/'];
 const FORGE_GENERATED = ['forge/dashboard.html', 'forge/state/usage.json', 'forge/state/usage-cache.json',
   'forge/state/preflight.json', 'forge/state/session.json', 'forge/state/work.lock', 'forge/state/trace.jsonl.old',
-  'forge/state/upgrade.json', 'forge/state/backups/', 'forge/state/autopilot.json', 'forge/state/verify.lock'];
+  'forge/state/upgrade.json', 'forge/state/backups/', 'forge/state/autopilot.json', 'forge/state/verify.lock', 'forge/state/attention.json'];
 function isAuthoritative(rel) { return FORGE_AUTHORITATIVE.some(p => p.endsWith('/') ? rel.startsWith(p) : rel === p); }
 function isForgePath(rel) { return rel === 'forge' || rel.startsWith('forge/'); }
 // Append-only files must start with exactly what HEAD holds. Field incident: a working
@@ -5170,6 +5297,9 @@ const commands = {
       item.attempts.push({ ts: ts(), outcome: 'started', escalation: opt('escalate') || null, note: opt('note') || null, agent: opt('agent') || null, outOfOrder: (!pickedNext && opt('reason')) ? opt('reason') : undefined, shapeReason: shapeReason || undefined });
       item.updated = ts();
       if (item.milestone) freezeLabels(w); // v0.18: the version label freezes when work starts
+      // v0.25: owner notes for this task, or for whichever task starts next, are taken into its brief
+      const notesTaken = (w.notes || []).filter(x => !x.consumedBy && (x.for === item.id || x.for === 'next'));
+      for (const x of notesTaken) { x.consumedBy = item.id; x.consumedAt = ts(); }
       saveWork(w);
       if (boundary) {
         boundary.committed = true;
@@ -5180,6 +5310,7 @@ const commands = {
         }
       }
       out(`${item.id}${item.label ? ` (${item.label})` : ''} → IN_PROGRESS${opt('escalate') ? ` (escalation: ${opt('escalate')})` : ''}`);
+      if (notesTaken.length) out(`OWNER NOTES for this task (${notesTaken.length}), included in its brief (forge brief ${item.id}):\n` + notesTaken.map(x => `  - ${x.text}`).join('\n'));
       // v0.21 (C9): a high-risk task gets an architect's design note BEFORE its first worker dispatch
       if (sw(loadConfig(), 'architectPrepass') === 'high-risk' && isHighRisk(item)
           && !launchesOf(item, /architect/i).length && !(w.dispatchLog || []).some(d => d.item === item.id && /architect/i.test(d.agent || ''))) {
@@ -5490,31 +5621,29 @@ const commands = {
     } else if (sub === 'block') {
       const item = getItem(w, argv[2]);
       if (['DONE', 'CANCELLED'].includes(item.status)) die(`'${item.id}' is ${item.status}; it cannot be blocked.`);
+      // v0.25: --question records a structured question (options, recommendation); --reason any other block
+      const qText = opt('question');
+      if (qText && opt('reason')) die('Use --question for a question to the owner, or --reason for any other block, not both.');
+      if (!qText && (optAll('option').length || opt('recommend'))) die('--option and --recommend belong to a question: add --question "…".');
+      const q = qText ? parseQuestion(qText, optAll('option'), opt('recommend')) : null;
       if (item.status !== 'BLOCKED') item.blockedFrom = item.status;
       item.status = 'BLOCKED';
-      item.blockReason = opt('reason') || 'unspecified';
+      item.blockReason = q ? `question: ${q.text}` : (opt('reason') || 'unspecified');
+      if (q) item.question = Object.assign(q, { ts: ts() }); else delete item.question;
+      item.blockedAt = ts();
       item.updated = ts();
       saveWork(w);
       out(`${item.id} → BLOCKED: ${item.blockReason}`);
-      out(`When the user has answered: forge task unblock ${item.id} --note "<their answer>"${item.blockedFrom === 'IN_PROGRESS' ? ' (resumes the attempt; its verification stays valid)' : ''}`);
+      if (q && q.options.length) out(`Options: ${q.options.map(o => `${o.key} = ${o.label}${o.key === q.recommend ? ' (recommended)' : ''}`).join(' · ')}`);
+      const resumes = item.blockedFrom === 'IN_PROGRESS' ? ' (resumes the attempt; its verification stays valid)' : '';
+      if (q) out(`When the user has answered: forge question answer ${item.id} ${q.options.length ? '--choice <key> [--note "…"]' : '--note "<their answer>"'}${resumes}`);
+      else out(`When the user has answered: forge task unblock ${item.id} --note "<their answer>"${resumes}`);
 
     } else if (sub === 'unblock') {
       // v0.21.2: the way back from a question. An item blocked mid-attempt resumes that attempt —
       // no new start, no re-run of the before-work checks, its verification untouched.
       const item = getItem(w, argv[2]);
-      if (item.status !== 'BLOCKED') die(`'${item.id}' is ${item.status}, not BLOCKED.`);
-      const back = item.blockedFrom === 'IN_PROGRESS' ? 'IN_PROGRESS' : 'TODO';
-      if (back === 'IN_PROGRESS') {
-        const cfgU = loadConfig() || {};
-        const conc = parseInt(((cfgU.options || {}).concurrency), 10) || 1;
-        const running = w.order.filter(id2 => w.items[id2].status === 'IN_PROGRESS').length;
-        if (running >= conc) die(`Refused: ${running} task(s) already IN_PROGRESS (options.concurrency ${conc}). Settle one first.`);
-      }
-      (item.unblocks = item.unblocks || []).push({ ts: ts(), reason: item.blockReason, answer: opt('note') || null, to: back });
-      item.status = back;
-      delete item.blockReason; delete item.blockedFrom;
-      item.updated = ts();
-      saveWork(w);
+      const back = unblockItem(w, item, opt('note'), null);
       out(`${item.id} → ${back}${back === 'IN_PROGRESS' ? ' — the same attempt continues; verify/done as before' : ' — start it when it is next (forge task start)'}`);
 
     } else if (sub === 'cancel') {
@@ -5774,6 +5903,13 @@ const commands = {
       return;
     }
     let lines = briefLines(item, cfg);
+    // v0.25: the owner's notes for this task (taken at task start, or addressed to it)
+    const notesB = (w.notes || []).filter(x => x.consumedBy === item.id || (!x.consumedBy && x.for === item.id));
+    if (notesB.length) {
+      const at = lines.findIndex(l => /^_Orchestrator/.test(l));
+      const block = ['', '## Notes from the owner (they bind this task)', ...notesB.map(x => `- ${x.text}`), ''];
+      if (at > 0) lines.splice(at, 0, ...block); else lines.push(...block);
+    }
     // v0.21 (C3): a retry brief is the ORIGINAL brief plus the LATEST review findings — earlier passes are replaced, not stacked
     const bdir = path.join(FORGE, 'briefs');
     const bfile = path.join(bdir, `${item.id}.md`), ofile = path.join(bdir, `${item.id}.original.md`);
@@ -6387,7 +6523,7 @@ const commands = {
           `Task: ${d.label} — ${d.next.title}.`,
           d.prepare ? `It is still thin: write its acceptance criteria from the spec and its file scope first (forge task update ${d.next.id} --criterion-add "…::check" --allowed "…")${sw(cfgN, 'itemShape') === 'refuse' ? ', at most 6 criteria (split side by side into sibling tasks with --origin split --parent if it needs more)' : ''}.` : '',
           `Run the build loop for it: forge task start ${d.next.id} → brief → dispatch (record every launch) → verify → review → forge task done ${d.next.id}. No progress summary in between.`,
-          `If a product question comes up: forge task block ${d.next.id} --reason "question: …" and end your turn with that question as the first line — the runner shows it and carries on with independent tasks (it stops when nothing independent is left).`,
+          `If a product question comes up: forge task block ${d.next.id} --question "…" --option a="…" --option b="…" --recommend a and end your turn with that question as the first line — the runner shows it and carries on with independent tasks (it stops when nothing independent is left).`,
           `When the task is DONE (or blocked, or failed with a diagnosis), end your turn with one line. Do NOT start another task; the runner starts the next one in a fresh process.`].filter(Boolean).join('\n');
         const args = ['-p', prompt, ...extra];
         if (dry) { out(`Would run (${d.label} — ${d.next.title}):\n  ${q(claudeBin)} ${args.map(q).join(' ')}`); stop = { kind: 'dry-run', reason: 'dry run — nothing started' }; break; }
@@ -6617,7 +6753,89 @@ const commands = {
   },
 
   // -- status ---------------------------------------------------------------------
+  // -- question (v0.25) — the owner's open questions as data, and how an answer is recorded -------------
+  question() {
+    const sub = argv[1] || 'list';
+    const w = loadWork();
+    if (sub === 'list') {
+      const qs = openQuestions(w);
+      if (flag('json')) { out(JSON.stringify(qs, null, 2)); return; }
+      if (!qs.length) { out('No open questions.'); return; }
+      for (const q of qs) {
+        out(`${q.id} — ${q.title}${q.milestone ? ` [${q.milestone}]` : ''}`);
+        out(`  ${q.question}`);
+        for (const o of q.options) out(`    ${o.key}: ${o.label}${o.recommended ? '   ← recommended' : ''}`);
+        out(`  answer: forge question answer ${q.id} ${q.options.length ? '--choice <key> [--note "…"]' : '--note "…"'}`);
+      }
+      return;
+    }
+    if (sub === 'answer') {
+      const item = getItem(w, argv[2]);
+      if (!isQuestionBlock(item))
+        die(`'${item.id}' has no open question (it is ${item.status}${item.status === 'BLOCKED' ? `, blocked on: ${item.blockReason}` : ''}).` +
+            (item.status === 'BLOCKED' ? ` Resume it with: forge task unblock ${item.id} --note "…"` : ''));
+      const q = item.question || { options: [] };
+      const choice = opt('choice') ? String(opt('choice')).toLowerCase() : null;
+      const note = opt('note');
+      if (choice && !q.options.some(o => o.key === choice))
+        die(`--choice '${opt('choice')}' is not an option of ${item.id}${q.options.length ? `: ${q.options.map(o => o.key).join(', ')}` : ' (it has none: answer with --note "…")'}.`);
+      if (!choice && !note)
+        die(q.options.length ? `Answer with --choice <${q.options.map(o => o.key).join('|')}> (optionally --note "…"), or --note "…" for an answer outside the options.` : 'Answer with --note "…".');
+      const label = choice ? q.options.find(o => o.key === choice).label : null;
+      const answer = [label ? `${choice}: ${label}` : null, note].filter(Boolean).join(' — ');
+      const back = unblockItem(w, item, answer, choice);
+      out(`${item.id} answered (${answer}) → ${back}${back === 'IN_PROGRESS' ? ' — the same attempt continues' : ' — start it when it is next (forge task start)'}`);
+      out(`If the answer binds the product beyond this task, record it: forge decision add "…" --decision "${answer.replace(/"/g, "'")}" --why "…"`);
+      return;
+    }
+    die('Usage: forge question list [--json] | answer <id> --choice <key> [--note "…"] | answer <id> --note "…"');
+  },
+
+  // -- note (v0.25) — notes from the owner for the next brief, or one task's; read at the item boundary, never mid-turn
+  note() {
+    const sub = argv[1] || 'list';
+    const w = loadWork();
+    const notes = w.notes || [];
+    if (sub === 'add') {
+      const text = argv[2];
+      if (!text || String(text).startsWith('--') || !String(text).trim()) die('Usage: forge note add "text" [--for <task-id>|next]');
+      const target = opt('for') || 'next';
+      if (target !== 'next') {
+        const it = getItem(w, target);
+        if (['DONE', 'CANCELLED'].includes(it.status)) die(`'${it.id}' is ${it.status}; a note for it would never be read.`);
+      }
+      const n = notes.reduce((m, x) => Math.max(m, x.n || 0), 0) + 1;
+      const note = { n, ts: ts(), text: String(text).trim(), for: target };
+      const running = target !== 'next' && w.items[target].status === 'IN_PROGRESS';
+      if (running) { note.consumedBy = target; note.consumedAt = ts(); }
+      w.notes = [...notes, note];
+      saveWork(w);
+      out(`Note ${n} queued for ${target === 'next' ? 'the next task that starts' : target}.`);
+      if (running) out(`${target} is already in progress: the note is in its brief (forge brief ${target}); a worker already running sees it only if it is messaged.`);
+      return;
+    }
+    if (sub === 'drop') {
+      const n = parseInt(argv[2], 10);
+      const x = notes.find(y => y.n === n);
+      if (!x) die(`No note ${argv[2] || ''}. See: forge note list`);
+      if (x.consumedBy) die(`Note ${n} was already taken into ${x.consumedBy}'s brief; it stays in the record.`);
+      w.notes = notes.filter(y => y !== x);
+      saveWork(w);
+      out(`Note ${n} dropped.`);
+      return;
+    }
+    if (sub === 'list') {
+      const shown = flag('all') ? notes : notes.filter(x => !x.consumedBy);
+      if (flag('json')) { out(JSON.stringify(shown, null, 2)); return; }
+      if (!shown.length) { out(flag('all') ? 'No notes.' : 'No pending notes.'); return; }
+      for (const x of shown) out(`${x.n}. [${x.consumedBy ? `taken into ${x.consumedBy}` : `for ${x.for}`}] ${x.text}`);
+      return;
+    }
+    die('Usage: forge note add "text" [--for <task-id>|next] | list [--all] [--json] | drop <n>');
+  },
+
   status() {
+    if (flag('json')) { out(JSON.stringify(statusSnapshot(), null, 2)); return; } // v0.25
     const cfg = loadConfig();
     const w = loadWork();
     const pf = readJson(PREFLIGHT_FILE, null);
@@ -6762,13 +6980,21 @@ const commands = {
     let evs = lines.map(l => { try { return JSON.parse(l); } catch (_) { return null; } }).filter(Boolean);
     if (flag('refusals')) evs = evs.filter(e => e.outcome === 'refused' || e.outcome === 'block');
     if (flag('hooks')) evs = evs.filter(e => e.hook || /^hook /.test(e.cmd || ''));
+    // v0.25: --since <iso> keeps events after that moment (all of them unless --last); --json prints them as JSON lines
+    const since = opt('since');
+    if (since) {
+      const t0 = Date.parse(since);
+      if (!Number.isFinite(t0)) die(`--since needs an ISO time (e.g. 2026-11-20T15:00:00Z), got: ${since}`);
+      evs = evs.filter(e => Date.parse(e.ts) > t0);
+    }
     const n = parseInt(opt('last') || '30', 10) || 30;
-    const shown = evs.slice(-n);
+    const shown = since && !opt('last') ? evs : evs.slice(-n);
+    if (flag('json')) { for (const e of shown) out(JSON.stringify(e)); return; }
     for (const e of shown)
       out(`${e.ts}  v${e.v}  [${e.outcome}${e.exit !== undefined && e.outcome !== 'ok' ? ':' + e.exit : ''}]` +
           `${e.reason ? ` (${e.reason}${e.item ? ' ' + e.item : ''})` : ''}  ${e.cmd}` +
           `${e.refusal ? `  — ${e.refusal}` : ''}${e.path ? `  — ${e.path}` : ''}`);
-    out(`\n${shown.length} of ${evs.length} matching event(s) · forge/state/trace.jsonl · filters: --refusals --hooks --last N` +
+    out(`\n${shown.length} of ${evs.length} matching event(s) · forge/state/trace.jsonl · filters: --refusals --hooks --last N --since <iso> --json` +
         (DEBUG ? '' : ' · FORGE_DEBUG=1 records verbose payloads'));
   },
 
@@ -7797,7 +8023,7 @@ const commands = {
             ns = 'The work graph is empty or nothing is startable. Review the spec/plan with the user and create or unblock work items (forge task add / update).';
           }
           // v0.20: autopilot changes how the loop ends a task
-          try { if (autopilotCfg(cfgNS).on) ns += `\n\nAUTOPILOT IS ON: after each task, take the next one of the current milestone without asking and without a progress summary. Stop only for the user — milestone ready to test, a product question (forge task block <id> --reason "question: …", then ask it), an escalation, nothing startable. The Stop hook enforces this and tells you when to stop. The user may be following from their phone: keep the message that ends a stop short, with what you need from them in the first line.`; } catch (_) { }
+          try { if (autopilotCfg(cfgNS).on) ns += `\n\nAUTOPILOT IS ON: after each task, take the next one of the current milestone without asking and without a progress summary. Stop only for the user — milestone ready to test, a product question (forge task block <id> --question "…" --option a="…" --option b="…" --recommend a, then ask it), an escalation, nothing startable. The Stop hook enforces this and tells you when to stop. The user may be following from their phone: keep the message that ends a stop short, with what you need from them in the first line.`; } catch (_) { }
           // v0.19: a plan behind the installed Forge's standards is mentioned once — never acted on unasked
           try { const openU = upgradeStatus().filter(x => !x.done);
             if (openU.length) ns += `\n\nPlan standards: ${openU.length} open for Forge v${VERSION} (${openU.map(x => x.id).join(', ')}). Mention it to the user in one line after the next step ("forge upgrade shows what a newer Forge would reshape"); automatic steps are safe to apply between items, judgement steps only with their go.`; } catch (_) { }
@@ -7848,6 +8074,8 @@ const commands = {
       process.exit(0);
 
     } else if (which === 'pretooluse') {
+      // v0.25: a main-thread tool call means the session moved on — whatever it was waiting on was answered
+      if (!input.agent_id) { try { clearAttention(input.session_id); } catch (_) { } }
       const tool = input.tool_name || '';
       // v0.23: hands-off guard — the orchestrator decides, workers do. A tool call from the MAIN thread (no agent_id;
       // Claude Code puts agent_id on every subagent's hook input) may not edit project source or run Playwright.
@@ -7995,7 +8223,24 @@ const commands = {
       } catch (_) { /* hooks never crash */ }
       process.exit(0);
 
+    } else if (which === 'notification') {
+      // v0.25: Claude Code is waiting on the owner (a permission prompt, an idle prompt, a question). Recorded so the
+      // dashboard and the cockpit can say which session needs what. Never blocks, never fails.
+      try {
+        if (fs.existsSync(STATE)) setAttention(input.session_id, { ts: ts(), type: input.notification_type || null,
+          title: input.title || null, message: String(input.message || '').slice(0, 500), agent: input.agent_id || null });
+      } catch (_) { }
+      traceEvent({ outcome: 'ok', hook: 'notification', type: input.notification_type || null });
+      process.exit(0);
+
+    } else if (which === 'user-prompt-submit') {
+      // v0.25: the owner answered (or started something new) — the session no longer waits on them
+      try { clearAttention(input.session_id); } catch (_) { }
+      TRACED = true; // one line per prompt would flood the committed trace; the prompt itself is not Forge's to record
+      process.exit(0);
+
     } else if (which === 'session-end') {
+      try { clearAttention(input.session_id); } catch (_) { } // v0.25
       // v0.16.3: a session that ends (/clear, exit, logout) releases the lock it holds.
       // Field evidence: /clear starts a NEW session id; the old id's lock stayed fresh for
       // the full TTL and the edit-war guard blocked the very session that replaced it.
@@ -8090,8 +8335,8 @@ const commands = {
       if (inProg.length) {
         traceEvent({ outcome: 'block', hook: 'stop', autopilot: 'finish-in-progress', inProgress: inProg });
         nudge(`AUTOPILOT is on and ${inProg.join(', ')} is still IN_PROGRESS. Settle it now — verify, review and 'forge task done'; ` +
-          `or 'forge task block <id> --reason "question: …"' if you need the user (anything only they can do — a decision, a commit, a credential); ` +
-          `once they have answered, 'forge task unblock <id>' resumes it with its attempt and verification intact. Or 'forge task fail --note' with a diagnosis. Do not stop to report progress.\n`);
+          `or 'forge task block <id> --question "…" --option a="…" --option b="…" --recommend a' if you need the user (anything only they can do — a decision, a commit, a credential); ` +
+          `once they have answered, 'forge question answer <id> --choice <key>' resumes it with its attempt and verification intact. Or 'forge task fail --note' with a diagnosis. Do not stop to report progress.\n`);
       }
       const d = autopilotDecision(w, cfgS, run);
       if (d.go) {
@@ -8104,7 +8349,7 @@ const commands = {
           (d.prepare && sw(cfgS, 'itemShape') === 'refuse' ? `Keep it to at most 6 criteria (task start refuses more); if it needs more, split it side by side into sibling tasks that can run in parallel, not into a chain. ` : '') +
           `Run the build loop for it now (forge task start with no id → brief → dispatch → verify → review → done), without a progress summary in between. ` +
           `If options.concurrency allows, start other READY tasks with disjoint scopes in parallel. ` +
-          `If a product question comes up: 'forge task block <id> --reason "question: …"' and ask it — Forge keeps you on independent tasks meanwhile and stops only when nothing else is ready.\n`,
+          `If a product question comes up: 'forge task block <id> --question "…" --option a="…" --option b="…" --recommend a' and ask it — Forge keeps you on independent tasks meanwhile and stops only when nothing else is ready.\n`,
           Object.assign({ continues: (run.continues || 0) + 1 }, d.question && !d.question.asked ? { askedQuestions: [...(run.askedQuestions || []), d.question.key] } : {}));
       }
       // a human stop: once, make sure the turn ends with the message the user needs (it is what reaches their phone)
@@ -8116,7 +8361,7 @@ const commands = {
       traceEvent({ outcome: 'ok', hook: 'stop', autopilot: 'stop', kind: d.kind });
       releaseLock(); process.exit(0);
 
-    } else die('Usage: forge hook session-start|pretooluse|stop|pre-compact|session-end');
+    } else die('Usage: forge hook session-start|pretooluse|stop|pre-compact|session-end|notification|user-prompt-submit');
   },
 
   help() {

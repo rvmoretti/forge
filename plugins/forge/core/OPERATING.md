@@ -68,10 +68,12 @@ the turn while such a task is ready and tells you when to stop: the milestone is
 user's testing, a task is blocked on a product question **and nothing independent is ready**
 (v0.23 — until then it tells you to ask the question once and keep going), a task failed twice,
 nothing is startable, or a run limit is reached. Put a question to the user by blocking the task
-(`forge task block <id> --reason "question: …"`) and asking it; never guess a product answer to
+with its options and your recommendation (v0.25: `forge task block <id> --question "…" --option
+a="…" --option b="…" --recommend a`) and asking it; never guess a product answer to
 keep the run going. The same goes for anything only the user can do — commit or revert a file of
 theirs, supply a credential: block the task with that request, never just end the turn with tasks
-in progress. When they have answered, `forge task unblock <id> --note "…"` resumes it — a task
+in progress. When they have answered a question, `forge question answer <id> --choice <key>
+[--note "…"]` resumes it (any other block: `forge task unblock <id> --note "…"`) — a task
 blocked mid-work keeps its attempt and verification, so it goes straight back to `task done`. The user may be on their phone: the message that ends a stop is short and
 its first line says what you need from them.
 **A running worker is not a stop** (v0.22): when you have dispatched a worker in the background
@@ -123,10 +125,16 @@ that surfaced mid-task. Both belong before the start:
    review fixes and owner requests.
 
 A question that still comes up mid-milestone blocks **its** task, not the run: `forge
-task block <id> --reason "question: …"`, ask it once in a short message the owner can
+task block <id> --question "…" --option a="…" --option b="…" --recommend a`, ask it once in a short message the owner can
 answer while you work, and carry on with independent tasks — autopilot does this by
 itself (`options.autopilotQuestions continue`) and stops only when nothing independent
 is ready.
+
+**Notes from the owner (v0.25).** The owner can leave a note for the next task, or for one task,
+without interrupting you (`forge note add "…" [--for <id>]`, from the dashboard or a terminal).
+`task start` takes them and prints them as OWNER NOTES, and `forge brief` puts them in the brief
+under "Notes from the owner": they bind the task like a decision. Do not restate or reinterpret
+them; if one conflicts with the spec or a decision, block the task with a question.
 
 ## Hands off (v0.23)
 

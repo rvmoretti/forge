@@ -406,6 +406,35 @@ splits made mid-milestone.
 - The `delegation-on` upgrade step lists the v0.21 team-delegation switches a project still has
   off, with the commands.
 
+## A state the cockpit and the dashboard can read (v0.25)
+
+Everything a view needs, as data, read-only, with no tokens spent:
+
+- **`forge status --json`** — one snapshot: phase, counts (READY included), the active milestone,
+  milestones waiting for your review, tasks in progress with their live worker, the verify lock,
+  autopilot and why it stopped, open questions, pending notes, which Claude Code sessions wait on
+  you, and `needsYou` — the list of what needs you, each with a `kind` (`question`,
+  `milestone-review`, `autopilot`, `claude`). `schema` changes only on a breaking change.
+- **Questions with options.** `forge task block <id> --question "…" --option a="…" --option b="…"
+  --recommend a` records the choice, not just a sentence. `forge question list [--json]` shows the
+  open ones; `forge question answer <id> --choice <key> [--note "…"]` answers (`--note` alone for an
+  answer outside the options, or for a question without options). The task resumes exactly as
+  `task unblock` would, and the answer, the choice and the question are kept in its `unblocks`.
+  A block written the old way (`--reason "question: …"`) is still a question, without options.
+- **Notes from you.** `forge note add "…"` queues a note for the next task that starts; `--for <id>`
+  for one task. `task start` takes it, prints it, and `forge brief` includes it. A note for a task
+  already in progress goes into its brief at once (a running worker sees it only if messaged).
+  `forge note list [--all] [--json]`, `forge note drop <n>` while it is pending.
+- **Events.** `forge trace --json [--since <iso>] [--last N]` prints `trace.jsonl` as JSON lines.
+  Each event has `ts`, `v` (Forge version), `cmd`, `ms`, `outcome` (`ok`, `refused`, `exit`,
+  `block`) and, where they apply, `exit`, `refusal`, `hook`, `reason`, `item`, `path`.
+  With `--since` and no `--last`, every later event is printed.
+- **Which session waits on you.** A `Notification` hook records, per Claude Code session, when it
+  waits on you (permission prompt, idle prompt, a question dialog, an agent needing input) in
+  `forge/state/attention.json` (generated, not committed). It clears when that session moves on:
+  your next prompt, a main-thread tool call, or the session ending. A subagent's tool call does not
+  clear it.
+
 ## Measuring Forge itself (v0.22)
 
 Every DONE task is stamped with the Forge version, the orchestrator session and its model.
@@ -493,7 +522,7 @@ and `forge trace --refusals` (flight recorder: every CLI call + hook decision, v
 
 ## CLI reference (run as `node <plugin>/bin/forge.js <cmd>` from project root)
 
-`init [--profile fast|thorough]` · `config get [--own]|set [--reason]|unset|reset <key>|--all|show|adopt [--dry-run]|profile [fast|thorough|none] [--clear] [--now --reason]` (v0.24) · `defect add|list|report` (v0.24) · `preflight [--full]` ·
+`status [--json]` (v0.25) · `question list [--json]|answer <id> --choice <key> [--note]` (v0.25) · `note add "…" [--for <id>|next]|list [--all] [--json]|drop <n>` (v0.25) · `trace [--json] [--since <iso>]` (v0.25) · `init [--profile fast|thorough]` · `config get [--own]|set [--reason]|unset|reset <key>|--all|show|adopt [--dry-run]|profile [fast|thorough|none] [--clear] [--now --reason]` (v0.24) · `defect add|list|report` (v0.24) · `preflight [--full]` ·
 `task add|list|show|start|dispatch|verify|done|fail|block|cancel|update` (start: `--agent`,
 `--escalate`, `--whole-tree --reason`; dispatch: `--agent` (REQUIRED on a launch; a
 `--kind message` inherits the launch's agent), `--kind launch|message`, `--note`;
