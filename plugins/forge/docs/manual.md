@@ -435,6 +435,27 @@ Everything a view needs, as data, read-only, with no tokens spent:
   your next prompt, a main-thread tool call, or the session ending. A subagent's tool call does not
   clear it.
 
+## Machine checks in CI (v0.26)
+
+Deterministic checks belong in CI, where they cost Forge's loop nothing. `forge ci checks` reads
+`.github/workflows/` and reports three things:
+
+- **Secrets** (blocking): a gitleaks (or trufflehog, detect-secrets) scan.
+- **Dependency audit** (blocking): `npm audit` or an equivalent (pnpm, yarn, osv-scanner, pip-audit).
+  The job Forge writes fails only on a **critical** production dependency; a stricter level you set
+  yourself (e.g. `--audit-level=high`) counts as present.
+- **Findings** (report-only, Node projects): `knip` (dead code, unused dependencies) and, for a
+  frontend, `modern-web-guidance legacy-scan`, uploaded as the `forge-findings` artifact on release
+  PRs into the release branch and pushes to it. They never fail a build; they are input for the
+  release's hardening milestone.
+
+`forge ci checks --write [--release-branch main]` writes **only the missing ones** to their own
+`.github/workflows/forge-checks.yml`; your workflows are never edited. Tool versions are pinned
+in the file (gitleaks is downloaded as a checksum-verified binary, so no action licence is needed).
+A `forge-checks.yml` you edited is not overwritten without `--force`. Forge writes the audit for
+npm only; other stacks get a note to add theirs. `preflight` warns while a blocking check is
+missing. Branch protection (which checks are required) stays yours to set.
+
 ## Measuring Forge itself (v0.22)
 
 Every DONE task is stamped with the Forge version, the orchestrator session and its model.
@@ -522,7 +543,7 @@ and `forge trace --refusals` (flight recorder: every CLI call + hook decision, v
 
 ## CLI reference (run as `node <plugin>/bin/forge.js <cmd>` from project root)
 
-`status [--json]` (v0.25) · `question list [--json]|answer <id> --choice <key> [--note]` (v0.25) · `note add "…" [--for <id>|next]|list [--all] [--json]|drop <n>` (v0.25) · `trace [--json] [--since <iso>]` (v0.25) · `init [--profile fast|thorough]` · `config get [--own]|set [--reason]|unset|reset <key>|--all|show|adopt [--dry-run]|profile [fast|thorough|none] [--clear] [--now --reason]` (v0.24) · `defect add|list|report` (v0.24) · `preflight [--full]` ·
+`ci checks [--json] [--write [--release-branch <b>] [--force]]` (v0.26) · `status [--json]` (v0.25) · `question list [--json]|answer <id> --choice <key> [--note]` (v0.25) · `note add "…" [--for <id>|next]|list [--all] [--json]|drop <n>` (v0.25) · `trace [--json] [--since <iso>]` (v0.25) · `init [--profile fast|thorough]` · `config get [--own]|set [--reason]|unset|reset <key>|--all|show|adopt [--dry-run]|profile [fast|thorough|none] [--clear] [--now --reason]` (v0.24) · `defect add|list|report` (v0.24) · `preflight [--full]` ·
 `task add|list|show|start|dispatch|verify|done|fail|block|cancel|update` (start: `--agent`,
 `--escalate`, `--whole-tree --reason`; dispatch: `--agent` (REQUIRED on a launch; a
 `--kind message` inherits the launch's agent), `--kind launch|message`, `--note`;

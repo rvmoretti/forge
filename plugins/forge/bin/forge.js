@@ -1557,6 +1557,7 @@ const CONFIG_DOCS = [
 const COMMAND_DOCS = [
   { group: 'Start and status', items: [
     ['forge init', 'Create forge/ state in a project (idempotent).'],
+    ['forge ci checks [--write [--release-branch main]]', 'v0.26: which machine checks CI runs (secrets, dependency audit, findings); write the missing ones as their own workflow.'],
     ['forge status [--json]', 'Phase, counts, what is in progress or blocked, what needs you (--json: one machine-readable snapshot, v0.25).'],
     ['forge dashboard', 'Regenerate this page (it also refreshes on every change).'],
     ['forge preflight [--full]', 'Check git, verify commands, Graphify, Playwright before building.'],
@@ -1900,6 +1901,93 @@ function clearAttention(sid) {
   if (!a.sessions[k]) return;
   delete a.sessions[k]; writeAttention(a);
 }
+// v0.26: machine checks in CI — deterministic, zero cost to Forge's own loop. Two classes block a merge (a leaked
+// secret, a critical vulnerable dependency); the rest is report-only and feeds the release's hardening milestone
+// as the `forge-findings` artifact. Forge does not own a project's CI: it reads the workflows, says what is
+// missing, and writes a separate .github/workflows/forge-checks.yml holding only the missing jobs.
+const CI_PINS = { gitleaks: '8.30.1', knip: '6.47.0', mwg: '1.0.1' };
+const CI_RE = {
+  secrets: /gitleaks|trufflehog|detect-secrets/i,
+  audit: /\b(npm|pnpm) audit\b|\byarn (npm )?audit\b|osv-scanner|pip-audit|snyk test/i,
+  findings: /forge-findings/,
+};
+function ciChecksState(root) {
+  const wfDir = path.join(root, '.github', 'workflows');
+  let wf = [];
+  try { wf = fs.readdirSync(wfDir).filter(f => /\.ya?ml$/.test(f)).map(f => ({ file: `.github/workflows/${f}`, text: fs.readFileSync(path.join(wfDir, f), 'utf8') })); } catch (_) { }
+  const where = re => wf.filter(x => re.test(x.text)).map(x => x.file);
+  let pkg = null; try { pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')); } catch (_) { }
+  const deps = pkg ? Object.keys(Object.assign({}, pkg.dependencies, pkg.devDependencies)) : [];
+  const has = f => fs.existsSync(path.join(root, f));
+  const stack = {
+    node: !!pkg,
+    npmLock: has('package-lock.json'),
+    otherLock: ['pnpm-lock.yaml', 'yarn.lock', 'bun.lockb', 'bun.lock'].find(has) || null,
+    frontend: deps.some(d => /^(react|vue|svelte|solid-js|preact|lit|@angular\/core|astro|next|nuxt)$/.test(d)) || has('index.html'),
+  };
+  const st = { workflows: wf.map(x => x.file), stack,
+    secrets: where(CI_RE.secrets), audit: where(CI_RE.audit), findings: where(CI_RE.findings) };
+  st.missing = ['secrets', 'audit', 'findings'].filter(k => !st[k].length && !(k === 'audit' && !stack.node) && !(k === 'findings' && !stack.node));
+  st.unsupported = [];
+  if (!st.audit.length && !stack.node) st.unsupported.push('dependency audit: Forge writes one for npm projects only — add your stack\'s (osv-scanner, pip-audit) by hand');
+  if (!st.audit.length && stack.node && stack.otherLock) st.unsupported.push(`dependency audit: ${stack.otherLock} found — Forge writes npm audit only; add your package manager's audit by hand`);
+  if (!st.findings.length && !stack.node) st.unsupported.push('findings: Forge writes them for Node projects only (knip, legacy-scan)');
+  if (stack.otherLock) st.missing = st.missing.filter(k => k !== 'audit');
+  return st;
+}
+function ciReleaseBranch() {
+  if (opt('release-branch')) return opt('release-branch');
+  for (const b of ['main', 'master']) if (branchExists(b)) return b;
+  return 'main';
+}
+function ciChecksYaml(st, release) {
+  const L = [
+    'name: Forge checks',
+    `# Written by \`forge ci checks --write\` (Forge v${VERSION}). Holds only the checks the other workflows did not have.`,
+    '# Blocking: a leaked secret, a critical vulnerable production dependency.',
+    `# Report-only: dead code (knip) and legacy web patterns (modern-web-guidance), on release PRs into ${release} and pushes to it;`,
+    '# uploaded as the `forge-findings` artifact for the release\'s hardening milestone. They never fail the build.',
+    '# Versions are pinned; change them deliberately.',
+    'on:', '  push:', `    branches: [${release}]`, '  pull_request:', '',
+    'permissions:', '  contents: read', '',
+    'concurrency:', '  group: forge-checks-${{ github.ref }}', '  cancel-in-progress: true', '',
+    'jobs:'];
+  const install = st.stack.npmLock ? 'npm ci --ignore-scripts' : 'npm install --ignore-scripts --no-audit --no-fund';
+  if (st.missing.includes('secrets')) L.push(
+    '  secrets:', '    runs-on: ubuntu-latest', '    timeout-minutes: 10', '    steps:',
+    '      - uses: actions/checkout@v7', '        with:', '          fetch-depth: 0          # the whole history: a secret removed later is still leaked', '          persist-credentials: false',
+    '      - name: gitleaks (pinned binary, checksum-verified; no action licence needed)',
+    '        run: |',
+    `          V=${CI_PINS.gitleaks}`,
+    '          base="https://github.com/gitleaks/gitleaks/releases/download/v${V}"',
+    '          curl -sSfL -o "gitleaks_${V}_linux_x64.tar.gz" "$base/gitleaks_${V}_linux_x64.tar.gz"',
+    '          curl -sSfL -o sums.txt "$base/gitleaks_${V}_checksums.txt"',
+    '          grep " gitleaks_${V}_linux_x64.tar.gz$" sums.txt | sha256sum -c -',
+    '          tar -xzf "gitleaks_${V}_linux_x64.tar.gz" gitleaks',
+    '          ./gitleaks git --redact --no-banner .', '');
+  if (st.missing.includes('audit')) L.push(
+    '  audit:', '    runs-on: ubuntu-latest', '    timeout-minutes: 10', '    steps:',
+    '      - uses: actions/checkout@v7', '        with:', '          persist-credentials: false',
+    '      - uses: actions/setup-node@v7', '        with:', '          node-version: lts/*',
+    `      - run: ${install}`,
+    '      - run: npm audit --omit=dev --audit-level=critical', '');
+  if (st.missing.includes('findings')) L.push(
+    '  findings:', `    if: github.event_name == 'push' || github.base_ref == '${release}'`,
+    '    runs-on: ubuntu-latest', '    timeout-minutes: 15', '    continue-on-error: true   # report-only: never blocks a merge', '    steps:',
+    '      - uses: actions/checkout@v7', '        with:', '          persist-credentials: false',
+    '      - uses: actions/setup-node@v7', '        with:', '          node-version: lts/*',
+    `      - run: ${install}`,
+    '      - run: mkdir -p forge-findings',
+    `      - run: npx --yes knip@${CI_PINS.knip} --reporter json > forge-findings/knip.json || true`,
+    ...(st.stack.frontend ? [`      - run: npx --yes modern-web-guidance@${CI_PINS.mwg} legacy-scan . --json > forge-findings/legacy-scan.json || true`] : []),
+    '      - uses: actions/upload-artifact@v7', '        with:', '          name: forge-findings', '          path: forge-findings/', '          retention-days: 30', '');
+  return L.join('\n');
+}
+function ciChecksLine(st) {
+  const part = (k, label) => st[k].length ? `${label}: ${st[k].join(', ')}` : `${label}: none`;
+  return [part('secrets', 'secrets'), part('audit', 'dependency audit'), part('findings', 'findings')].join(' · ');
+}
+
 // v0.25: one compact, machine-readable picture of the project for the dashboard, the cockpit and scripts
 // (forge status --json). Read-only: it takes no lock and writes nothing. schema bumps on breaking changes.
 function statusSnapshot() {
@@ -4955,6 +5043,14 @@ const commands = {
             (cfg.verify || {}).security ? `security: ${cfg.verify.security}` :
             'no verify.security command — add a scanner (e.g. gitleaks/semgrep/npm audit): forge config set verify.security "<cmd>". It runs inside every task verify. (Disable: forge config set options.security off)',
             'warning');
+        // v0.26: the blocking machine checks belong in CI, where they cost Forge's loop nothing
+        try {
+          const ci = ciChecksState(PROJECT);
+          if (ci.workflows.length) {
+            const miss = ci.missing.filter(k => k !== 'findings');
+            check('ci checks', !miss.length, miss.length ? `${ciChecksLine(ci)} — add them: forge ci checks --write` : ciChecksLine(ci) + (ci.missing.includes('findings') ? ' (findings for the hardening milestone: forge ci checks --write)' : ''), 'warning');
+          }
+        } catch (_) { }
       } else {
         check('verification commands', true, 'spec phase — not required yet', 'optional');
       }
@@ -6753,6 +6849,32 @@ const commands = {
   },
 
   // -- status ---------------------------------------------------------------------
+  // -- ci (v0.26) — the deterministic checks CI should run, and a workflow holding the missing ones ---------
+  ci() {
+    const sub = argv[1];
+    if (sub !== 'checks') die('Usage: forge ci checks [--json] [--write [--release-branch <branch>]]');
+    const st = ciChecksState(PROJECT);
+    const release = ciReleaseBranch();
+    if (flag('json')) { out(JSON.stringify(Object.assign({ releaseBranch: release }, st), null, 2)); return; }
+    out(`# CI checks — ${st.workflows.length ? st.workflows.join(', ') : 'no workflows in .github/workflows'}`);
+    out(`Blocking   secrets: ${st.secrets.length ? 'present in ' + st.secrets.join(', ') : 'MISSING'}`);
+    out(`Blocking   dependency audit: ${st.audit.length ? 'present in ' + st.audit.join(', ') : st.stack.node && !st.stack.otherLock ? 'MISSING' : 'not written by Forge for this stack'}`);
+    out(`Report     findings for the hardening milestone (knip${st.stack.frontend ? ', legacy-scan' : ''}): ${st.findings.length ? 'present in ' + st.findings.join(', ') : st.stack.node ? 'MISSING' : 'not written by Forge for this stack'}`);
+    for (const u of st.unsupported) out(`NOTE: ${u}`);
+    if (!st.missing.length) { out('\nNothing to add.'); return; }
+    const target = path.join(PROJECT, '.github', 'workflows', 'forge-checks.yml');
+    if (!flag('write')) {
+      out(`\nMissing: ${st.missing.join(', ')}. Write them as a separate workflow (your own workflows are not touched):`);
+      out(`  forge ci checks --write${opt('release-branch') ? '' : ` --release-branch ${release}`}   (findings run on PRs into ${release} and pushes to it)`);
+      return;
+    }
+    if (fs.existsSync(target) && !flag('force')) die(`Refused: ${path.relative(PROJECT, target)} exists but lacks ${st.missing.join(', ')} — it was edited by hand. Review it, or overwrite with --force.`);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, ciChecksYaml(st, release) + '\n');
+    out(`Wrote ${path.relative(PROJECT, target)}: ${st.missing.join(', ')} (findings on PRs into ${release} and pushes to it).`);
+    out('Commit it with the milestone; the first run shows whether the pinned tools download and pass. Required checks in branch protection are yours to set.');
+  },
+
   // -- question (v0.25) — the owner's open questions as data, and how an answer is recorded -------------
   question() {
     const sub = argv[1] || 'list';
