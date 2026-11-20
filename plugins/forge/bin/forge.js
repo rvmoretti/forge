@@ -120,7 +120,8 @@ const MUTATING = (() => {
   if (c === 'task') return !['list', 'show', 'next', ''].includes(s);
   if (c === 'milestone') return ['security', 'approve', 'reopen', 'add', 'update', 'move', 'remove', 'ship', 'verify'].includes(s) && !(s === 'security' && process.argv.includes('--brief'));
   if (c === 'dispatch') return true;
-  if (c === 'release') return ['add', 'update', 'move', 'remove', 'freeze', 'tag'].includes(s);
+  if (c === 'release') return ['add', 'update', 'move', 'remove', 'freeze', 'tag', 'harden'].includes(s);
+  if (c === 'audit') return s === 'triage'; // v0.27
   if (c === 'component') return ['add', 'update'].includes(s);
   if (c === 'arch') return ['add', 'update', 'link', 'unlink', 'confirm', 'remove', 'lanes'].includes(s) || (s === 'scan' && process.argv.includes('--write'));
   if (c === 'screen') return ['add', 'update', 'assign'].includes(s);
@@ -1500,6 +1501,10 @@ function graphifyProblems(g) {
 // v0.20.1: what every setting means and how to change it — one registry feeds the dashboard
 // ============================================================================
 const CONFIG_DOCS = [
+  { key: 'options.hardening', def: 'on (new projects)', group: 'Hardening', what: 'v0.27: on: every release ends with a hardening milestone (forge release harden <R>) — read-only audits per track, findings you triage into fix tasks; release tag refuses without it.', change: 'forge config set options.hardening off', why: 'Reviews that depend on someone remembering them do not happen; the release gate makes them part of the work.', risk: 'low' },
+  { key: 'options.hardeningTracks', def: 'derived', group: 'Hardening', what: 'v0.27: which audits run: cleanup, security, modern-web, seo, ui. Unset: cleanup and security always, modern-web and ui for a frontend, seo for a public site. Security always runs before the first tagged release.', change: 'forge config set options.hardeningTracks "cleanup,security,seo"', why: 'Only the audits that fit the project.', risk: 'low' },
+  { key: 'options.hardeningFloor', def: 'medium (fast: high)', group: 'Hardening', what: 'v0.27: forge audit triage --accept floor accepts every undecided finding at or above this impact (critical|high|medium|low).', change: 'forge config set options.hardeningFloor high', why: 'Your attention goes to the findings that matter.', risk: 'low' },
+  { key: 'options.hardeningCap', def: '25 (fast: 10)', group: 'Hardening', what: 'v0.27: at most this many fix tasks per hardening milestone; the rest is deferred or needs --over-cap --reason.', change: 'forge config set options.hardeningCap 15', why: 'Keeps the hardening milestone from becoming the next slow milestone.', risk: 'low' },
   { key: 'options.itemShape', def: 'warn', group: 'Delegation', what: 'refuse: task start refuses a task with more than 6 criteria unless --reason (oversized tasks rarely pass first time). warn: only warns.', change: 'forge config set options.itemShape refuse', why: 'Big tasks are where first-pass collapses; refusing them forces a side-by-side split before a worker burns an attempt.', risk: 'test first' },
   { key: 'options.workerExplore', def: 'off', group: 'Delegation', what: 'bounded: workers investigate inside their scope (plus a small read budget outside it) and decide HOW; the brief says WHAT. off: the brief pre-solves and forbids exploring.', change: 'forge config set options.workerExplore bounded', why: 'The CTO stops pre-solving: briefs get shorter and the worker, closest to the code, picks the approach.', risk: 'test first' },
   { key: 'options.workerReadBudget', def: '10', group: 'Delegation', what: 'With workerExplore=bounded: how many files outside its scope a worker may read (it lists them).', change: 'forge config set options.workerReadBudget 10', why: 'Raise it when bounded workers report they ran out of reads on legitimate cross-cutting work.', risk: 'low' },
@@ -1557,6 +1562,8 @@ const CONFIG_DOCS = [
 const COMMAND_DOCS = [
   { group: 'Start and status', items: [
     ['forge init', 'Create forge/ state in a project (idempotent).'],
+    ['forge release harden <R> [--tracks a,b]', 'v0.27: add the release\'s hardening milestone — one read-only audit per track (cleanup, security, modern-web, seo, ui).'],
+    ['forge audit list <R> [--json] | triage <R> --accept <keys>|floor --defer … --dismiss … --reason …', 'v0.27: the audit findings; your decision on each (accepted ones become fix tasks).'],
     ['forge ci checks [--write [--release-branch main]]', 'v0.26: which machine checks CI runs (secrets, dependency audit, findings); write the missing ones as their own workflow.'],
     ['forge status [--json]', 'Phase, counts, what is in progress or blocked, what needs you (--json: one machine-readable snapshot, v0.25).'],
     ['forge dashboard', 'Regenerate this page (it also refreshes on every change).'],
@@ -1644,8 +1651,8 @@ function sw(cfg, k) {
 // Origin: plan (cut at planning), split (a planned item carved thinner — not new scope),
 // review (a reviewer's non-blocking finding), discovery (a fact found while building),
 // human (the product owner asked). The dashboard shows planned vs discovered from this.
-const ORIGINS = ['plan', 'split', 'review', 'discovery', 'human'];
-const DISCOVERED_ORIGINS = ['review', 'discovery', 'human'];
+const ORIGINS = ['plan', 'split', 'review', 'discovery', 'human', 'audit']; // v0.27: audit = the release's hardening milestone
+const DISCOVERED_ORIGINS = ['review', 'discovery', 'human', 'audit'];
 function originOf(item) { return (item && item.origin) || 'plan'; }
 // Model roles: one entry per worker role; the orchestrator is the session model and has no entry.
 const MODEL_ROLES = ['implementer', 'tester', 'reviewer', 'explorer', 'architect', 'security', 'planner']; // v0.23: planner
@@ -1669,6 +1676,8 @@ const DEFAULT_CHANGES = [
   { since: '0.24.0', options: (() => { const o = initOptions(); delete o.graphify; delete o.web;
       return Object.assign(o, { fullVerifyHighRisk: true, redFirst: 'smart' }); })(), // the last two: the code's own fallbacks, made visible
     why: 'the options forge init wrote into every new project from v0.20 to v0.23 (delegation switches v0.21, model map v0.22, verification tiers v0.22.2)' },
+  { since: '0.27.0', options: { hardening: 'on', hardeningFloor: 'medium', hardeningCap: 25 },
+    why: 'every release ends with a hardening milestone: audits per track, findings the owner triages into fix tasks' },
 ];
 // What the code does when an option is not set at all (a project created before v0.24) — so adopting
 // reports only real behaviour changes. Keys not listed here have no known fallback (reported as a change).
@@ -1677,13 +1686,13 @@ function codeDefault(k, raw) {
   if (k.startsWith('models.')) { const r = k.slice(7), map = ((raw || {}).options || {}).models || {};
     return r === 'planner' && map.implementer ? map.implementer : MODEL_DEFAULTS[r]; }
   return { concurrency: 1, fullVerifyEvery: 0, fullVerifyHighRisk: true, redFirst: 'smart', redFirstTimeoutSec: 120, slowLaneSec: 120,
-    gateTimeoutSec: 1800, modelRouting: 'auto', autopilotMode: 'session' }[k];
+    gateTimeoutSec: 1800, modelRouting: 'auto', autopilotMode: 'session', hardening: 'off', hardeningFloor: 'medium', hardeningCap: 25 }[k];
 }
 const PROFILES = {
   fast: { what: 'speed and tokens first: the full suite every 10th task, no extra tester or design note on high-risk work, Sonnet reviews, red-first only where it proves something',
-    options: { fullVerifyEvery: 10, fullVerifyHighRisk: false, requireTester: false, architectPrepass: false, redFirst: 'smart', models: { reviewer: MODEL_DEFAULTS.reviewer } } },
+    options: { fullVerifyEvery: 10, fullVerifyHighRisk: false, requireTester: false, architectPrepass: false, redFirst: 'smart', models: { reviewer: MODEL_DEFAULTS.reviewer }, hardeningFloor: 'high', hardeningCap: 10 } },
   thorough: { what: 'validation first: the full suite every 3rd task and after every high-risk task, an independent tester and an architect design note on high-risk work, Opus reviews, every red-first check',
-    options: { fullVerifyEvery: 3, fullVerifyHighRisk: true, requireTester: 'high-risk', architectPrepass: 'high-risk', redFirst: 'all', models: { reviewer: MODEL_DEFAULTS.architect } } },
+    options: { fullVerifyEvery: 3, fullVerifyHighRisk: true, requireTester: 'high-risk', architectPrepass: 'high-risk', redFirst: 'all', models: { reviewer: MODEL_DEFAULTS.architect }, hardeningFloor: 'medium', hardeningCap: 25 } },
 };
 function cmpVer(a, b) {
   const pa = String(a || '0').split('.').map(n => parseInt(n, 10) || 0), pb = String(b || '0').split('.').map(n => parseInt(n, 10) || 0);
@@ -1905,6 +1914,7 @@ function clearAttention(sid) {
 // secret, a critical vulnerable dependency); the rest is report-only and feeds the release's hardening milestone
 // as the `forge-findings` artifact. Forge does not own a project's CI: it reads the workflows, says what is
 // missing, and writes a separate .github/workflows/forge-checks.yml holding only the missing jobs.
+const FRONTEND_DEP_RE = /^(react|vue|svelte|solid-js|preact|lit|@angular\/core|astro|next|nuxt)$/;
 const CI_PINS = { gitleaks: '8.30.1', knip: '6.47.0', mwg: '1.0.1' };
 const CI_RE = {
   secrets: /gitleaks|trufflehog|detect-secrets/i,
@@ -1923,7 +1933,7 @@ function ciChecksState(root) {
     node: !!pkg,
     npmLock: has('package-lock.json'),
     otherLock: ['pnpm-lock.yaml', 'yarn.lock', 'bun.lockb', 'bun.lock'].find(has) || null,
-    frontend: deps.some(d => /^(react|vue|svelte|solid-js|preact|lit|@angular\/core|astro|next|nuxt)$/.test(d)) || has('index.html'),
+    frontend: deps.some(d => FRONTEND_DEP_RE.test(d)) || has('index.html'),
   };
   const st = { workflows: wf.map(x => x.file), stack,
     secrets: where(CI_RE.secrets), audit: where(CI_RE.audit), findings: where(CI_RE.findings) };
@@ -1988,6 +1998,151 @@ function ciChecksLine(st) {
   return [part('secrets', 'secrets'), part('audit', 'dependency audit'), part('findings', 'findings')].join(' · ');
 }
 
+// ============================================================================
+// v0.27: the hardening milestone. Every release ends with one: a read-only audit per track (one task each),
+// findings written as JSON, the owner's triage turning chosen findings into fix tasks (cleanup first, since
+// it reshapes the code the other fixes touch), one full verify at the gate. release tag refuses without it.
+// ============================================================================
+const HARDEN_TRACKS = ['cleanup', 'security', 'modern-web', 'seo', 'ui']; // also the order fixes are worked in
+const HARDEN_LABEL = { cleanup: 'code cleanup and reuse', security: 'security', 'modern-web': 'modern web platform practice', seo: 'SEO and AI-engine visibility', ui: 'UI that looks designed, not generated' };
+const IMPACTS = ['critical', 'high', 'medium', 'low'];
+function hardeningOn(cfg) { return String((((cfg || {}).options) || {}).hardening || 'off') === 'on'; }
+function hardenId(r) { return `harden-${r}`; }
+function projectTraits() {
+  let pkg = null; try { pkg = JSON.parse(fs.readFileSync(path.join(PROJECT, 'package.json'), 'utf8')); } catch (_) { }
+  const deps = pkg ? Object.keys(Object.assign({}, pkg.dependencies, pkg.devDependencies)) : [];
+  const has = f => fs.existsSync(path.join(PROJECT, f));
+  const frontend = deps.some(d => FRONTEND_DEP_RE.test(d)) || has('index.html');
+  const publicWeb = deps.some(d => /^(next|nuxt|astro|gatsby)$/.test(d)) ||
+    (frontend && ['robots.txt', 'public/robots.txt', 'sitemap.xml', 'public/sitemap.xml', 'llms.txt', 'public/llms.txt'].some(has));
+  return { frontend, publicWeb };
+}
+function parseTracks(raw, where) {
+  const t = String(raw).split(',').map(x => x.trim()).filter(Boolean);
+  const bad = t.filter(x => !HARDEN_TRACKS.includes(x));
+  if (bad.length || !t.length) die(`${where}: unknown track(s) ${bad.join(', ') || '(none given)'} — known: ${HARDEN_TRACKS.join(', ')}.`);
+  return t;
+}
+function hardeningTracks(cfg, firstRelease, given) {
+  let t;
+  if (given) t = parseTracks(given, '--tracks');
+  else if ((((cfg || {}).options) || {}).hardeningTracks) t = parseTracks(cfg.options.hardeningTracks, 'options.hardeningTracks');
+  else { const tr = projectTraits(); t = ['cleanup', 'security', ...(tr.frontend ? ['modern-web', 'ui'] : []), ...(tr.publicWeb ? ['seo'] : [])]; }
+  if (firstRelease && !t.includes('security')) {
+    if (given) die('Refused: this is the first release to be tagged — the security audit cannot be left out of its hardening milestone.');
+    t.push('security');
+  }
+  return HARDEN_TRACKS.filter(x => t.includes(x));
+}
+function releaseBaseTag(w, r) {
+  const ord = w.releaseOrder || [];
+  for (let i = ord.indexOf(r) - 1; i >= 0; i--) { const t = (w.releases[ord[i]] || {}).tag; if (t) return t; }
+  return null;
+}
+function auditFile(r, track) { return `forge/audits/${r}/${track}.json`; }
+// The machine check of an audit task: its findings file exists and every finding has an id, an issue and an impact.
+// Inline, so it does not depend on where the plugin is installed.
+function auditCheckCmd(r, track) {
+  const js = "const a=JSON.parse(require('fs').readFileSync(process.argv[1],'utf8'));const L=Array.isArray(a)?a:a.findings;" +
+    "if(!Array.isArray(L))throw Error('findings must be an array');const I=['critical','high','medium','low'],s=new Set();" +
+    "for(const x of L){if(!x||!x.id||s.has(x.id))throw Error('every finding needs a unique id');s.add(x.id);" +
+    "if(!x.issue||!I.includes(x.impact))throw Error(x.id+': needs issue and impact '+I.join('|'))}";
+  return `node -e "${js}" ${auditFile(r, track)}`;
+}
+const AUDIT_FOCUS = {
+  cleanup: ['Dead code, unused files, exports and dependencies (knip finds most: start from the CI artifact if there is one).',
+    'Logic re-implemented where a shared module already exists, and copies that should become one shared helper (jscpd finds exact copies; look for near-copies too).',
+    'Test-harness duplication: helpers redefined per test file instead of shared support code.',
+    'Oversized modules and functions that hide several responsibilities; inconsistent patterns for the same job.',
+    'Every fix you suggest must preserve behaviour: the existing test suite is its proof. No style nits, no rewrites for taste.'],
+  security: ['Authentication and authorization on every entry point: role checks, row-level security, functions running with elevated rights, data a visitor can read.',
+    'Injection (SQL, command, HTML), unsafe URLs and redirects, SSRF, file handling, deserialization.',
+    'Secrets: in the repo, in logs, in error messages returned to callers. Webhooks: signature verified, replay handled.',
+    'Payments and money paths: amounts computed server-side, idempotency, state that cannot be forged by the client.',
+    'Headers, CORS, cookies, CSRF; dependency risk (the CI audit artifact or npm audit).',
+    'PRODUCTION CONFIGURATION the repo cannot prove (auth settings, rate limits, CDN/WAF/bot rules, environment variables, backups): record each as a finding with impact and the exact thing to check, so the owner can confirm it.'],
+  'modern-web': ['Run `npx modern-web-guidance@1.0.1 legacy-scan . --json` (or read the CI artifact) for the deterministic part.',
+    'Then `npx modern-web-guidance@1.0.1 list`, pick the guides that fit this product, `retrieve` each and review the code against it.',
+    'Keep only findings with user-facing impact: accessibility, forms and autofill, responsive layout, performance, browser compatibility. Drop pure style modernisation.'],
+  seo: ['Can a fetch without JavaScript read each public page: its title, description and key facts in the HTML?',
+    'Titles and descriptions per page (not one per section); canonical URLs; hreflang where there are languages.',
+    'Structured data per entity (product, offer, event, local business, FAQ) and that it validates.',
+    'sitemap.xml generated from the real pages (none missing, none broken); robots.txt; llms.txt describing what the product is and how it works.',
+    'Content AI engines quote: clear answers to the questions customers ask (FAQ), plain facts (prices, places, policies) in text, not only in images.',
+    'Core Web Vitals on mobile (Lighthouse if available).'],
+  ui: ['Audit only: change nothing. Review each user-facing screen against the design system and the approved mocks.',
+    'Look for what makes an interface look generated: uniform rounded cards, gradient heroes, emoji, generic copy, inconsistent spacing, decoration without purpose.',
+    'If the unslop skill is installed, use its audit mode; never its fix passes here.',
+    'First finding (id ui-direction): the design direction you would propose, in a few lines, so the owner can accept or redirect it before any screen is fixed. Then one finding per screen.'],
+};
+function auditBriefLines(item, cfg, w) {
+  const { release: r, track } = item.audit;
+  const base = releaseBaseTag(w, r);
+  const mdl = modelRouting(cfg) === 'fixed' ? modelFor(cfg, track === 'security' ? 'security' : 'reviewer') : (track === 'security' ? 'opus' : 'sonnet');
+  return [
+    `# Audit brief — ${item.id}: ${HARDEN_LABEL[track]} (release ${r})`, '',
+    `## Objective`,
+    `Find what should be fixed in ${HARDEN_LABEL[track]} before this release ships, and record it as findings. READ-ONLY: change no code; the owner decides which findings become fix tasks.`, '',
+    `## Scope`,
+    base ? `What changed since the last release: \`git diff --stat ${base}..HEAD\` (and the code it touches). Older code only where a change depends on it.`
+      : `The whole codebase: this release has no tagged release before it.`,
+    `CI artifact, if the project's CI uploads one (forge ci checks): \`gh run download --name forge-findings --dir forge/audits/${r}/ci\` — use it as the deterministic starting point.`, '',
+    `## What to look for`, ...AUDIT_FOCUS[track].map(l => `- ${l}`), '',
+    `## Output — the only file you write`,
+    `\`${auditFile(r, track)}\`: a JSON array (an empty array is a clean audit). Each finding:`,
+    '```json',
+    `{ "id": "${track}-1", "file": "src/…", "line": 42, "issue": "what is wrong, in one sentence", "impact": "critical|high|medium|low", "effort": "S|M|L", "fix": "the change you suggest" }`,
+    '```',
+    `- impact = what it costs a user or the business if it ships: critical (data loss, money, a breach), high (a real user-facing failure), medium (degraded, noticeable), low (minor).`,
+    `- One finding per distinct problem; group repeats of the same pattern into one finding naming the files. At most 40 findings, most impactful first.`,
+    `- \`file\`/\`line\` may be omitted only for a finding that is not in the code (production configuration, missing content).`, '',
+    `Check: \`${auditCheckCmd(r, track)}\` must pass.`, '',
+    `_Orchestrator: dispatch a fresh forge-reviewer${track === 'security' ? ' on the security model' : ''} (${mdl}) — not the agent that built the release — and record it (forge task dispatch ${item.id} --agent forge-reviewer --model ${mdl}). Do not edit the findings; the owner triages them: forge audit list ${r}._`,
+  ];
+}
+function auditFindings(w, r) {
+  const hm = (w.milestones || {})[hardenId(r)];
+  const tracks = ((hm || {}).hardening || {}).tracks || [];
+  const all = [];
+  for (const t of tracks) {
+    let L = null;
+    try { const a = JSON.parse(fs.readFileSync(path.join(PROJECT, auditFile(r, t)), 'utf8')); L = Array.isArray(a) ? a : a.findings; } catch (_) { }
+    for (const x of (Array.isArray(L) ? L : [])) if (x && x.id && x.issue)
+      all.push({ key: `${t}:${x.id}`, track: t, id: x.id, file: x.file || null, line: (x.line !== null && x.line !== undefined && x.line !== '' && Number.isFinite(+x.line)) ? +x.line : null,
+        issue: String(x.issue), impact: IMPACTS.includes(x.impact) ? x.impact : 'low', effort: x.effort || null, fix: x.fix || null });
+  }
+  // the same spot flagged by two tracks is one finding: same file and lines within 3, or the same issue text in the same file
+  const groups = [];
+  for (const f of all) {
+    const g = groups.find(g0 => g0.file && f.file && g0.file === f.file &&
+      ((g0.line !== null && f.line !== null && Math.abs(g0.line - f.line) <= 3) || g0.issue.toLowerCase() === f.issue.toLowerCase()));
+    if (g) { g.keys.push(f.key); if (!g.tracks.includes(f.track)) g.tracks.push(f.track); if (IMPACTS.indexOf(f.impact) < IMPACTS.indexOf(g.impact)) Object.assign(g, { impact: f.impact, issue: f.issue, fix: f.fix || g.fix }); }
+    else groups.push(Object.assign({}, f, { keys: [f.key], tracks: [f.track] }));
+  }
+  const dec = (((w.audits || {})[r]) || {}).decisions || {};
+  for (const g of groups) g.decision = dec[g.key] || null;
+  groups.sort((a, b) => IMPACTS.indexOf(a.impact) - IMPACTS.indexOf(b.impact) || HARDEN_TRACKS.indexOf(a.track) - HARDEN_TRACKS.indexOf(b.track));
+  return groups;
+}
+function hardenAuditsDone(w, r) {
+  const ids = w.order.filter(id => w.items[id].audit && w.items[id].audit.release === r);
+  return ids.length > 0 && ids.every(id => ['DONE', 'CANCELLED'].includes(w.items[id].status));
+}
+// Releases whose every other milestone is approved but that have no hardening milestone yet.
+function hardeningDue(w, cfg) {
+  if (!hardeningOn(cfg)) return [];
+  return (w.releaseOrder || []).filter(r => {
+    if ((w.releases[r] || {}).tag || (w.milestones || {})[hardenId(r)]) return false;
+    const ms = milestoneSeq(w).filter(m => releaseOf(w, m) === r);
+    return ms.length && ms.every(m => ((w.gates || {})[m] || {}).approved);
+  });
+}
+function newWorkItem(fields) {
+  return Object.assign({ title: '', objective: '', milestone: null, deps: [], criteria: [], scope: { allowed: [], forbidden: [] },
+    component: null, mock: null, status: 'TODO', attempts: [], verifications: [], history: [], preState: null, startTree: null,
+    blockReason: null, cancelReason: null, created: ts(), updated: ts() }, fields);
+}
+
 // v0.25: one compact, machine-readable picture of the project for the dashboard, the cockpit and scripts
 // (forge status --json). Read-only: it takes no lock and writes nothing. schema bumps on breaking changes.
 function statusSnapshot() {
@@ -2039,6 +2194,10 @@ function statusSnapshot() {
     ...awaitingReview.map(m => ({ kind: 'milestone-review', milestone: m, text: `milestone ${m} is complete and waits for your review` })),
     ...(autopilot.stop && !['waiting', 'question'].includes(autopilot.stop.kind) ? [{ kind: 'autopilot', text: autopilot.stop.reason }] : []),
     ...attention.map(a => ({ kind: 'claude', session: a.session, type: a.type || null, text: a.message || a.title || 'Claude Code is waiting for you', since: a.ts || null })),
+    ...hardeningDue(w, cfg).map(r => ({ kind: 'hardening-due', release: r, text: `release ${r} is complete: add its hardening milestone (forge release harden ${r})` })),
+    ...Object.keys(w.milestones || {}).filter(m => (w.milestones[m].hardening || {}).release).map(m => w.milestones[m].hardening.release)
+      .filter(r => hardenAuditsDone(w, r)).map(r => ({ r, n: auditFindings(w, r).filter(g => !g.decision).length })).filter(x => x.n)
+      .map(x => ({ kind: 'audit-triage', release: x.r, count: x.n, text: `${x.n} audit finding(s) of release ${x.r} wait for your triage (forge audit list ${x.r})` })),
   ];
   return { schema: 1, forge: VERSION, ts: ts(), project: cfg.project || path.basename(PROJECT), phase: cfg.phase || null,
     counts, milestone, awaitingReview, inProgress, verify, autopilot, questions, notes, attention, needsYou };
@@ -4648,7 +4807,7 @@ function branchExists(b) { return git(['rev-parse', '--verify', '--quiet', `refs
 // Forge's authoritative files are committed with the work; generated ones never are.
 const FORGE_AUTHORITATIVE = ['forge/config.json', 'forge/state/work.json', 'forge/state/components.json',
   'forge/state/trace.jsonl', 'forge/state/baseline.json', 'forge/state/usage-baseline.json',
-  'forge/decisions.md', 'forge/discoveries.md', 'forge/briefs/', 'forge/changes/', 'forge/evidence/'];
+  'forge/decisions.md', 'forge/discoveries.md', 'forge/briefs/', 'forge/changes/', 'forge/evidence/', 'forge/audits/'];
 const FORGE_GENERATED = ['forge/dashboard.html', 'forge/state/usage.json', 'forge/state/usage-cache.json',
   'forge/state/preflight.json', 'forge/state/session.json', 'forge/state/work.lock', 'forge/state/trace.jsonl.old',
   'forge/state/upgrade.json', 'forge/state/backups/', 'forge/state/autopilot.json', 'forge/state/verify.lock', 'forge/state/attention.json'];
@@ -5552,7 +5711,7 @@ const commands = {
       // v0.21 (C5): delegation is enforced — a task closes on a worker's launch, or on a recorded self-close
       const cfgSw = loadConfig() || {};
       let selfClosed = null, testerWaived = null;
-      if (sw(cfgSw, 'requireDispatch') && !launchesOf(item, /implementer|tester|^api$|worker/i).length && !(item.dispatches || []).some(d => d.kind === 'api')) {
+      if (sw(cfgSw, 'requireDispatch') && !launchesOf(item, item.audit ? /reviewer|security|implementer|tester|worker/i : /implementer|tester|^api$|worker/i).length && !(item.dispatches || []).some(d => d.kind === 'api')) {
         if (!(flag('self') && opt('reason')))
           die(`Refused: '${item.id}' has no implementer or tester dispatch recorded (options.requireDispatch).\n` +
               `If a worker did the work, record its launch (this also fixes the record for workers that ran unrecorded):\n` +
@@ -5998,7 +6157,7 @@ const commands = {
       out(contextPackPrompt(item, cfg).join('\n'));
       return;
     }
-    let lines = briefLines(item, cfg);
+    let lines = item.audit ? auditBriefLines(item, cfg, w) : briefLines(item, cfg); // v0.27
     // v0.25: the owner's notes for this task (taken at task start, or addressed to it)
     const notesB = (w.notes || []).filter(x => x.consumedBy === item.id || (!x.consumedBy && x.for === item.id));
     if (notesB.length) {
@@ -6849,6 +7008,85 @@ const commands = {
   },
 
   // -- status ---------------------------------------------------------------------
+  // -- audit (v0.27) — the hardening milestone's findings and the owner's triage --------------------------------
+  audit() {
+    const sub = argv[1];
+    const r = argv[2];
+    const w = loadWork();
+    ensureMilestones(w);
+    if (!['list', 'triage'].includes(sub || '')) die('Usage: forge audit list <release> [--json] | triage <release> --accept <keys>|floor [--defer <keys>] [--dismiss <keys> --reason "…"]');
+    if (!r || !(w.releases || {})[r]) die(`Unknown release '${r || ''}'. See: forge release list`);
+    const hm = hardenId(r);
+    if (!w.milestones[hm]) die(`Release '${r}' has no hardening milestone yet: forge release harden ${r}`);
+    const groups = auditFindings(w, r);
+    const cfg = loadConfig() || {};
+    if (sub === 'list') {
+      if (flag('json')) { out(JSON.stringify({ release: r, auditsDone: hardenAuditsDone(w, r), findings: groups }, null, 2)); return; }
+      const pend = w.order.filter(id => w.items[id].audit && w.items[id].audit.release === r && !['DONE', 'CANCELLED'].includes(w.items[id].status));
+      if (pend.length) out(`Audits still running: ${pend.join(', ')} — the list is not final.`);
+      if (!groups.length) { out(pend.length ? 'No findings recorded yet.' : 'No findings: every audit came back clean.'); return; }
+      out(`# Findings — release ${r} (${groups.length}; ${groups.filter(g => !g.decision).length} undecided) · floor ${(cfg.options || {}).hardeningFloor || 'medium'} · cap ${(cfg.options || {}).hardeningCap || 25}`);
+      for (const g of groups) {
+        const d = g.decision;
+        out(`[${g.impact.padEnd(8)}] ${g.key}${g.keys.length > 1 ? ` (+${g.keys.slice(1).join(', ')})` : ''} — ${g.file ? `${g.file}${g.line !== null ? ':' + g.line : ''} — ` : ''}${g.issue}` +
+          `${g.effort ? ` [${g.effort}]` : ''}${d ? `  → ${d.decision}${d.task ? ' ' + d.task : ''}${d.reason ? ` (${d.reason})` : ''}` : ''}`);
+        if (g.fix && !d) out(`             fix: ${g.fix}`);
+      }
+      out(`\nDecide: forge audit triage ${r} --accept <keys>|floor --defer <keys> --dismiss <keys> --reason "…"`);
+      return;
+    }
+    // triage
+    if (!hardenAuditsDone(w, r)) die(`Refused: the audits of release ${r} are not all done yet — triage the complete list (forge audit list ${r}).`);
+    const byKey = new Map(); for (const g of groups) for (const k of g.keys) byKey.set(k, g);
+    const pick = (raw) => {
+      if (!raw) return [];
+      if (raw === 'floor') {
+        const floor = String((cfg.options || {}).hardeningFloor || 'medium');
+        if (!IMPACTS.includes(floor)) die(`options.hardeningFloor must be one of ${IMPACTS.join('|')}.`);
+        return groups.filter(g => !g.decision && IMPACTS.indexOf(g.impact) <= IMPACTS.indexOf(floor));
+      }
+      return String(raw).split(',').map(k => k.trim()).filter(Boolean).map(k => { const g = byKey.get(k); if (!g) die(`No finding '${k}' in release ${r}. See: forge audit list ${r}`); return g; });
+    };
+    const acc = pick(opt('accept')), def = pick(opt('defer')), dis = pick(opt('dismiss'));
+    if (!acc.length && !def.length && !dis.length) die(`Nothing to decide. Usage: forge audit triage ${r} --accept <keys>|floor [--defer <keys>] [--dismiss <keys> --reason "…"]`);
+    if (dis.length && !opt('reason')) die('--dismiss needs --reason "…" (why it is not a problem).');
+    const seen = new Set();
+    for (const g of [...acc, ...def, ...dis]) { if (seen.has(g.key)) die(`Finding ${g.key} is given more than one decision.`); seen.add(g.key); if (g.decision) die(`Finding ${g.key} was already decided (${g.decision.decision}).`); }
+    w.audits = w.audits || {}; w.audits[r] = w.audits[r] || { decisions: {} };
+    const D = w.audits[r].decisions;
+    const cap = parseInt((cfg.options || {}).hardeningCap, 10) || 25;
+    const already = new Set(Object.values(D).filter(x => x.decision === 'accepted').map(x => x.task)).size;
+    if (already + acc.length > cap && !(flag('over-cap') && opt('reason')))
+      die(`Refused: ${already + acc.length} fix tasks would exceed options.hardeningCap ${cap} (${already} already accepted). Defer the rest, or: --over-cap --reason "…"`);
+    const mk = (g, decision, extra) => { for (const k of g.keys) D[k] = Object.assign({ decision, ts: ts() }, extra); };
+    let n = w.order.filter(id => id.startsWith(`${hm}-fix-`)).length;
+    const made = [];
+    for (const g of acc.slice().sort((a, b) => HARDEN_TRACKS.indexOf(a.track) - HARDEN_TRACKS.indexOf(b.track) || IMPACTS.indexOf(a.impact) - IMPACTS.indexOf(b.impact))) {
+      const id = `${hm}-fix-${++n}`;
+      const where = g.file ? `${g.file}${g.line !== null ? ':' + g.line : ''}` : null;
+      w.items[id] = newWorkItem({ id, milestone: hm, origin: 'audit', parent: `${hm}-${g.track}`,
+        title: `Fix (${g.track}): ${g.issue.length > 90 ? g.issue.slice(0, 87) + '…' : g.issue}`,
+        objective: [g.issue, g.fix ? `Suggested fix: ${g.fix}` : null, where ? `Where: ${where}` : null, `From the audit: ${g.keys.join(', ')} (impact ${g.impact})`,
+          g.track === 'cleanup' ? 'Behaviour must not change: the existing tests are the proof.' : null].filter(Boolean).join('\n'),
+        scope: { allowed: g.file ? [path.posix.dirname(g.file) === '.' ? g.file : path.posix.dirname(g.file) + '/'] : [], forbidden: [] },
+        domains: g.track === 'security' ? ['security'] : undefined, auditFinding: { release: r, keys: g.keys, impact: g.impact } });
+      w.order.push(id);
+      mk(g, 'accepted', { task: id });
+      made.push(id);
+    }
+    for (const g of def) mk(g, 'deferred', { reason: opt('reason') || null });
+    for (const g of dis) mk(g, 'dismissed', { reason: opt('reason') });
+    if (made.length) {
+      // fix tasks go after the audits, cleanup first (it reshapes the code the other fixes touch)
+      ensureTaskOrder(w, hm);
+      const mr = w.milestones[hm];
+      mr.taskOrder = [...mr.taskOrder.filter(x => !made.includes(x)), ...made];
+    }
+    saveWork(w);
+    out(`Release ${r}: ${made.length} accepted → ${made.join(', ') || '—'} · ${def.length} deferred · ${dis.length} dismissed · ${auditFindings(w, r).filter(g => !g.decision).length} undecided.`);
+    if (made.length) out(`Each fix task needs its criteria before it starts (forge task update <id> --criterion-add "…::check"); then the normal loop. The milestone gate runs the full verify once.`);
+  },
+
   // -- ci (v0.26) — the deterministic checks CI should run, and a workflow holding the missing ones ---------
   ci() {
     const sub = argv[1];
@@ -7638,8 +7876,44 @@ const commands = {
       const frozenM = w.milestoneOrder.filter(m => w.milestones[m].label);
       out(`Frozen: ${frozenM.length} started milestone(s) (${frozenM.map(m => `${m}=${lab.milestone[m]}`).join(', ') || 'none'}), ` +
           `${Object.values(w.items).filter(t => t.label).length} started task(s).`);
+    } else if (sub === 'harden') {
+      // v0.27: the release's hardening milestone — one read-only audit task per track, last in the release
+      const cfgH = loadConfig() || {};
+      if (!hardeningOn(cfgH) && !flag('force')) die(`Hardening is off for this project (options.hardening). Turn it on (forge config set options.hardening on), or add it once: forge release harden ${r} --force`);
+      if (w.releases[r].tag) die(`Refused: release '${r}' is already tagged (${w.releases[r].tag}).`);
+      const hm = hardenId(r);
+      if (w.milestones[hm]) die(`Release '${r}' already has its hardening milestone: ${hm}. See: forge audit list ${r}`);
+      const relMs = w.milestoneOrder.filter(m => releaseOf(w, m) === r);
+      if (!relMs.length) die(`Refused: release '${r}' has no milestones to harden.`);
+      const firstRelease = !Object.values(w.releases).some(x => x.tag);
+      const tracks = hardeningTracks(cfgH, firstRelease, opt('tracks'));
+      const base = releaseBaseTag(w, r);
+      w.milestones[hm] = { id: hm, name: `${w.releases[r].name || r} is reviewed and hardened before it ships`, demo: `forge audit list ${r}`, release: r,
+        created: ts(), history: [], hardening: { release: r, tracks, base, created: ts() } };
+      w.milestoneOrder.splice(w.milestoneOrder.indexOf(relMs[relMs.length - 1]) + 1, 0, hm);
+      for (const t of tracks) {
+        const id = `${hm}-${t}`;
+        if (w.items[id]) die(`Refused: a task '${id}' already exists.`);
+        w.items[id] = newWorkItem({ id, title: `Audit: ${HARDEN_LABEL[t]}`, milestone: hm, origin: 'audit', audit: { release: r, track: t },
+          objective: `Read-only ${t} audit of release ${r}; findings in ${auditFile(r, t)} for the owner's triage.`,
+          criteria: [{ desc: `findings recorded in ${auditFile(r, t)} (an empty list is a clean audit)`, check: auditCheckCmd(r, t) }],
+          scope: { allowed: [auditFile(r, t)], forbidden: [] } }); // one file per track: the audits may run in parallel
+        w.order.push(id);
+      }
+      ensureTaskOrder(w, hm);
+      saveWork(w);
+      out(`Hardening milestone ${hm} added as the last milestone of release ${r}: ${tracks.map(t => `${t} (${HARDEN_LABEL[t]})`).join(', ')}.`);
+      out(`Scope: ${base ? `what changed since ${base}` : 'the whole codebase (no earlier tagged release)'}.${firstRelease ? ' First tagged release: the security audit is mandatory.' : ''}`);
+      out(`Next: for each audit task — forge task start <id> → forge brief <id> --save → dispatch a fresh forge-reviewer → forge task verify/done.\nThen triage: forge audit list ${r} · forge audit triage ${r} --accept <keys>|floor --defer <keys> --dismiss <keys> --reason "…"`);
     } else if (sub === 'tag') {
       const cfgT = loadConfig() || {};
+      // v0.27: a release ships hardened, or with a recorded reason why not (never the first one without a security audit)
+      if (hardeningOn(cfgT) && !w.milestones[hardenId(r)]) {
+        if (!flag('skip-hardening')) die(`Refused: release '${r}' has no hardening milestone (options.hardening on). Add it: forge release harden ${r}\nOr ship without it, recorded: forge release tag ${r} --skip-hardening --reason "…"`);
+        if (!opt('reason')) die('--skip-hardening needs --reason "…" (recorded on the release).');
+        if (!Object.values(w.releases).some(x => x.tag)) die(`Refused: '${r}' would be the first tagged release, and it cannot ship without its security audit. Add it: forge release harden ${r} --tracks security`);
+        w.releases[r].hardeningSkipped = { ts: ts(), reason: opt('reason') };
+      }
       const gc = gitCfg(cfgT);
       const ms = milestoneSeq(w).filter(m => releaseOf(w, m) === r);
       const pending = ms.filter(m => !((w.gates || {})[m] || {}).approved);
@@ -8013,6 +8287,10 @@ const commands = {
       if (!m || !milestoneSeq(w).includes(m)) die(`Unknown milestone '${m || ''}'. See: forge milestone list`);
       if (!milestoneComplete(w, m))
         die(`Refused: milestone '${m}' still has unfinished items — approval is for a testable, finished slice.`);
+      // v0.27: a hardening milestone closes only once every finding has been decided
+      { const hr = ((w.milestones[m] || {}).hardening || {}).release;
+        const open = hr ? auditFindings(w, hr).filter(g => !g.decision) : [];
+        if (open.length) die(`Refused: ${open.length} audit finding(s) of release ${hr} are not triaged yet. See: forge audit list ${hr} — accept, defer or dismiss each.`); }
       // v0.8: security is part of the gate, not an afterthought
       const secMode = ((loadConfig() || {}).options || {}).security;
       const hasSec = ((w.gates[m] || {}).security || {}).ts;
@@ -8063,7 +8341,9 @@ const commands = {
       {
         const rel = releaseOf(w, m);
         if (rel && milestoneSeq(w).filter(x => releaseOf(w, x) === rel).every(x => ((w.gates || {})[x] || {}).approved))
-          out(`\n🏁 Release ${computeLabels(w).releaseLabel[rel]} (${(w.releases[rel] || {}).name || rel}) is complete. Once its milestone PRs are merged: forge release tag ${rel}`);
+          out(hardeningDue(w, loadConfig() || {}).includes(rel)
+            ? `\n🛡️ Release ${computeLabels(w).releaseLabel[rel]} (${(w.releases[rel] || {}).name || rel}) has every feature milestone approved. Before it ships: forge release harden ${rel} (audits per track; you triage the findings).`
+            : `\n🏁 Release ${computeLabels(w).releaseLabel[rel]} (${(w.releases[rel] || {}).name || rel}) is complete. Once its milestone PRs are merged: forge release tag ${rel}`);
       }
       if (mCommits) out(`Commit range recorded: ${mCommits.base.slice(0, 7)}..${mCommits.head.slice(0, 7)} (${mCommits.count} commit(s)) — git log ${mCommits.base}..${mCommits.head}`);
       out(`📊 forge/dashboard.html now shows this milestone closed — worth a look for the user.`);

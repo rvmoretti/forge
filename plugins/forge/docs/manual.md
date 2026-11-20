@@ -435,6 +435,42 @@ Everything a view needs, as data, read-only, with no tokens spent:
   your next prompt, a main-thread tool call, or the session ending. A subagent's tool call does not
   clear it.
 
+## Every release ends hardened (v0.27)
+
+With `options.hardening on` (the default for new projects), a release closes with its own
+**hardening milestone**, so the reviews do not depend on anyone remembering them.
+
+1. **When.** Once every feature milestone of a release is approved, Forge says so (`milestone
+   approve`, `status --json` → `needsYou` kind `hardening-due`). `forge release harden <R>` adds
+   milestone `harden-<R>` as the release's last, with one **read-only audit task per track**.
+   `release tag` refuses a release without one (or with `--skip-hardening --reason`, recorded —
+   never for the first tagged release, which always gets its security audit).
+2. **Tracks.** `cleanup` (dead code, duplication, re-implemented helpers, test-harness copies),
+   `security` (authorization, injection, secrets, webhooks, money paths, and the production
+   configuration the repo cannot prove), `modern-web` (the modern-web-guidance scan and guides,
+   user-facing impact only), `seo` (pages readable without JavaScript, titles, structured data,
+   sitemap, robots, llms.txt, FAQ content), `ui` (audit only: what makes screens look generated,
+   with a proposed design direction first). Unset `options.hardeningTracks`: cleanup and security
+   always, modern-web and ui for a frontend, seo for a public site. `--tracks` picks them per release.
+3. **Audits.** Each audit task has its own brief (`forge brief <id>`): scope (what changed since
+   the previous tagged release, or everything for the first), what to look for, the CI
+   `forge-findings` artifact as a starting point, and the output: `forge/audits/<R>/<track>.json`,
+   a list of findings (`id`, `file`, `line`, `issue`, `impact` critical|high|medium|low, `effort`,
+   `fix`). The task's machine check validates that file. A fresh `forge-reviewer` runs it (the
+   security model for security); it changes no code.
+4. **Triage — your decision.** `forge audit list <R>` merges the tracks (one spot flagged twice is
+   one finding, at the higher impact) and ranks them. `forge audit triage <R> --accept <keys>|floor
+   --defer <keys> --dismiss <keys> --reason "…"`: accepted findings become fix tasks (`origin:
+   audit`, parent = the audit), cleanup first; deferred ones stay on record; dismissed ones keep the
+   reason. `floor` accepts every undecided finding at or above `options.hardeningFloor`;
+   `options.hardeningCap` limits the fix tasks (`--over-cap --reason` to exceed it). The milestone
+   cannot be approved while a finding is undecided.
+5. **Close.** Fix tasks get their criteria and go through the normal loop; the gate runs the full
+   verify once; your approval unblocks `release tag`.
+
+Profiles: thorough → floor medium, cap 25; fast → floor high, cap 10. Projects created before
+v0.24, and adopted projects on older defaults, keep hardening off until they turn it on.
+
 ## Machine checks in CI (v0.26)
 
 Deterministic checks belong in CI, where they cost Forge's loop nothing. `forge ci checks` reads
@@ -543,7 +579,7 @@ and `forge trace --refusals` (flight recorder: every CLI call + hook decision, v
 
 ## CLI reference (run as `node <plugin>/bin/forge.js <cmd>` from project root)
 
-`ci checks [--json] [--write [--release-branch <b>] [--force]]` (v0.26) · `status [--json]` (v0.25) · `question list [--json]|answer <id> --choice <key> [--note]` (v0.25) · `note add "…" [--for <id>|next]|list [--all] [--json]|drop <n>` (v0.25) · `trace [--json] [--since <iso>]` (v0.25) · `init [--profile fast|thorough]` · `config get [--own]|set [--reason]|unset|reset <key>|--all|show|adopt [--dry-run]|profile [fast|thorough|none] [--clear] [--now --reason]` (v0.24) · `defect add|list|report` (v0.24) · `preflight [--full]` ·
+`release harden <R> [--tracks a,b] [--force]` (v0.27) · `audit list <R> [--json]|triage <R> --accept <keys>|floor --defer <keys> --dismiss <keys> --reason "…" [--over-cap]` (v0.27) · `release tag <R> [--skip-hardening --reason]` · `ci checks [--json] [--write [--release-branch <b>] [--force]]` (v0.26) · `status [--json]` (v0.25) · `question list [--json]|answer <id> --choice <key> [--note]` (v0.25) · `note add "…" [--for <id>|next]|list [--all] [--json]|drop <n>` (v0.25) · `trace [--json] [--since <iso>]` (v0.25) · `init [--profile fast|thorough]` · `config get [--own]|set [--reason]|unset|reset <key>|--all|show|adopt [--dry-run]|profile [fast|thorough|none] [--clear] [--now --reason]` (v0.24) · `defect add|list|report` (v0.24) · `preflight [--full]` ·
 `task add|list|show|start|dispatch|verify|done|fail|block|cancel|update` (start: `--agent`,
 `--escalate`, `--whole-tree --reason`; dispatch: `--agent` (REQUIRED on a launch; a
 `--kind message` inherits the launch's agent), `--kind launch|message`, `--note`;

@@ -130,6 +130,15 @@ answer while you work, and carry on with independent tasks — autopilot does th
 itself (`options.autopilotQuestions continue`) and stops only when nothing independent
 is ready.
 
+**Hardening a release (v0.27).** When the last feature milestone of a release is approved and
+Forge says the release needs hardening, tell the owner and, with their go, run `forge release
+harden <R>`. Run each audit task like any task, but dispatch a FRESH `forge-reviewer` (the
+security model for the security track) with the audit brief (`forge brief <id> --save`); it writes
+only the findings file. Never edit, filter or rank the findings yourself: show the owner
+`forge audit list <R>` and let them decide (`forge audit triage`). Accepted findings arrive as fix
+tasks without criteria: add criteria that prove the fix (a test that fails before it), then the
+normal loop. Cleanup fixes must not change behaviour; the existing suite is their proof.
+
 **Notes from the owner (v0.25).** The owner can leave a note for the next task, or for one task,
 without interrupting you (`forge note add "…" [--for <id>]`, from the dashboard or a terminal).
 `task start` takes them and prints them as OWNER NOTES, and `forge brief` puts them in the brief
