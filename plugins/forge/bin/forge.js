@@ -2199,8 +2199,35 @@ function statusSnapshot() {
       .filter(r => hardenAuditsDone(w, r)).map(r => ({ r, n: auditFindings(w, r).filter(g => !g.decision).length })).filter(x => x.n)
       .map(x => ({ kind: 'audit-triage', release: x.r, count: x.n, text: `${x.n} audit finding(s) of release ${x.r} wait for your triage (forge audit list ${x.r})` })),
   ];
+  // v0.28: what the cockpit draws — the active milestone's tasks with the step each is at, every milestone's
+  // shape (how it grew), and the switches with their meaning. Still read-only and still one call.
+  const stageOf = (id, t) => {
+    if (t.status !== 'IN_PROGRESS') return t.status === 'DONE' ? 'done' : t.status === 'BLOCKED' ? 'blocked' : t.status === 'CANCELLED' ? 'cancelled' : 'todo';
+    if (verify && verify.item === id) return 'verify';
+    const lw = live.find(x => x.id === id);
+    if (lw) return /review|security/i.test(lw.agent || '') ? 'review' : /tester/i.test(lw.agent || '') ? 'test' : /explor|architect|planner/i.test(lw.agent || '') ? 'prepare' : 'implement';
+    return fs.existsSync(path.join(FORGE, 'briefs', `${id}.md`)) ? 'cto' : 'brief';
+  };
+  const tasks = am ? ensureTaskOrder(w, am).filter(id => w.items[id]).map(id => {
+    const t = w.items[id], lv = lastVerification(t);
+    return { id, title: t.title, status: t.status, stage: stageOf(id, t), origin: originOf(t), criteria: (t.criteria || []).length,
+      starts: (t.attempts || []).filter(a => a.outcome === 'started').length, failedAttempts: failedAttempts(t),
+      lastVerify: lv ? { passed: !!lv.passed, ts: lv.ts } : null, blockReason: t.blockReason || null };
+  }) : [];
+  const milestones = (w.milestoneOrder || []).filter(m => w.order.some(id => w.items[id].milestone === m)).map(m => {
+    const ids = w.order.filter(id => w.items[id].milestone === m);
+    const by = {}; STATUSES.forEach(st => by[st] = 0); ids.forEach(id => by[w.items[id].status]++);
+    const origins = {}; ids.forEach(id => { const o = originOf(w.items[id]); origins[o] = (origins[o] || 0) + 1; });
+    return { id: m, name: milestoneName(w, m) || null, release: releaseOf(w, m), total: ids.length, counts: by, origins,
+      approved: !!(((w.gates || {})[m]) || {}).approved, hardening: !!(w.milestones[m] || {}).hardening };
+  });
+  const flat = flatOptions(cfg.options || {});
+  const config = CONFIG_DOCS.filter(d => /^options\.[A-Za-z]+$/.test(d.key)).map(d => {
+    const k = d.key.slice(8);
+    return { key: k, value: flat[k] === undefined ? null : flat[k], default: d.def, group: d.group, what: d.what, change: d.change, risk: d.risk };
+  });
   return { schema: 1, forge: VERSION, ts: ts(), project: cfg.project || path.basename(PROJECT), phase: cfg.phase || null,
-    counts, milestone, awaitingReview, inProgress, verify, autopilot, questions, notes, attention, needsYou };
+    counts, milestone, awaitingReview, inProgress, verify, autopilot, questions, notes, attention, needsYou, tasks, milestones, config };
 }
 // First pass: done with no failed attempt AND no attempt corrected mid-flight by review findings.
 // Clean run (unchanged): one start, no failed attempt, no failed verify run.
@@ -7195,7 +7222,8 @@ const commands = {
   },
 
   status() {
-    if (flag('json')) { out(JSON.stringify(statusSnapshot(), null, 2)); return; } // v0.25
+    // v0.25; v0.28: a read the cockpit repeats every few seconds — never a line in the committed trace
+    if (flag('json')) { TRACED = true; out(JSON.stringify(statusSnapshot(), null, 2)); return; }
     const cfg = loadConfig();
     const w = loadWork();
     const pf = readJson(PREFLIGHT_FILE, null);

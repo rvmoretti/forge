@@ -1,4 +1,7 @@
 {
+  "modules": [
+    "./cockpit.tsx"
+  ],
   "hooks": {
     "SessionStart": [
       {

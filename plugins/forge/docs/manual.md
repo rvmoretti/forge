@@ -435,6 +435,29 @@ Everything a view needs, as data, read-only, with no tokens spent:
   your next prompt, a main-thread tool call, or the session ending. A subagent's tool call does not
   clear it.
 
+## The cockpit inside Claude Code (v0.28)
+
+Forge ships a Claude Code mod (`hooks/cockpit.tsx`, Claude Code 2.1.287 or newer; an older one ignores it
+and Forge works as before). In a Forge project it draws:
+
+- **The band** above the prompt: the active milestone and its progress, the tasks in progress and the
+  worker on each, the verify running, how many things need you, autopilot. `Open` opens the pane.
+- **`/forge`** opens the pane: **Needs you** (open questions with their options as buttons, the
+  recommended one marked; milestones waiting for review; audits waiting for triage; Claude sessions
+  waiting on you; autopilot with a Stop button), **Tasks** (the active milestone, each task's step:
+  to do, brief, implement, verify, review, done), **Workers** (the CTO's and each worker's recent tool
+  calls, each worker's type, status, time running, tokens and model), **Project** (every milestone,
+  its progress and how it grew), **Config** (every switch with its meaning; on/off switches toggle).
+- **`/forge note <text>`** leaves a note for the next task's brief; **`/forge status`** lists what
+  needs you. Both answer for you only: nothing goes to Claude.
+- **Notices** when something new needs you.
+
+What it does not do, by design (a repository test holds it to this): it adds nothing to Claude's
+prompt or context, answers no permission prompt, runs no tool for Claude, and writes no state itself.
+Every button is one `forge` CLI command (`question answer`, `config set`, `autopilot off`, `note add`),
+validated and recorded like any other. It reads `forge status --json` every few seconds, which takes no
+lock and leaves no trace line. Turn it off in the plugin's settings (`cockpit`); Forge is unaffected.
+
 ## Every release ends hardened (v0.27)
 
 With `options.hardening on` (the default for new projects), a release closes with its own

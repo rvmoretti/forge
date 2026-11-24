@@ -7,3 +7,4 @@ Claude outputs/
 .claude/
 bench/baseline-*.txt
 docs/IMPL-*.md
+plugins/forge/.claude-plugin/types/
