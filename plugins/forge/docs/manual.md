@@ -435,6 +435,28 @@ Everything a view needs, as data, read-only, with no tokens spent:
   your next prompt, a main-thread tool call, or the session ending. A subagent's tool call does not
   clear it.
 
+## The dashboard as the place to manage Forge (v0.29)
+
+`forge/dashboard.html` has three pages built from the same snapshot as the cockpit (`status --json`):
+
+- **Needs you** (with its count in the side menu): one card per thing waiting on you. A **question** shows
+  each option, the recommended one marked, with what to type in the Claude session (`B: spec`) or the
+  command to run (`forge question answer B --choice spec`). A **Claude Code session waiting on you**
+  (a permission prompt, a reply, a dialog) says which session and to go to that terminal. Milestones to
+  review, releases to harden and audits to triage say what to type. Autopilot's state with the command
+  to stop it, and how to leave a note for the next brief.
+- **Loop**: the active milestone's tasks at their step (to do → brief → implement → verify → review →
+  done), with the worker on each and its last verify.
+- **Project**: every milestone, its progress, and how it grew (planned, split, review, discovery, human,
+  audit).
+
+The dashboard **advises; it never drives Claude**. What it offers to copy is built only from Forge's own
+ids and keys; words that came from elsewhere (a notification, a question's wording) are shown as quoted
+context. Click a command or a phrase to copy it. **live** (in the side menu, on by default, remembered
+per browser) reloads the page every 10 seconds while it is visible, keeping the page and the scroll.
+Forge regenerates the file on every state change and whenever a Claude Code session starts or stops
+waiting on you.
+
 ## The cockpit inside Claude Code (v0.28)
 
 Forge ships a Claude Code mod (`hooks/cockpit.tsx`, Claude Code 2.1.287 or newer; an older one ignores it
@@ -602,7 +624,7 @@ and `forge trace --refusals` (flight recorder: every CLI call + hook decision, v
 
 ## CLI reference (run as `node <plugin>/bin/forge.js <cmd>` from project root)
 
-`release harden <R> [--tracks a,b] [--force]` (v0.27) · `audit list <R> [--json]|triage <R> --accept <keys>|floor --defer <keys> --dismiss <keys> --reason "…" [--over-cap]` (v0.27) · `release tag <R> [--skip-hardening --reason]` · `ci checks [--json] [--write [--release-branch <b>] [--force]]` (v0.26) · `status [--json]` (v0.25) · `question list [--json]|answer <id> --choice <key> [--note]` (v0.25) · `note add "…" [--for <id>|next]|list [--all] [--json]|drop <n>` (v0.25) · `trace [--json] [--since <iso>]` (v0.25) · `init [--profile fast|thorough]` · `config get [--own]|set [--reason]|unset|reset <key>|--all|show|adopt [--dry-run]|profile [fast|thorough|none] [--clear] [--now --reason]` (v0.24) · `defect add|list|report` (v0.24) · `preflight [--full]` ·
+`release harden <R> [--tracks a,b] [--force]` (v0.27) · `audit list <R> [--json]|triage <R> --accept <keys>|floor --defer <keys> --dismiss <keys> --reason "…" [--over-cap]` (v0.27) · `release tag <R> [--skip-hardening --reason]` · `ci checks [--json] [--write [--release-branch <b>] [--force]]` (v0.26) · `status [--json]` (v0.25; the dashboard's Needs you / Loop / Project pages, v0.29) · `question list [--json]|answer <id> --choice <key> [--note]` (v0.25) · `note add "…" [--for <id>|next]|list [--all] [--json]|drop <n>` (v0.25) · `trace [--json] [--since <iso>]` (v0.25) · `init [--profile fast|thorough]` · `config get [--own]|set [--reason]|unset|reset <key>|--all|show|adopt [--dry-run]|profile [fast|thorough|none] [--clear] [--now --reason]` (v0.24) · `defect add|list|report` (v0.24) · `preflight [--full]` ·
 `task add|list|show|start|dispatch|verify|done|fail|block|cancel|update` (start: `--agent`,
 `--escalate`, `--whole-tree --reason`; dispatch: `--agent` (REQUIRED on a launch; a
 `--kind message` inherits the launch's agent), `--kind launch|message`, `--note`;

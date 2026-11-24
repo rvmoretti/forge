@@ -1903,13 +1903,15 @@ function writeAttention(a) {
   const tmp = ATTENTION_FILE + '.' + process.pid + '.tmp'; // hooks of several sessions may write at once
   fs.writeFileSync(tmp, JSON.stringify(a, null, 2) + '\n'); fs.renameSync(tmp, ATTENTION_FILE);
 }
-function setAttention(sid, rec) { const a = readAttention(); a.sessions[sid || 'unknown'] = rec; writeAttention(a); }
+function setAttention(sid, rec) { const a = readAttention(); a.sessions[sid || 'unknown'] = rec; writeAttention(a); attentionChanged(); }
 function clearAttention(sid) {
   if (!fs.existsSync(ATTENTION_FILE)) return;
   const a = readAttention(); const k = sid || 'unknown';
   if (!a.sessions[k]) return;
-  delete a.sessions[k]; writeAttention(a);
+  delete a.sessions[k]; writeAttention(a); attentionChanged();
 }
+// v0.29: the dashboard shows which session waits on you — so a change there redraws it (the page only; never the usage scan)
+function attentionChanged() { if (process.env.FORGE_DEFER_REGEN === '1') return; try { generateDashboard(); } catch (_) { } }
 // v0.26: machine checks in CI — deterministic, zero cost to Forge's own loop. Two classes block a merge (a leaked
 // secret, a critical vulnerable dependency); the rest is report-only and feeds the release's hardening milestone
 // as the `forge-findings` artifact. Forge does not own a project's CI: it reads the workflows, says what is
@@ -2141,6 +2143,122 @@ function newWorkItem(fields) {
   return Object.assign({ title: '', objective: '', milestone: null, deps: [], criteria: [], scope: { allowed: [], forbidden: [] },
     component: null, mock: null, status: 'TODO', attempts: [], verifications: [], history: [], preState: null, startTree: null,
     blockReason: null, cancelReason: null, created: ts(), updated: ts() }, fields);
+}
+
+// ============================================================================
+// v0.29: the dashboard as the place to manage Forge — three pages drawn from statusSnapshot() (the same data the
+// cockpit reads): Needs you, Loop, Project. The dashboard ADVISES on Claude and never drives it: every card says
+// where to act and what to type, and what it offers to copy is built only from Forge's own ids and keys. Text that
+// came from elsewhere (a Claude Code notification, a question's wording) is shown as quoted context, never as the
+// thing to type. It is a file on disk: it reloads itself while "live" is on, and Forge regenerates it on every state
+// change and whenever a Claude Code session starts or stops waiting on you.
+// ============================================================================
+const STAGE_ORDER = ['todo', 'brief', 'cto', 'prepare', 'implement', 'test', 'verify', 'review', 'done', 'blocked'];
+const STAGE_NAME = { todo: 'To do', brief: 'Brief', cto: 'CTO', prepare: 'Prepare', implement: 'Implement', test: 'Test',
+  verify: 'Verify', review: 'Review', done: 'Done', blocked: 'Blocked', cancelled: 'Cancelled' };
+const ORIGIN_COLOR = { plan: '#8a8e9a', split: '#b3660a', review: '#7c4dcc', discovery: '#bb2d2d', human: '#0c8a70', audit: '#4553c4' };
+function copyCmd(cmd) { return `<code class="copyable">${esc(cmd)}</code>`; }
+function sayIt(text) { return `<code class="copyable say">${esc(text)}</code>`; }
+function needsCard(n, snap) {
+  const q = n.kind === 'question' ? (snap.questions || []).find(x => x.id === n.item) : null;
+  if (q) {
+    return `<div class="panel ncard"><h3><span class="nk">Question</span> ${esc(q.id)} <span class="mut">— ${esc(q.title)}</span></h3>
+      <blockquote>${esc(q.question)}</blockquote>
+      ${q.options.length ? `<div class="nopts">${q.options.map(o => `<div class="nopt${o.recommended ? ' rec' : ''}"><b>${esc(o.key)}</b> ${esc(o.label)}${o.recommended ? ' <span class="pill" style="color:var(--done);border:1px solid #17874433">recommended</span>' : ''}
+        <div class="nhow">In the Claude session, type ${sayIt(`${q.id}: ${o.key}`)} · or in a terminal ${copyCmd(`forge question answer ${q.id} --choice ${o.key}`)}</div></div>`).join('')}</div>`
+        : `<div class="nhow">Answer it in the Claude session, or in a terminal: ${copyCmd(`forge question answer ${q.id} --note "<your answer>"`)}</div>`}
+      ${q.since ? `<div class="mut">asked <span data-since="${esc(q.since)}" data-post=" ago"></span></div>` : ''}</div>`;
+  }
+  if (n.kind === 'claude') {
+    const what = n.type === 'permission_prompt' ? 'is asking for a permission — approve or deny it in that terminal'
+      : n.type === 'idle_prompt' ? 'is waiting for your reply in that terminal'
+      : n.type === 'elicitation_dialog' || n.type === 'elicitation_url_dialog' ? 'is asking you something in a dialog in that terminal'
+      : n.type === 'agent_needs_input' ? 'has a worker that needs your input in that terminal' : 'is waiting for you in that terminal';
+    return `<div class="panel ncard claude"><h3><span class="nk">Claude Code</span> session <code>${esc(String(n.session || '').slice(0, 8))}</code> ${esc(what)}</h3>
+      ${n.text ? `<blockquote>${esc(n.text)}</blockquote>` : ''}
+      <div class="mut">The dashboard cannot answer it for you — go to that terminal.${n.since ? ` Waiting <span data-since="${esc(n.since)}" data-post=""></span>.` : ''}</div></div>`;
+  }
+  if (n.kind === 'milestone-review') {
+    return `<div class="panel ncard"><h3><span class="nk">Your review</span> milestone ${esc(n.milestone)}</h3>
+      <div>It is finished. Try it, then tell the Claude session your verdict and any changes. To approve it as it is, type ${sayIt(`approve ${n.milestone}`)}</div></div>`;
+  }
+  if (n.kind === 'hardening-due') {
+    return `<div class="panel ncard"><h3><span class="nk">Release</span> ${esc(n.release)} is ready to be hardened</h3>
+      <div>Every feature milestone is approved. Before it ships, add its hardening milestone: type ${sayIt(`harden release ${n.release}`)} in the Claude session, or in a terminal ${copyCmd(`forge release harden ${n.release}`)}</div></div>`;
+  }
+  if (n.kind === 'audit-triage') {
+    return `<div class="panel ncard"><h3><span class="nk">Audit triage</span> release ${esc(n.release)} — ${esc(n.count)} finding(s)</h3>
+      <div>See them: ${copyCmd(`forge audit list ${n.release}`)} · then decide: ${copyCmd(`forge audit triage ${n.release} --accept floor`)} (and <code>--defer</code> / <code>--dismiss … --reason</code> for the rest)</div></div>`;
+  }
+  return `<div class="panel ncard"><h3><span class="nk">${esc(n.kind)}</span></h3><blockquote>${esc(n.text)}</blockquote><div class="mut">Reply in the Claude session.</div></div>`;
+}
+function cockpitPages(snap) {
+  if (!snap || !snap.schema) return { nav: '', pages: '', css: '', js: '' };
+  const need = snap.needsYou || [];
+  const nav = `<a href="#/needs" data-p="needs">Needs you${need.length ? ` <span class="k warnk">${need.length}</span>` : ''}</a>
+    <a href="#/loop" data-p="loop">Loop <span class="k">${(snap.tasks || []).filter(t => t.status === 'IN_PROGRESS').length || ''}</span></a>
+    <a href="#/project" data-p="project">Project <span class="k">${(snap.milestones || []).length}</span></a>`;
+  const ap = snap.autopilot || {};
+  const needsPage = `<section class="page" data-page="needs" id="needs" hidden>
+  <div class="phead"><h2>Needs you</h2><span class="mut">what Forge and your Claude sessions are waiting on — act where each card says</span></div>
+  ${need.length ? need.map(n => needsCard(n, snap)).join('\n') : '<div class="panel"><h3>Nothing needs you right now.</h3></div>'}
+  <div class="panel"><h3>Autopilot <span class="mut">— ${ap.on ? (ap.stop ? `stopped: ${esc(ap.stop.reason)}` : `running${ap.next ? `, next ${esc(ap.next)}` : ''}`) : 'off'}</span></h3>
+    <div class="nhow">${ap.on ? `Stop it after the current task: ${copyCmd('forge autopilot off --reason "stopped from the dashboard"')}` : `Start it: type ${sayIt('autopilot on')} in the Claude session`}</div>
+    <div class="nhow">Leave a note for the next task's brief: ${copyCmd('forge note add "<your note>"')}${(snap.notes || []).length ? ` · waiting: ${snap.notes.map(x => `<i>${esc(x.text)}</i>`).join(' · ')}` : ''}</div></div>
+  <p class="mut">Commands run in a terminal at the project root (the Claude session knows the full form). Click one to copy it.</p>
+</section>`;
+  const tasks = snap.tasks || [];
+  const per = {}; for (const t of tasks) per[t.stage] = (per[t.stage] || 0) + 1;
+  const stages = STAGE_ORDER.filter(s => per[s] || ['todo', 'implement', 'verify', 'review', 'done'].includes(s));
+  const live = {}; for (const t of (snap.inProgress || [])) live[t.id] = t.worker;
+  const loopPage = `<section class="page" data-page="loop" id="loop" hidden>
+  <div class="phead"><h2>Loop</h2><span class="mut">${snap.milestone ? `milestone ${esc(snap.milestone.id)} — ${esc(snap.milestone.counts.DONE || 0)}/${esc(snap.milestone.total)} done` : 'no active milestone'}${snap.verify && snap.verify.item ? ` · verify running on ${esc(snap.verify.item)}` : ''}</span></div>
+  <div class="lpipe">${stages.map(s => `<div class="lst${per[s] && !['todo', 'done'].includes(s) ? ' hot' : ''}"><b>${esc(STAGE_NAME[s] || s)}</b><span class="num">${per[s] || 0}</span></div>`).join('<span class="larr">→</span>')}</div>
+  <div class="panel"><table class="ltab"><thead><tr><th>Step</th><th>Task</th><th>Worker</th><th>Criteria</th><th>Starts</th><th>Last verify</th><th>Origin</th></tr></thead><tbody>
+  ${tasks.map(t => `<tr class="s-${esc(t.stage)}"><td>${esc(STAGE_NAME[t.stage] || t.stage)}</td><td><code>${esc(t.id)}</code> ${esc(t.title)}${t.blockReason ? `<div class="mut">${esc(t.blockReason)}</div>` : ''}</td>
+    <td>${live[t.id] ? `${esc(live[t.id].agent || 'worker')} <span class="mut" data-since="${esc(live[t.id].since)}" data-post=""></span>` : ''}</td>
+    <td class="num">${esc(t.criteria)}</td><td class="num">${esc(t.starts)}${t.failedAttempts ? ` <span class="warnk">(${esc(t.failedAttempts)} failed)</span>` : ''}</td>
+    <td>${t.lastVerify ? (t.lastVerify.passed ? '✓' : '✗') : ''}</td><td>${t.origin === 'plan' ? '' : esc(t.origin)}</td></tr>`).join('\n')}
+  </tbody></table></div>
+</section>`;
+  const ms = snap.milestones || [];
+  const total = ms.reduce((n, m) => n + m.total, 0), planned = ms.reduce((n, m) => n + (m.origins.plan || 0), 0);
+  const origins = Object.keys(ORIGIN_COLOR);
+  const projectPage = `<section class="page" data-page="project" id="project" hidden>
+  <div class="phead"><h2>Project</h2><span class="mut">${esc(ms.length)} milestones · ${esc(total)} tasks · ${esc(total - planned)} added after planning (${total ? Math.round(100 * (total - planned) / total) : 0}%) · ${esc(ms.filter(m => m.approved).length)} approved</span></div>
+  <div class="panel"><div class="plegend">${origins.map(o => `<span><i style="background:${ORIGIN_COLOR[o]}"></i>${esc(o)}</span>`).join('')}</div>
+  ${ms.map(m => `<div class="prow${snap.milestone && snap.milestone.id === m.id ? ' cur' : ''}"><div class="plab"><b>${m.approved ? '✓ ' : ''}${esc(m.id)}</b>${m.release ? ` <span class="mut">${esc(m.release)}</span>` : ''}${m.hardening ? ' <span class="pill" style="color:var(--progc);border:1px solid #4553c433">hardening</span>' : ''}<div class="mut">${esc(m.name || '')}</div></div>
+    <div class="pbar">${origins.filter(o => m.origins[o]).map(o => `<i title="${esc(o)} ${esc(m.origins[o])}" style="flex:${m.origins[o]};background:${ORIGIN_COLOR[o]}"></i>`).join('')}</div>
+    <div class="num pv">${esc(m.counts.DONE || 0)}/${esc(m.total)}</div></div>`).join('\n')}
+  </div>
+</section>`;
+  const css = `.ncard blockquote{border-left:3px solid var(--line);padding:2px 0 2px 10px;color:var(--ink2)}
+.ncard.claude{border-color:#4553c455}.nk{font-size:10px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--accent);margin-right:6px}
+.nopts{display:flex;flex-direction:column;gap:8px}.nopt{padding:8px 10px;border:1px solid var(--line);border-radius:8px}.nopt.rec{border-color:#17874455;background:#17874408}
+.nhow{font-size:12.5px;color:var(--ink2);margin-top:4px}code.say{background:#d4551a10}
+.lpipe{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:0 0 12px}.lst{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:8px 12px;display:flex;flex-direction:column;min-width:84px}
+.lst.hot{border-color:var(--progc)}.lst span{font-size:20px;font-weight:700}.larr{color:var(--ink3)}
+.ltab{width:100%;border-collapse:collapse;font-size:13px}.ltab th,.ltab td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line2);vertical-align:top}
+.ltab tr.s-done td{color:var(--ink3)}.ltab tr.s-implement td:first-child,.ltab tr.s-verify td:first-child,.ltab tr.s-review td:first-child{color:var(--progc);font-weight:700}
+.plegend{display:flex;flex-wrap:wrap;gap:12px;font-size:12px}.plegend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:4px}
+.prow{display:grid;grid-template-columns:minmax(0,1.2fr) minmax(0,2fr) 64px;gap:10px;align-items:center;padding:6px 0;border-bottom:1px solid var(--line2)}
+.prow.cur{background:#4553c40a}.pbar{display:flex;height:14px;border-radius:4px;overflow:hidden;background:var(--line2)}.pv{text-align:right}
+.livebox{display:flex;align-items:center;gap:6px;margin-top:6px;cursor:pointer}
+@media (max-width:700px){.prow{grid-template-columns:1fr}.ltab th:nth-child(n+4),.ltab td:nth-child(n+4){display:none}}`;
+  // live: reload every 10 s while the tab is visible, keeping the page and the scroll; off is remembered
+  const js = `(function(){
+  var box=document.getElementById('forgeLive'); if(!box) return;
+  var key='forgeLive', on=true; try{ on=localStorage.getItem(key)!=='off'; }catch(_){}
+  box.checked=on;
+  box.addEventListener('change',function(){ try{ localStorage.setItem(key, box.checked?'on':'off'); }catch(_){} });
+  try{ var y=sessionStorage.getItem('forgeY:'+location.hash); if(y) setTimeout(function(){ window.scrollTo(0,+y); },60); }catch(_){}
+  setInterval(function(){
+    if(!box.checked||document.visibilityState!=='visible') return;
+    try{ sessionStorage.setItem('forgeY:'+location.hash, String(window.scrollY)); }catch(_){}
+    location.reload();
+  },10000);
+})();`;
+  return { nav, pages: [needsPage, loopPage, projectPage].join('\n'), css, js };
 }
 
 // v0.25: one compact, machine-readable picture of the project for the dashboard, the cockpit and scripts
@@ -3353,6 +3471,7 @@ function generateDashboard() {
   } catch (_) { }
   const specCount = (specRows.match(/<tr>/g) || []).length;
 
+  const CP = (() => { try { return cockpitPages(statusSnapshot()); } catch (_) { return { nav: '', pages: '', css: '', js: '' }; } })(); // v0.29
   const html = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Forge — ${esc(cfg.project)}</title>
@@ -3707,6 +3826,7 @@ tbody tr:hover{background:#faf9f5}
   .pdiv{display:none}
 }
 @media (prefers-reduced-motion:reduce){html{scroll-behavior:auto}*{transition:none!important}}
+${CP.css}
 </style></head><body>
 <div class="shell">
 <aside>
@@ -3717,6 +3837,7 @@ tbody tr:hover{background:#faf9f5}
   </div>
   <nav id="snav">
     <a href="#/overview" data-p="overview">Overview</a>
+    ${CP.nav}
     <a href="#/plan" data-p="plan">Plan <span class="k">${counts.DONE}/${total}</span></a>
     <a href="#/architecture" data-p="architecture">Architecture <span class="k">${archCount ? (archDraft ? `${archCount} · ${archDraft} draft` : archCount) : '—'}</span></a>
     <a href="#/screens" data-p="screens">Screens &amp; mockups <span class="k">${screenCount || '—'}</span></a>
@@ -3727,7 +3848,7 @@ tbody tr:hover{background:#faf9f5}
     <a href="#/commands" data-p="commands">Commands</a>
     <a href="#/system" data-p="system">System${standardsAll && standardsMet < standardsAll ? ` <span class="k warnk">upgrade ${standardsMet}/${standardsAll}</span>` : ''}</a>
   </nav>
-  <div class="sidefoot"><b>Generated projection.</b><br>State wins — never edit this file.<br>regenerated <span data-since="${new Date().toISOString()}" data-post=" ago">just now</span> · ${new Date().toISOString().slice(0, 16).replace('T', ' ')} UTC</div>
+  <div class="sidefoot">${CP.js ? '<label class="livebox"><input type="checkbox" id="forgeLive"> live — reload every 10 s</label>' : ''}<b>Generated projection.</b><br>State wins — never edit this file.<br>regenerated <span data-since="${new Date().toISOString()}" data-post=" ago">just now</span> · ${new Date().toISOString().slice(0, 16).replace('T', ' ')} UTC</div>
 </aside>
 <main><div class="wrap">
 
@@ -3741,6 +3862,8 @@ tbody tr:hover{background:#faf9f5}
   <div class="ovgrid">${nowBlock}${releaseBlock}</div>
   ${railBlock}
 </section>
+
+${CP.pages}
 
 <section class="page" data-page="plan" id="plan" hidden>
   <div class="phead"><h2>Plan</h2><span class="mut">releases → milestones → tasks, in the order they are built · click any task for its full story</span></div>
@@ -4196,6 +4319,7 @@ tbody tr:hover{background:#faf9f5}
   });
 })();
 </script>
+<script>${CP.js}</script>
 </body></html>`;
 
   fs.mkdirSync(FORGE, { recursive: true });

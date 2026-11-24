@@ -2930,8 +2930,9 @@ test('v0.22.2 + v0.24: every new project gets the verification tiers from Forge\
 });
 
 test('v0.22.2: a slow verify.* lane is reported as a gate-tier candidate by preflight, doctor and the verify-tiers upgrade step — with the exact move; fixed once moved', () => {
-  // the fixture's verify.test takes a few ms; a 10 ms limit makes it "slow" without waiting
-  forge(['config', 'set', 'options.slowLaneSec', '0.01']);
+  // the fixture's verify.test takes a few ms — on a fast machine sometimes under 10 ms, so the limit sits below
+  // the smallest time a recorded run can have (ms > 0, asserted below): "slow" every time, without waiting
+  forge(['config', 'set', 'options.slowLaneSec', '0.0001']);
   forge(['config', 'set', 'verify.e2e', 'node -e "process.exit(0)"']);       // named like a slow suite, no run yet
   // no recorded run of verify.test yet → not reported by timing; e2e is reported by name
   let r = forge(['upgrade']);
@@ -2944,7 +2945,7 @@ test('v0.22.2: a slow verify.* lane is reported as a gate-tier candidate by pref
   const v = work().items.S1.verifications[0];
   assert.ok(v.results.find(x => x.kind === 'project:test').ms > 0);
   r = forge(['preflight']);
-  assert.match(r.out, /WARN  verification tiers: .*verify\.test averages \d+ s over its last 1 run\(s\) \(limit options\.slowLaneSec 0\.01\) — it runs on every task: forge config set gate\.test "node -e \\"process\.exit\(0\)\\"" && forge config unset verify\.test/);
+  assert.match(r.out, /WARN  verification tiers: .*verify\.test averages \d+ s over its last 1 run\(s\) \(limit options\.slowLaneSec 0\.0001\) — it runs on every task: forge config set gate\.test "node -e \\"process\.exit\(0\)\\"" && forge config unset verify\.test/);
   r = forge(['doctor']);
   assert.match(r.out, /verification tiers: .*verify\.test averages/);
   r = forge(['upgrade']);
