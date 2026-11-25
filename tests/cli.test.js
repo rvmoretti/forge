@@ -2893,7 +2893,7 @@ test('v0.22.2 + v0.24: every new project gets the verification tiers from Forge\
   assert.deepStrictEqual(raw0.gate, {});
   assert.deepStrictEqual(raw0.options, { graphify: 'unset', web: 'unset' });
   const c0 = effectiveCfg(t0);
-  assert.strictEqual(c0.options.fullVerifyEvery, 3);
+  assert.strictEqual(c0.options.fullVerifyEvery, 0); // v0.31: the full suite runs once per milestone
   assert.strictEqual(c0.options.redFirstTimeoutSec, 120);
   assert.strictEqual(c0.options.slowLaneSec, 120);
   // the machine defaults file: written through config --global, options.* only
@@ -2918,7 +2918,7 @@ test('v0.22.2 + v0.24: every new project gets the verification tiers from Forge\
   assert.strictEqual(c2.options.concurrency, 2);
   assert.strictEqual(c2.options.models.explorer, 'claude-sonnet-5-5');
   assert.strictEqual(c2.options.models.implementer, 'claude-sonnet-5-5');
-  assert.strictEqual(c2.options.fullVerifyEvery, 3);
+  assert.strictEqual(c2.options.fullVerifyEvery, 0);
   // unset --global: the project follows Forge's default again, at once (a live layer)
   r = forge(['config', 'unset', 'options.concurrency', '--global'], { env: { FORGE_DEFAULTS: defs } });
   assert.strictEqual(r.code, 0, r.out);
@@ -3451,18 +3451,18 @@ test('v0.24: a new project stores only its own choices; show names each value\'s
   assert.strictEqual(raw.defaults.version, JSON.parse(fs.readFileSync(path.join(path.dirname(CLI), '..', '.claude-plugin', 'plugin.json'), 'utf8')).version);
   assert.strictEqual(raw.options.fullVerifyEvery, undefined);
   let r = forge(['config', 'show']);
-  assert.match(r.out, /options\.fullVerifyEvery\s+3\s+Forge [\d.]+ default/);
+  assert.match(r.out, /options\.fullVerifyEvery\s+0\s+Forge [\d.]+ default/);
   assert.match(r.out, /options\.graphify\s+skip\s+this project/);
   r = forge(['config', 'set', 'options.fullVerifyEvery', '10', '--reason', 'suite takes 10 min']);
-  assert.match(r.out, /recommended: 3\)\. Back to the recommendation: forge config reset options\.fullVerifyEvery/);
+  assert.match(r.out, /recommended: 0\)\. Back to the recommendation: forge config reset options\.fullVerifyEvery/);
   assert.deepStrictEqual(Object.assign({}, rawCfg().provenance['options.fullVerifyEvery'], { ts: 'x' }), { origin: 'set', ts: 'x', reason: 'suite takes 10 min' });
   r = forge(['config', 'show']);
-  assert.match(r.out, /options\.fullVerifyEvery\s+10\s+this project\s+← recommended: 3/);
+  assert.match(r.out, /options\.fullVerifyEvery\s+10\s+this project\s+← recommended: 0/);
   assert.match(r.out, /1 value\(s\) differ from the recommendation/);
   assert.strictEqual(JSON.parse(forge(['config', 'get', 'options.fullVerifyEvery', '--own']).out), '10');
   // reset: back to the layers
   r = forge(['config', 'reset', 'options.fullVerifyEvery']);
-  assert.strictEqual(r.code, 0, r.out); assert.match(r.out, /now 3 \(Forge [\d.]+ default\)/);
+  assert.strictEqual(r.code, 0, r.out); assert.match(r.out, /now 0 \(Forge [\d.]+ default\)/);
   assert.strictEqual(rawCfg().options.fullVerifyEvery, undefined); assert.strictEqual(rawCfg().provenance['options.fullVerifyEvery'], undefined);
   assert.notStrictEqual(forge(['config', 'reset', 'options.fullVerifyEvery']).code, 0);
   // Forge-managed keys are not set by hand
@@ -3479,7 +3479,7 @@ test('v0.24: reset --all drops every project value that differs from the recomme
   forge(['config', 'set', 'options.concurrency', '4']);           // equal to the default: not "differing"
   const r = forge(['config', 'reset', '--all', '--reason', 'follow Forge']);
   assert.strictEqual(r.code, 0, r.out);
-  assert.match(r.out, /Reset 2 value\(s\)/); assert.match(r.out, /options\.fullVerifyEvery = 3/); assert.match(r.out, /options\.models\.reviewer = claude-sonnet-5-5/);
+  assert.match(r.out, /Reset 2 value\(s\)/); assert.match(r.out, /options\.fullVerifyEvery = 0/); assert.match(r.out, /options\.models\.reviewer = claude-sonnet-5-5/);
   const raw = rawCfg();
   assert.strictEqual(raw.options.fullVerifyEvery, undefined); assert.strictEqual(raw.options.models, undefined);
   assert.strictEqual(raw.options.concurrency, '4'); assert.strictEqual(raw.options.graphify, 'skip');
@@ -3514,7 +3514,7 @@ test('v0.24: a project created before v0.24 is read as it is until it adopts; ad
   assert.match(fs.readFileSync(path.join(dir, 'forge', 'decisions.md'), 'utf8'), /adopt the layered defaults/);
   assert.match(forge(['config', 'adopt']).out, /Already layered/);
   up = forge(['upgrade']).out;
-  assert.match(up, /Your own values that differ from the recommendation/); assert.match(up, /options\.fullVerifyEvery = 10 \(this project\) · recommended 3/);
+  assert.match(up, /Your own values that differ from the recommendation/); assert.match(up, /options\.fullVerifyEvery = 10 \(this project\) · recommended 0/);
 });
 
 test('v0.24: a profile applies at the milestone\'s first task start, is recorded on the milestone, and the project\'s own values win over it', () => {

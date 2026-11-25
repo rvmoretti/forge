@@ -206,7 +206,20 @@ own window.
    worker is never resumed through chat; that path is retry-by-fresh-brief,
    nothing else.
 4. **Verify**: `forge task verify <id>` — machine evidence, not the worker's
-   claim. v0.23: each check runs once per verify (the baseline comparison reuses the
+   claim. **v0.31 testing budget** (new projects; others: `forge config adopt`): run
+   `task verify` as a background command (Bash `run_in_background`) and brief or dispatch
+   the next task while it runs — `task done` refuses while it is still running and closes
+   on its result. A task closes on its own checks: the quick lanes (at once,
+   `options.parallelChecks`), its criteria, the unit tests its change affects. Never the
+   full suite inside a task (`options.fullVerifyEvery 0`, high-risk included). The full
+   suite runs once per milestone: by itself in the background when the last task closes,
+   while the owner reviews the preview — do not wait for it, and do not run it before the
+   demo; `milestone ship` needs it green on the code being shipped (`options.gateAt ship`;
+   a review fix after it means another run, started by itself at approve). A red run: fix
+   it, and the next run re-runs only what failed. A check that fails, then passes on one
+   re-run is recorded as flaky (`options.flakyRerun`) — fix it if it fails again in the full
+   run. CI is for the milestone PR and the release PR, never for iterating on fixes.
+   v0.23: each check runs once per verify (the baseline comparison reuses the
    lanes just run); a criterion that only runs part of the e2e suite is covered by the
    e2e gate lane when that lane ran and passed in the same verify; after a failed full
    verify the next verifies re-run only the failed gate lanes (Playwright with

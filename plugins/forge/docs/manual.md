@@ -435,6 +435,26 @@ Everything a view needs, as data, read-only, with no tokens spent:
   your next prompt, a main-thread tool call, or the session ending. A subagent's tool call does not
   clear it.
 
+## The testing budget (v0.31)
+
+New projects get it; an existing project takes it with `forge config adopt`.
+
+- **A task closes on its own checks:** the quick lanes, its criteria, the unit tests its change affects. No full suite inside a task (`options.fullVerifyEvery 0`, high-risk tasks included).
+- **The quick lanes run at once** (`options.parallelChecks`): a verify waits for the slowest lane, not the sum. Criteria and gate lanes stay one at a time (they share the database and the app server).
+- **Verify without waiting.** Run `task verify` as a background command and brief the next task meanwhile; `task done` refuses while that verify is still running.
+- **The full suite runs once per milestone, while you review.** It starts by itself in the background when the last task closes (log: `forge/state/gate-<M>.log`), again after approve if review fixes changed the code, and `milestone ship` refuses until it is green on the code being shipped (`options.gateAt ship`; `--skip-gate --reason` to ship anyway). `approve` no longer needs it. `forge milestone verify <M> --background` starts it by hand.
+- **A red full run** is fixed, and the next run re-runs only what failed (Playwright: the failed spec files); that pass counts as the full run. `--all-lanes` runs everything.
+- **One re-run for a flaky check** (`options.flakyRerun`): in a task verify, a failed criterion or gate lane runs once more; a pass is recorded as flaky on the result. Fix it if it fails again in the full run. Workers are told the same.
+- **`forge clock`** prints the time spent waiting on tests next to everything else, for the session and for the workers.
+
+## Tests run when they can find something (v0.30)
+
+- **Evidence by content.** A verify records the code it tested by content (git's tree hash of the working tree, Forge's own files and test output left out). `task done` refuses when the code changed since — including a second edit of a file that was already changed, which the file-list check missed before.
+- **Not again on the same code.** A check that passed on exactly the same code in the last 12 hours (`options.reuseHours`) is not run again: a repeated verify, and the milestone gate right after the last task's full verify. Only runs that left the code as they found it count. `--fresh` runs everything; `options.reuseResults off` turns it off.
+- **Affected tests between full runs** (new projects; `options.affectedTests on` to adopt). Off a full verify, a Vitest or Jest fast lane runs only the tests the change affects (`vitest related` / `jest --findRelatedTests`). The whole lane runs at every full verify and at the milestone gate, which approval requires, so no test is skipped before approval. Whole lane when the change touches package, lock, config, setup, env or non-code files, or deletes a file. Needs gate lanes and `options.fullVerifyEvery`. `affected.<lane>` sets the command (`{files}`) or `off`.
+- **Task pushes that do not start CI.** `options.push auto` (default): a task commit is pushed as it closes only when no workflow runs on pushes to the milestone branch; otherwise it stays local and `forge milestone ship` pushes the milestone once. `task` / `milestone` force either. `forge ci runs` shows what a milestone costs in workflow runs and flags a workflow that runs twice at ship (push and pull request) or again after the merge.
+- **e2e harness.** Preflight names what it can see in `playwright.config.*`: e2e against the dev server, no saved sign-in. The testing pack says how to fix both and to resolve the stack's environment once.
+
 ## The dashboard as the place to manage Forge (v0.29)
 
 `forge/dashboard.html` has three pages built from the same snapshot as the cockpit (`status --json`):
@@ -624,7 +644,7 @@ and `forge trace --refusals` (flight recorder: every CLI call + hook decision, v
 
 ## CLI reference (run as `node <plugin>/bin/forge.js <cmd>` from project root)
 
-`release harden <R> [--tracks a,b] [--force]` (v0.27) · `audit list <R> [--json]|triage <R> --accept <keys>|floor --defer <keys> --dismiss <keys> --reason "…" [--over-cap]` (v0.27) · `release tag <R> [--skip-hardening --reason]` · `ci checks [--json] [--write [--release-branch <b>] [--force]]` (v0.26) · `status [--json]` (v0.25; the dashboard's Needs you / Loop / Project pages, v0.29) · `question list [--json]|answer <id> --choice <key> [--note]` (v0.25) · `note add "…" [--for <id>|next]|list [--all] [--json]|drop <n>` (v0.25) · `trace [--json] [--since <iso>]` (v0.25) · `init [--profile fast|thorough]` · `config get [--own]|set [--reason]|unset|reset <key>|--all|show|adopt [--dry-run]|profile [fast|thorough|none] [--clear] [--now --reason]` (v0.24) · `defect add|list|report` (v0.24) · `preflight [--full]` ·
+`release harden <R> [--tracks a,b] [--force]` (v0.27) · `audit list <R> [--json]|triage <R> --accept <keys>|floor --defer <keys> --dismiss <keys> --reason "…" [--over-cap]` (v0.27) · `release tag <R> [--skip-hardening --reason]` · `ci checks [--json] [--write [--release-branch <b>] [--force]]` (v0.26) · `ci runs [--json]` (v0.30) · `milestone verify <M> --background` (v0.31) · `task verify <id> --fresh` (v0.30) · `status [--json]` (v0.25; the dashboard's Needs you / Loop / Project pages, v0.29) · `question list [--json]|answer <id> --choice <key> [--note]` (v0.25) · `note add "…" [--for <id>|next]|list [--all] [--json]|drop <n>` (v0.25) · `trace [--json] [--since <iso>]` (v0.25) · `init [--profile fast|thorough]` · `config get [--own]|set [--reason]|unset|reset <key>|--all|show|adopt [--dry-run]|profile [fast|thorough|none] [--clear] [--now --reason]` (v0.24) · `defect add|list|report` (v0.24) · `preflight [--full]` ·
 `task add|list|show|start|dispatch|verify|done|fail|block|cancel|update` (start: `--agent`,
 `--escalate`, `--whole-tree --reason`; dispatch: `--agent` (REQUIRED on a launch; a
 `--kind message` inherits the launch's agent), `--kind launch|message`, `--note`;

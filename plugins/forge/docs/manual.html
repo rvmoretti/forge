@@ -940,6 +940,14 @@ claude</span>
       <tr><td><code>config show · reset &lt;key&gt; · reset --all · adopt [--dry-run]</code></td><td>v0.24: every option with the layer it comes from; drop your own value(s) and follow the recommendation; move a project created before v0.24 onto the layers (preview first).</td></tr>
       <tr><td><code>config profile [fast|thorough|none] [--clear] [--now --reason]</code></td><td>v0.24: the speed-vs-validation trade-offs in one choice, applied at the next milestone's first task start (<code>--now --reason</code> mid-milestone; <code>--clear</code> needs both). Per milestone, before it starts: <code>milestone update &lt;M&gt; --profile fast|thorough|none|project</code>.</td></tr>
       <tr><td><code>defect add "what" --milestone|--item --found … · list · report</code></td><td>v0.24: record what got past Forge (found at milestone testing, staging or production) and compare milestones and profiles on it.</td></tr>
+      <tr><td><code>status --json</code></td><td>v0.25: one machine-readable snapshot (what needs you, tasks by step, milestones, switches). The cockpit and the dashboard read it; it takes no lock and leaves no trace.</td></tr>
+      <tr><td><code>task block &lt;id&gt; --question "…" --option a="…" --option b="…" --recommend a</code></td><td>v0.25: park a task on a question for you, with its options and the CTO's recommendation.</td></tr>
+      <tr><td><code>question list [--json] · answer &lt;id&gt; --choice &lt;key&gt; [--note]</code></td><td>v0.25: the open questions; your answer resumes the task.</td></tr>
+      <tr><td><code>note add "…" [--for &lt;id&gt;] · list · drop &lt;n&gt;</code></td><td>v0.25: a note from you for the next task's brief (or one task's).</td></tr>
+      <tr><td><code>trace --json [--since &lt;iso&gt;]</code></td><td>v0.25: the event log as JSON lines.</td></tr>
+      <tr><td><code>ci checks [--json] [--write [--release-branch &lt;b&gt;]]</code></td><td>v0.26: which machine checks CI runs; writes the missing ones as their own workflow.</td></tr>
+      <tr><td><code>release harden &lt;R&gt; [--tracks a,b]</code></td><td>v0.27: add the release's hardening milestone — one read-only audit per track.</td></tr>
+      <tr><td><code>audit list &lt;R&gt; · triage &lt;R&gt; --accept &lt;keys&gt;|floor --defer … --dismiss … --reason</code></td><td>v0.27: the audit findings and your decision on each; accepted ones become fix tasks.</td></tr>
       <tr><td><code>preflight [--full]</code></td><td>Readiness checks; <code>--full</code> also executes the verify commands.</td></tr>
       <tr><td><code>task add · list · show · start · dispatch · verify · done · fail · block · cancel · update</code></td><td>The work-item lifecycle. <code>start</code> refuses an item with no <code>--allowed</code> file scope (deliberate: <code>--whole-tree --reason</code>) and enforces the concurrency cap; <code>dispatch --agent</code> records the handoff to a worker in state (<code>--kind message</code> audits a mid-flight message); <code>verify --artifact &lt;file&gt;</code> attaches evidence (screenshots); <code>fail --note</code> requires a diagnosis; <code>update</code> is the audited way to change an item.</td></tr>
       <tr><td><code>brief &lt;id&gt;</code></td><td>Generate the worker-brief skeleton for an item.</td></tr>
@@ -990,10 +998,69 @@ claude</span>
       <tr><td>Opus design note before high-risk work (<code>architectPrepass</code>)</td><td>off</td><td>high-risk</td></tr>
       <tr><td>Reviewer model (<code>models.reviewer</code>)</td><td>Sonnet</td><td>Opus</td></tr>
       <tr><td>Red-first checks at task start (<code>redFirst</code>)</td><td>smart</td><td>all</td></tr>
+      <tr><td>Audit findings accepted with <code>--accept floor</code> (<code>hardeningFloor</code>, v0.27)</td><td>high and up</td><td>medium and up</td></tr>
+      <tr><td>Most fix tasks per hardening milestone (<code>hardeningCap</code>, v0.27)</td><td>10</td><td>25</td></tr>
     </tbody>
   </table></div>
   <p>Compare the two on <b>defects</b> (<code>forge defect report</code>), not on first pass alone:
   more validation catches more, and each catch is a task that did not pass first time.</p>
+
+  <h3>Questions, notes and what needs you (v0.25)</h3>
+  <p>When the CTO needs a product answer it blocks the task with the <b>options and its recommendation</b>
+  (<code>task block --question … --option … --recommend</code>); you answer with one word in the session, or
+  <code>forge question answer &lt;id&gt; --choice &lt;key&gt;</code>. Leave a note for the next task without
+  interrupting anything: <code>forge note add "…"</code> — it lands in that task's brief. Forge also records
+  which Claude Code session is waiting on you (a permission prompt, a reply), so the dashboard and the cockpit
+  can tell you where to go.</p>
+
+  <h3>Machine checks in CI (v0.26)</h3>
+  <p><code>forge ci checks</code> reports whether CI scans for leaked secrets and critical vulnerable
+  dependencies (both block a merge) and uploads <b>findings</b> (dead code, legacy web patterns) for the
+  release's hardening milestone. <code>--write</code> adds only the missing ones, in their own
+  <code>.github/workflows/forge-checks.yml</code>; your workflows are never edited.</p>
+
+  <h3>Every release ends hardened (v0.27)</h3>
+  <p>When every feature milestone of a release is approved, Forge says so. <code>forge release harden
+  &lt;R&gt;</code> adds the release's last milestone: one <b>read-only audit</b> per track — cleanup, security
+  (production configuration included), modern web, SEO and AI visibility, UI. Each writes its findings; you
+  decide (<code>forge audit list / triage</code>): accepted findings become fix tasks, cleanup first; deferred
+  and dismissed ones are recorded. The milestone cannot be approved with undecided findings, and
+  <code>release tag</code> refuses a release without one — never skipped on the first release, which always
+  gets its security audit.</p>
+
+  <h3>The cockpit inside Claude Code (v0.28)</h3>
+  <p>On Claude Code 2.1.287 or newer, Forge draws a <b>band above the prompt</b> (milestone, work in progress,
+  what needs you) and opens a pane with <code>/forge</code>: <b>Needs you</b> (question options as buttons),
+  <b>Tasks</b> by step, <b>Workers</b> (each one's recent tool calls, tokens and model), <b>Project</b>,
+  <b>Config</b> (switches toggle). <code>/forge note &lt;text&gt;</code> and <code>/forge status</code> answer
+  for you only. Every button is one <code>forge</code> command; nothing reaches Claude, and a test holds it to
+  that. Turn it off with the plugin's <code>cockpit</code> setting; older Claude Code ignores it.</p>
+
+  <h3>The testing budget (v0.31)</h3>
+  <p>A task closes on its own checks: the quick lanes (run at once), its criteria and the unit tests its change
+  affects — never the full suite. Run <code>task verify</code> in the background and brief the next task;
+  <code>task done</code> waits for its result. The full suite runs <b>once per milestone, while you review</b>: it
+  starts by itself in the background when the last task closes, and <code>milestone ship</code> — no longer
+  <code>approve</code> — needs it green on the code being shipped. A red run re-runs only what failed. A check that
+  fails, then passes on one re-run, is recorded as flaky. <code>forge clock</code> shows the time spent waiting on
+  tests. New projects get it; existing ones: <code>forge config adopt</code>.</p>
+
+  <h3>Tests run when they can find something (v0.30)</h3>
+  <p>A verify records the code it tested <b>by content</b>; <code>task done</code> refuses when it changed since,
+  including a second edit of an already-changed file. A check that passed on exactly the same code in the last
+  12 hours is <b>not run again</b> (a repeated verify, the gate right after the last full verify); <code>--fresh</code>
+  runs everything. Between full runs, a Vitest or Jest fast lane runs only the <b>affected tests</b> (new projects;
+  <code>options.affectedTests on</code>); the whole lane runs at every full verify and at the gate. With a workflow on
+  milestone pushes, task commits <b>stay local</b> and <code>forge milestone ship</code> pushes once
+  (<code>options.push</code>); <code>forge ci runs</code> shows what a milestone costs in workflow runs. Preflight names
+  e2e harness costs it can see: the dev server, no saved sign-in.</p>
+
+  <h3>The dashboard as the place to manage Forge (v0.29)</h3>
+  <p>The dashboard has three more pages: <b>Needs you</b> — each card says where to act and what to type
+  (for a question, the session phrase and the command for every option); <b>Loop</b> — the active
+  milestone's tasks at their step; <b>Project</b> — every milestone and how it grew. It advises and never
+  drives Claude: what it offers to copy is built only from Forge's own ids. <b>live</b> (side menu) reloads
+  it every 10 seconds while you look at it.</p>
 
   <h3>What lives in your project</h3>
   <div class="tblwrap"><table>

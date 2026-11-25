@@ -1426,7 +1426,7 @@ function autopilotDecision(w, cfg, run) {
   for (const m of milestoneSeq(w)) {
     if ((((w.gates || {})[m]) || {}).approved) continue;
     if (milestoneComplete(w, m)) return { go: false, kind: 'gate', reason: `milestone ${L.milestone[m] ? L.milestone[m] + ' ' : ''}${m} is complete and waiting for your testing`,
-      ask: `${Object.keys(gateCmds(cfg)).length ? `Run the gate verification first (forge milestone verify ${m}) and the security pass; then t` : 'T'}ell the user the milestone is ready to test: how to run or see it, what to try, and what you need back (approve / change requests). Do not start the next milestone.` };
+      ask: `${Object.keys(gateCmds(cfg)).length ? (gateAt(cfg) === 'ship' ? `Do the security pass (the full run goes in the background by itself — forge milestone verify ${m} --background if forge status shows none; do not wait for it); then t` : `Run the gate verification first (forge milestone verify ${m}) and the security pass; then t`) : 'T'}ell the user the milestone is ready to test: how to run or see it, what to try, and what you need back (approve / change requests). Do not start the next milestone.` };
     break;
   }
   const actM = activeMilestone(w);
@@ -1524,13 +1524,20 @@ const CONFIG_DOCS = [
   { key: 'specDir', def: '—', group: 'Project', what: 'Folder holding the spec layers; the Specs page lists it and briefs cite it.', change: 'forge config set specDir spec', why: 'Point it at the folder holding the application spec, so briefs and the Specs page find it.', risk: 'none' },
   { key: 'verify.*', def: '—', group: 'Verification', what: 'Commands every task verification runs (test, lint, typecheck, security, build, e2e …). A task is DONE only when all pass on the current tree.', change: 'forge config set verify.test "npm test"', why: 'Without them nothing is machine-checked; set at least test and lint before building.', risk: 'none' },
   { key: 'gate.*', def: '—', group: 'Verification', what: 'The slow lanes (the whole e2e suite, the database suite). Not run on every task: at the milestone gate (forge milestone verify), on forge task verify --full, after a high-risk task, and every options.fullVerifyEvery-th task. The baseline covers them too.', change: 'forge config set gate.e2e "npm run test:e2e"   ·   forge config unset verify.e2e', why: 'A suite that takes minutes ran on every task — most of a session\'s wall-clock — and failed on specs that were not the task\'s own. Keep verify.* fast; let CI run the suite on every push.', risk: 'low' },
-  { key: 'options.fullVerifyEvery', def: '0 (gate only)', group: 'Verification', what: 'Run the gate lanes inside task verify every Nth task closed in the milestone (plus after any high-risk task).', change: 'forge config set options.fullVerifyEvery 3', why: 'Catch a cross-task regression before the gate without paying the suite on every task. Lower it for tightly coupled milestones.', risk: 'low' },
+  { key: 'options.fullVerifyEvery', def: '0 (gate only; v0.22–v0.30 projects: 3)', group: 'Verification', what: 'Run the gate lanes inside task verify every Nth task closed in the milestone (plus after any high-risk task).', change: 'forge config set options.fullVerifyEvery 3', why: 'Catch a cross-task regression before the gate without paying the suite on every task. Lower it for tightly coupled milestones.', risk: 'low' },
   { key: 'options.fullVerifyHighRisk', def: 'true', group: 'Verification', what: 'A task tagged auth/data/payments/migrations/security runs the gate lanes in its verify.', change: 'forge config set options.fullVerifyHighRisk false', why: 'Turn off only when the gate lanes are irrelevant to the risky domains.', risk: 'low' },
   { key: 'options.slowLaneSec', def: '120', group: 'Verification', what: 'A verify.* lane averaging more than this many seconds over its last runs is reported (preflight, doctor, forge upgrade step verify-tiers) as belonging in gate.*.', change: 'forge config set options.slowLaneSec 60', why: 'Tighten when tasks are small and even a one-minute suite per task is too much; loosen for a slow but essential unit suite.', risk: 'none' },
   { key: 'options.redFirstTimeoutSec', def: '120', group: 'Verification', what: 'Cap for each criterion check run at task start (the red-first proof). A check cut by the cap is recorded as not run, never as green.', change: 'forge config set options.redFirstTimeoutSec 60', why: 'A criterion that is a whole test lane took minutes before any work started.', risk: 'low' },
   { key: 'options.redFirst', def: 'smart', group: 'Verification', what: 'v0.23: which criterion checks run at task start. smart skips regression guards ("… stay green") and specs the worker has not written yet; all runs every one.', change: 'forge config set options.redFirst all', why: 'Guards are expected green and a missing spec cannot run — they cost minutes per start and raised false "already passes" warnings.', risk: 'low' },
   { key: 'options.gateRetry', def: 'on', group: 'Verification', what: 'v0.23: after a failed full verify, the next verifies re-run only the gate lanes that failed until they pass (Playwright: the spec files that failed in the full run; gateRetry.<lane> sets the command); the pass counts as the full. task verify --full or --all-lanes runs everything.', change: 'forge config set gateRetry.e2e off   ·   forge config set options.gateRetry false', why: 'One task ran three 13-minute full verifies in a row; 5 of 11 fulls in a day failed and were re-run whole.', risk: 'medium' },
   { key: 'options.gateCovers', def: 'on', group: 'Verification', what: 'v0.23: a criterion that is a bare `playwright test <files>` is covered by an e2e gate lane that ran and passed in the same verify — not run twice.', change: 'forge config set options.gateCovers false', why: 'Regression-guard criteria re-ran parts of the suite the full lane had just run.', risk: 'low' },
+  { key: 'options.gateAt', def: 'ship (new projects) · approve', group: 'Verification', what: 'v0.31: where the milestone\'s one full run (every verify.* and gate.* lane) is required. ship: it runs in the background while the owner reviews — started by itself when the last task closes and again after approve if the code changed — and milestone ship refuses until it is green on the code being shipped. approve: the pre-v0.31 rule, approve refuses without it.', change: 'forge config set options.gateAt ship', why: 'The full run before the demo kept the owner waiting; run during the review, it costs no waiting.', risk: 'low' },
+  { key: 'options.gateAuto', def: 'on', group: 'Verification', what: 'v0.31 (gateAt ship): start the full run in the background at hand-over and after approve when the code has none. off: run it yourself — forge milestone verify <M> --background.', change: 'forge config set options.gateAuto off', why: 'Nobody has to remember to start it, and nobody waits for it.', risk: 'none' },
+  { key: 'options.parallelChecks', def: 'on (new projects) · off', group: 'Verification', what: 'v0.31: the quick lanes (verify.*) run at once instead of one after another. Criteria and gate lanes stay one at a time (they share the database and the app server).', change: 'forge config set options.parallelChecks on', why: 'A verify waited for the sum of the quick lanes; at once it waits for the slowest.', risk: 'low' },
+  { key: 'options.flakyRerun', def: 'on (new projects) · off', group: 'Verification', what: 'v0.31: a criterion check or a gate lane in a task verify that fails is re-run once (Playwright: only the failed spec files); a pass is recorded as flaky on the result. The milestone\'s full run does not re-run on its own — a red run re-runs only what failed next time.', change: 'forge config set options.flakyRerun off', why: 'A spec that fails only under load sent a task back for nothing; the record keeps the flake visible for the hardening milestone.', risk: 'medium' },
+  { key: 'options.reuseResults', def: 'on', group: 'Verification', what: 'v0.30: a check that passed on exactly the same code (by content) in the last options.reuseHours (12) is not run again — a repeated verify, the milestone gate right after the last full verify. Only runs that left the code as they found it count. --fresh on a verify runs everything.', change: 'forge config set options.reuseResults off', why: 'The gate re-ran the whole suite minutes after the last task\'s full verify, on the same code.', risk: 'none' },
+  { key: 'options.affectedTests', def: 'on (new projects) · off', group: 'Verification', what: 'v0.30: off a full verify, a Vitest or Jest fast lane runs only the tests the change affects (vitest related / jest --findRelatedTests). Needs gate lanes and options.fullVerifyEvery: the whole lane runs at every full verify and at the gate. Whole lane when the change touches package, lock, config, setup, env or non-code files. affected.<lane> sets the command ({files}) or off.', change: 'forge config set options.affectedTests on   ·   forge config set affected.unit "npx vitest related --run {files}"', why: 'Every verify ran the whole fast suite, review re-verifies included, for a change to a few files.', risk: 'low' },
+  { key: 'options.push', def: 'auto', group: 'Git flow', what: 'v0.30: when a task commit is pushed. auto: per task only when no workflow runs on pushes to the milestone branch (or options.fullTier is ci); otherwise milestone ship pushes once. task / milestone force either. forge ci runs shows what a milestone costs in CI runs.', change: 'forge config set options.push milestone', why: 'A workflow on milestone/** ran CI once per task push and burned the Actions minutes.', risk: 'low' },
   { key: 'options.fullTier', def: 'local', group: 'Verification', what: 'v0.23: ci makes the milestone branch\'s latest CI run the periodic full tier: a red run fails the verify, a green one counts as the full, a pending one is checked again next time. --full and high-risk tasks still run locally.', change: 'forge config set options.fullTier ci', why: 'CI already runs the whole suite on every push; the local periodic run repeats it.', risk: 'medium' },
   { key: 'options.planCheck', def: 'refuse', group: 'Planning', what: 'v0.23: one surface per task (options.maxSurfaces, 1) and at most options.maxCriteria (6) criteria — checked at a milestone\'s first start for every TODO task, and at each later start for that task; criterion-add past the limit is refused. forge milestone check <m> [--brief].', change: 'forge config set options.planCheck warn', why: 'Milestones cut one task per group of pages grew 19 → 36 and 24 → 78 tasks while running, mostly late splits.', risk: 'medium' },
   { key: 'options.autopilotQuestions', def: 'continue', group: 'Running unattended', what: 'v0.23: a question blocks its task, not the run — autopilot asks it once and carries on with independent tasks; it stops only when nothing independent is ready. stop restores the pre-v0.23 stop at the first question.', change: 'forge config set options.autopilotQuestions stop', why: '1.1 h of a 7.8 h day was the run waiting on the owner while independent tasks were ready.', risk: 'medium' },
@@ -1564,6 +1571,7 @@ const COMMAND_DOCS = [
     ['forge init', 'Create forge/ state in a project (idempotent).'],
     ['forge release harden <R> [--tracks a,b]', 'v0.27: add the release\'s hardening milestone — one read-only audit per track (cleanup, security, modern-web, seo, ui).'],
     ['forge audit list <R> [--json] | triage <R> --accept <keys>|floor --defer … --dismiss … --reason …', 'v0.27: the audit findings; your decision on each (accepted ones become fix tasks).'],
+    ['forge ci runs [--json]', 'v0.30: which workflows run on task pushes, at ship and after the merge — what a milestone costs in CI runs.'],
     ['forge ci checks [--write [--release-branch main]]', 'v0.26: which machine checks CI runs (secrets, dependency audit, findings); write the missing ones as their own workflow.'],
     ['forge status [--json]', 'Phase, counts, what is in progress or blocked, what needs you (--json: one machine-readable snapshot, v0.25).'],
     ['forge dashboard', 'Regenerate this page (it also refreshes on every change).'],
@@ -1587,7 +1595,9 @@ const COMMAND_DOCS = [
     ['forge context save <id> [--section design-note]', 'Record a context pack or design note (explorer / architect, from stdin).'],
     ['forge task add|update <id> --domain api,auth', 'Tag domains: the brief carries their rules; auth/data/payments/migrations/security are high-risk.'],
     ['forge task verify <id> --full', 'v0.22.1: the gate lanes too (gate.*), on demand.'],
-    ['forge milestone verify <M>', 'v0.22.1: every lane over the finished milestone, recorded on the gate; approve needs it when gate.* is set.'],
+    ['forge task verify <id> --fresh', 'v0.30: run every check, even those the same code already passed.'],
+    ['forge milestone verify <M>', 'v0.22.1: every lane over the finished milestone, recorded on the gate; approve needs it when gate.* is set (v0.31, options.gateAt ship: ship needs it). After a red run, only what failed re-runs (--all-lanes: everything).'],
+    ['forge milestone verify <M> --background', 'v0.31: start the full run detached and return; forge status shows it, ship waits for it.'],
     ['forge config unset <path>', 'v0.22.1: remove a config key (e.g. move verify.e2e to gate.e2e).'],
     ['forge config set options.<key> <value> --global', 'v0.22.2: a per-machine default every future forge init starts with (~/.config/forge/defaults.json; get/unset --global too).'],
     ['forge task fail <id> --from-review <file>', 'Fail with the reviewer\'s findings (kind review); the retry brief carries only the latest.'],
@@ -1678,6 +1688,10 @@ const DEFAULT_CHANGES = [
     why: 'the options forge init wrote into every new project from v0.20 to v0.23 (delegation switches v0.21, model map v0.22, verification tiers v0.22.2)' },
   { since: '0.27.0', options: { hardening: 'on', hardeningFloor: 'medium', hardeningCap: 25 },
     why: 'every release ends with a hardening milestone: audits per track, findings the owner triages into fix tasks' },
+  { since: '0.30.0', options: { affectedTests: 'on' },
+    why: 'a task verify runs the fast tests its change affects; the whole lane runs at every full verify and at the gate' },
+  { since: '0.31.0', options: { fullVerifyEvery: 0, fullVerifyHighRisk: false, gateAt: 'ship', gateAuto: 'on', parallelChecks: 'on', flakyRerun: 'on' },
+    why: 'the testing budget: a task closes on its own checks, the full suite runs once per milestone in the background while the owner reviews and ship needs it green, a red run re-runs only what failed, the quick lanes run at once, a check that passes on one re-run is recorded as flaky' },
 ];
 // What the code does when an option is not set at all (a project created before v0.24) — so adopting
 // reports only real behaviour changes. Keys not listed here have no known fallback (reported as a change).
@@ -1686,7 +1700,8 @@ function codeDefault(k, raw) {
   if (k.startsWith('models.')) { const r = k.slice(7), map = ((raw || {}).options || {}).models || {};
     return r === 'planner' && map.implementer ? map.implementer : MODEL_DEFAULTS[r]; }
   return { concurrency: 1, fullVerifyEvery: 0, fullVerifyHighRisk: true, redFirst: 'smart', redFirstTimeoutSec: 120, slowLaneSec: 120,
-    gateTimeoutSec: 1800, modelRouting: 'auto', autopilotMode: 'session', hardening: 'off', hardeningFloor: 'medium', hardeningCap: 25 }[k];
+    gateTimeoutSec: 1800, modelRouting: 'auto', autopilotMode: 'session', hardening: 'off', hardeningFloor: 'medium', hardeningCap: 25,
+    affectedTests: 'off', reuseResults: 'on', reuseHours: 12, push: 'auto', gateAt: 'approve', gateAuto: 'on', parallelChecks: 'off', flakyRerun: 'off' }[k];
 }
 const PROFILES = {
   fast: { what: 'speed and tokens first: the full suite every 10th task, no extra tester or design note on high-risk work, Sonnet reviews, red-first only where it proves something',
@@ -2434,7 +2449,7 @@ function slowLanes(cfg, w) {
   const lim = slowLaneSec(cfg) * 1000, res = [];
   for (const [k, cmd] of Object.entries((cfg || {}).verify || {})) {
     const obs = [];
-    for (const id of ((w || {}).order || [])) for (const v of ((w.items[id] || {}).verifications || [])) for (const r of (v.results || [])) if (r.kind === `project:${k}` && r.ms > 0) obs.push({ ts: v.ts, ms: r.ms });
+    for (const id of ((w || {}).order || [])) for (const v of ((w.items[id] || {}).verifications || [])) for (const r of (v.results || [])) if (r.kind === `project:${k}` && r.ms > 0 && !r.affected) obs.push({ ts: v.ts, ms: r.ms });
     const last = obs.sort((a, b) => String(a.ts).localeCompare(String(b.ts))).slice(-10);
     if (!last.length) { if (SLOW_LANE_NAME_RE.test(k)) res.push({ lane: k, cmd, runs: 0, avgMs: null, byName: true }); continue; }
     const avg = last.reduce((a, b) => a + b.ms, 0) / last.length;
@@ -2844,7 +2859,7 @@ function generateDashboard() {
         <div class="row"><span class="k">Verification</span><span class="vl">${lastV
           ? `${lastV.passed ? 'passed' : 'failed'} · ${esc(lastV.ts.slice(0, 16).replace('T', ' '))}${lastV.durationMs ? ` · ran ${fmtD(lastV.durationMs)}` : ''}${lastV.tree ? ' · tree-bound ✓' : ''}`
           : '<span class="mut">never run</span>'}</span></div>
-        ${t.commit ? `<div class="row"><span class="k">Commit</span><span class="vl"><code>${esc(t.commit.sha.slice(0, 10))}</code> on <code>${esc(t.commit.branch)}</code>${t.commit.pushed ? ' · pushed' : ' · <span class="warnv">not pushed</span>'}</span></div>` : ''}
+        ${t.commit ? `<div class="row"><span class="k">Commit</span><span class="vl"><code>${esc(t.commit.sha.slice(0, 10))}</code> on <code>${esc(t.commit.branch)}</code>${t.commit.pushed ? ' · pushed' : t.commit.pushDeferred ? ' · pushed at ship' : ' · <span class="warnv">not pushed</span>'}</span></div>` : ''}
         ${t.commits ? `<div class="row"><span class="k">Commits</span><span class="vl"><code title="git log ${esc(t.commits.base)}..${esc(t.commits.head)}">${esc(t.commits.base.slice(0, 7))}..${esc(t.commits.head.slice(0, 7))}</code> · ${t.commits.count === null ? '?' : t.commits.count} landed while in flight${t.commits.uncommitted ? ' · <span class="mut">work was uncommitted at DONE</span>' : ''}</span></div>` : ''}
         ${fails ? `<div class="row"><span class="k">Attempts</span><span class="vl">${fails} failed — a third identical retry is refused</span></div>` : ''}
         ${evid}
@@ -4348,6 +4363,295 @@ function optAll(name) {
 }
 
 // 3.1/F7: bind evidence to the actual tree state (HEAD + working-tree status hash)
+// ============================================================================
+// v0.30: tests run when they can find something, not again on the same code
+// ============================================================================
+// The code a result was proven on, by CONTENT. treeState() hashes HEAD and the `git status` lines: two different
+// edits of one file give the same status line, so an edit made after a passing verify went unseen by `task done`.
+// contentTree() is git's tree hash of the working tree as it is (tracked and untracked; ignored files out), with
+// Forge's own bookkeeping and test-run output left out — a commit, a state write or a report never change it, a
+// change to the code always does. Root .env* files (ignored, but read by tests) are hashed in. `skip` leaves out
+// files other in-progress tasks are changing (their committed version counts), for a task's own view.
+const CTREE_SKIP = ['forge', 'test-results', 'playwright-report', 'blob-report', 'coverage', '.nyc_output'];
+function contentTree(opts = {}) {
+  try {
+    const ip = spawnSync('git', ['rev-parse', '--git-path', 'index'], { cwd: PROJECT, encoding: 'utf8' });
+    if (ip.status !== 0) return null;
+    const src = path.resolve(PROJECT, String(ip.stdout).trim());
+    const tmp = path.join(os.tmpdir(), `forge-ctree-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+    // the copy keeps the index's own mtime: git re-reads a file whose mtime is not older than the index ("racy
+    // git"); a fresh mtime on the copy would let a same-size edit within the same second pass as unchanged
+    if (fs.existsSync(src)) { fs.copyFileSync(src, tmp); const st = fs.statSync(src); fs.utimesSync(tmp, st.atime, st.mtime); }
+    const env = Object.assign({}, process.env, { GIT_INDEX_FILE: tmp });
+    const g = args => spawnSync('git', args, { cwd: PROJECT, encoding: 'utf8', env, timeout: 120000, maxBuffer: 64 * 1024 * 1024 });
+    try {
+      g(['rm', '-r', '-q', '--cached', '--ignore-unmatch', '--', ...CTREE_SKIP]);
+      const ex = [...CTREE_SKIP, ...(opts.skip || [])].map(p => `:(exclude,literal)${p}`);
+      if (g(['add', '-A', '--', '.', ...ex]).status !== 0) return null;
+      if (fs.existsSync(path.join(PROJECT, 'forge', 'audits'))) g(['add', '-A', '--', 'forge/audits']); // an audit task's output is its work
+      const wt = g(['write-tree']);
+      if (wt.status !== 0) return null;
+      let envs = '';
+      try { for (const f of fs.readdirSync(PROJECT).filter(f => /^\.env/.test(f)).sort()) { const p = path.join(PROJECT, f); if (fs.statSync(p).isFile()) envs += f + ':' + fileSha(p) + ';'; } } catch (_) { }
+      return String(wt.stdout).trim() + (envs ? '+' + sha(envs).slice(0, 12) : '');
+    } finally { try { fs.unlinkSync(tmp); } catch (_) { } }
+  } catch (_) { return null; }
+}
+// files changed in the working tree that belong to OTHER in-progress tasks (their scope, not this one's)
+function othersChanged(w, item) {
+  const others = ((w || {}).order || []).filter(id => id !== item.id && (w.items[id] || {}).status === 'IN_PROGRESS').map(id => w.items[id]);
+  if (!others.length) return [];
+  return changedPaths().map(c => c.path).filter(rel => !isForgePath(rel) && !pathMatchesAny(rel, (item.scope || {}).allowed) && others.some(o => pathMatchesAny(rel, (o.scope || {}).allowed)));
+}
+
+// A check that passed on exactly this code, recently, is not run again. Field (cisc): the milestone gate re-ran
+// the whole suite minutes after the last task's full verify on the same code; a verify repeated with no edit in
+// between re-ran every lane. Only a run that left the code as it found it counts (a --fix or a snapshot update
+// changes what was tested). options.reuseResults off, or --fresh, runs everything.
+function reuseOn(cfg) { const v = (((cfg || {}).options) || {}).reuseResults; return !(v === false || v === 'false' || v === 'off') && !flag('fresh'); }
+function reuseHours(cfg) { const n = parseFloat((((cfg || {}).options) || {}).reuseHours); return n > 0 ? n : 12; }
+function priorPasses(w, ctree, cfg) {
+  const map = new Map();
+  if (!ctree || !reuseOn(cfg) || !w) return map;
+  const since = Date.now() - reuseHours(cfg) * 3600000;
+  const take = (rec, where) => {
+    if (!rec || rec.ctree !== ctree || rec.ctreeBefore !== ctree) return;
+    for (const r of rec.results || []) {
+      if (r.exit !== 0 || r.covered || r.retry || r.flaky || !r.cmd || /^baseline:/.test(r.kind) || r.kind === 'gate:ci') continue;
+      const at = r.reused ? r.reused.ts : rec.ts;
+      if (!(Date.parse(at) >= since)) continue;
+      const cur = map.get(r.cmd);
+      if (!cur || at > cur.ts) map.set(r.cmd, { ts: at, where: r.reused ? r.reused.where : where });
+    }
+  };
+  for (const id of w.order || []) for (const v of ((w.items[id] || {}).verifications || [])) take(v, id);
+  for (const [m, gt] of Object.entries(w.gates || {})) if (gt && gt.verify) take(gt.verify, `milestone ${m} gate`);
+  return map;
+}
+function runOrReuse(prior, cmd, opts) {
+  const p = prior && prior.get(cmd);
+  if (p) return { cmd, exit: 0, tail: '', ms: 0, reused: p, note: `same code passed ${String(p.ts).slice(11, 16)} (${p.where}) — not run again` };
+  return run(cmd, opts);
+}
+
+// Affected tests. Off a full verify, a fast lane runs the tests the change affects, when the runner can say which
+// they are (Vitest `related`, Jest `--findRelatedTests`). Only with gate lanes and options.fullVerifyEvery: the
+// whole lane still runs at every full verify (every Nth task, high-risk tasks, --full) and at the milestone gate,
+// which approval requires — no test is skipped before approval; a break outside the change is found at the next
+// whole run instead of at once. The whole lane runs when the change touches what an import graph does not see.
+const AFFECTED_MAX = 100;
+const CODE_EXT_RE = /\.(c|m)?[jt]sx?$|\.(vue|svelte|astro)$/i;
+const AFFECTED_INFRA_RE = /(^|\/)(package\.json|package-lock\.json|npm-shrinkwrap\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml|yarn\.lock|bun\.lockb?|tsconfig[^/]*\.json|jsconfig[^/]*\.json|[^/]*\.config\.[cm]?[jt]s|vitest\.[^/]*|jest\.[^/]*|\.env[^/]*|[^/]*setup[^/]*\.[cm]?[jt]sx?|__mocks__\/.*|test-utils?\/.*|fixtures?\/.*|mocks?\/.*)$/i;
+function affectedApplies(cfg) {
+  const o = (cfg || {}).options || {};
+  if (!Object.keys(gateCmds(cfg)).length) return false; // v0.31: the milestone's full run (approve or ship needs it) runs the whole lane
+  const v = o.affectedTests;
+  return v === true || v === 'true' || v === 'on' || Object.keys((cfg || {}).affected || {}).length > 0;
+}
+function affectedTemplate(cfg, lane, cmd) {
+  const set = ((cfg || {}).affected || {})[lane];
+  if (set === 'off' || set === false || set === 'false') return null;
+  if (set) return String(set).includes('{files}') ? String(set) : null;
+  const v = (((cfg || {}).options) || {}).affectedTests;
+  if (!(v === true || v === 'true' || v === 'on')) return null;
+  let text = String(cmd || '').trim();
+  const m = text.match(/^npm\s+(?:run\s+)?([\w:.-]+)$/);
+  if (m) { const pkg = readJson(path.join(PROJECT, 'package.json'), null); text = String((pkg && pkg.scripts && pkg.scripts[m[1]]) || '').trim(); }
+  if (/^(npx\s+)?vitest(\s+run)?$/.test(text)) return 'npx vitest related --run --passWithNoTests {files}';
+  if (/^(npx\s+)?jest$/.test(text)) return 'npx jest --passWithNoTests --findRelatedTests {files}';
+  return null;
+}
+function affectedFiles() {
+  const files = [], whole = [];
+  for (const c of changedPaths()) {
+    const p = c.path;
+    if (isForgePath(p) || /\.(md|mdx|txt)$/i.test(p)) continue;
+    if (AFFECTED_INFRA_RE.test(p) || !CODE_EXT_RE.test(p)) { whole.push(p); continue; }
+    if (!fs.existsSync(path.join(PROJECT, p))) { whole.push(`${p} (deleted)`); continue; }
+    files.push(p);
+  }
+  return { files, whole };
+}
+function shq1(s) { return /^[\w@%+=:,./-]+$/.test(s) ? s : `'${String(s).replace(/'/g, `'\\''`)}'`; }
+
+// When a task commit is pushed. A push to the milestone branch starts every workflow that listens to it — one CI
+// run per task (cisc burned its Actions minutes this way). auto: per task only when no workflow runs on pushes to
+// the milestone branch, or options.fullTier is ci (it reads those runs); otherwise the commits stay local and
+// `forge milestone ship` pushes them once. task / milestone force either.
+function pushPolicy(cfg) { const v = String((((cfg || {}).options) || {}).push || 'auto'); return ['task', 'milestone'].includes(v) ? v : 'auto'; }
+function pushPerTask(cfg, branch) {
+  const p = pushPolicy(cfg);
+  if (p !== 'auto') return { push: p === 'task', why: `options.push ${p}` };
+  if (String((((cfg || {}).options) || {}).fullTier || 'local') === 'ci') return { push: true, why: 'options.fullTier ci reads CI on each push' };
+  const wf = ciWorkflowsOn(PROJECT, 'push', branch);
+  return wf.length ? { push: false, why: `${wf.join(', ')} run${wf.length === 1 ? 's' : ''} on every push to ${branch}` } : { push: true, why: `no workflow runs on pushes to ${branch}` };
+}
+// GitHub Actions filter patterns: * (no /), ** (anything), ! negates (order matters)
+function ghGlob(pat, s) {
+  let re = '';
+  for (let i = 0; i < pat.length; i++) {
+    const c = pat[i];
+    if (c === '*') { if (pat[i + 1] === '*') { re += '.*'; i++; } else re += '[^/]*'; }
+    else if ('.+^${}()|\\?'.includes(c)) re += '\\' + c;
+    else re += c;
+  }
+  return new RegExp('^' + re + '$').test(s);
+}
+// The trigger of one event in a workflow's `on:` — null (does not run on it) | { all } | { branches, ignore }.
+// A reading of the common YAML shapes; anything it cannot read counts as "runs" (the safe side for minutes).
+function workflowOn(text, ev) {
+  const lines = String(text || '').replace(/\r/g, '').split('\n');
+  const i = lines.findIndex(l => /^(on|"on"|'on'|true)\s*:/.test(l));
+  if (i < 0) return null;
+  const evRe = new RegExp(`^['"]?${ev}['"]?$`);
+  const head = lines[i].replace(/^(on|"on"|'on'|true)\s*:/, '').replace(/\s#.*$/, '').trim();
+  if (head) return head.replace(/[[\]]/g, '').split(',').map(x => x.trim()).some(x => evRe.test(x)) ? { all: true } : null;
+  const ind = l => l.match(/^\s*/)[0].length;
+  const block = [];
+  for (let j = i + 1; j < lines.length; j++) { const l = lines[j]; if (/^\S/.test(l) && !/^#/.test(l)) break; if (l.trim() && !/^\s*#/.test(l)) block.push(l); }
+  if (!block.length) return null;
+  const lvl = ind(block[0]);
+  if (/^\s*-\s/.test(block[0])) return block.some(l => new RegExp(`^\\s*-\\s*['"]?${ev}['"]?\\s*$`).test(l)) ? { all: true } : null;
+  const k = block.findIndex(l => ind(l) === lvl && new RegExp(`^\\s*['"]?${ev}['"]?\\s*:`).test(l));
+  if (k < 0) return null;
+  const sub = [];
+  for (let j = k + 1; j < block.length && ind(block[j]) > lvl; j++) sub.push(block[j]);
+  if (!sub.length) return { all: true };
+  const lvl2 = ind(sub[0]);
+  const list = key => {
+    const n = sub.findIndex(l => ind(l) === lvl2 && new RegExp(`^\\s*${key}\\s*:`).test(l));
+    if (n < 0) return null;
+    const inl = sub[n].replace(new RegExp(`^\\s*${key}\\s*:`), '').replace(/\s#.*$/, '').trim();
+    const unq = x => x.trim().replace(/^['"]|['"]$/g, '');
+    if (inl) return inl.replace(/^\[|\]$/g, '').split(',').map(unq).filter(Boolean);
+    const res = [];
+    for (let j = n + 1; j < sub.length && ind(sub[j]) > lvl2; j++) { const mm = sub[j].match(/^\s*-\s*(.+?)\s*$/); if (mm) res.push(unq(mm[1].replace(/\s#.*$/, ''))); }
+    return res;
+  };
+  const branches = list('branches'), ignore = list('branches-ignore'), tags = list('tags');
+  if (ev === 'push' && !branches && !ignore && tags) return null; // tags only: a branch push does not start it
+  return { all: !branches && !ignore, branches, ignore };
+}
+function onMatches(spec, branch) {
+  if (!spec) return false;
+  if (spec.all || !branch) return true;
+  if (spec.branches) { let hit = false; for (const p of spec.branches) { if (p.startsWith('!')) { if (ghGlob(p.slice(1), branch)) hit = false; } else if (ghGlob(p, branch)) hit = true; } return hit; }
+  if (spec.ignore) return !spec.ignore.some(p => ghGlob(p, branch));
+  return true;
+}
+function ciWorkflowsOn(root, ev, branch) {
+  const dir = path.join(root, '.github', 'workflows');
+  let files = [];
+  try { files = fs.readdirSync(dir).filter(f => /\.ya?ml$/.test(f)).sort(); } catch (_) { return []; }
+  return files.filter(f => { try { return onMatches(workflowOn(fs.readFileSync(path.join(dir, f), 'utf8'), ev), branch); } catch (_) { return true; } }).map(f => `.github/workflows/${f}`);
+}
+function ciRunsReport(root, cfg, w) {
+  const gc = gitCfg(cfg);
+  const m = (w && activeMilestone(w)) || '<id>';
+  const branch = milestoneBranch(cfg, m);
+  const pp = pushPerTask(cfg, branch);
+  const onMilestonePush = ciWorkflowsOn(root, 'push', branch);
+  const onPullRequest = gc.base ? ciWorkflowsOn(root, 'pull_request', gc.base) : ciWorkflowsOn(root, 'pull_request', null);
+  const onBasePush = gc.base ? ciWorkflowsOn(root, 'push', gc.base) : [];
+  return { branch, base: gc.base || null, push: pushPolicy(cfg), perTask: pp.push, why: pp.why,
+    onMilestonePush, onPullRequest, onBasePush,
+    twiceAtShip: onMilestonePush.filter(f => onPullRequest.includes(f)),
+    againAfterMerge: onBasePush.filter(f => onPullRequest.includes(f)) };
+}
+
+// The e2e harness costs that repeat per spec (cisc, 20 Oct: ~460 UI sign-ins in one full run; the dev server
+// ~3× slower per spec than the built app). Forge cannot change a project's tests; preflight says what it sees.
+function e2eHarnessNotes(root) {
+  const f = ['playwright.config.ts', 'playwright.config.js', 'playwright.config.mjs', 'playwright.config.mts', 'playwright.config.cjs'].map(x => path.join(root, x)).find(x => fs.existsSync(x));
+  if (!f) return [];
+  let t = ''; try { t = fs.readFileSync(f, 'utf8'); } catch (_) { return []; }
+  const notes = [], name = path.basename(f);
+  const ws = t.match(/webServer[\s\S]{0,600}?command\s*:\s*(['"`])([^'"`]+)\1/);
+  if (ws) {
+    const c = ws[2];
+    const dev = /(^|[\s:])dev(\s|$)/.test(c) || (/\bvite\b/.test(c) && !/\b(preview|build)\b/.test(c));
+    if (dev && !/\b(build|start|preview)\b/.test(c)) notes.push(`${name}: e2e runs against the dev server (${c}) — build once and serve the built app (measured on one project: ~3× faster per spec)`);
+  }
+  if (!/storageState/.test(t)) notes.push(`${name}: no saved sign-in (storageState) — if specs sign in through the UI, sign in once per role in a setup project and reuse the session (measured on one project: ~460 UI sign-ins in one full run)`);
+  return notes;
+}
+
+// ============================================================================
+// v0.31: the testing budget. Every test passes once on the milestone's final code; before that a task closes on
+// its own checks (the quick lanes, its criteria, the unit tests its change affects). The full run happens in the
+// background while the owner reviews, and ship — not approve — needs it green. A red full run re-runs only what
+// failed. A check that fails and then passes on one re-run is recorded as flaky. The quick lanes run at once.
+// ============================================================================
+// v0.31: what forge clock counts as waiting on tests (a background launch is not waiting)
+const CLOCK_TEST_RE = /^bash: (forge (task|milestone) verify|playwright|unit\/db tests|lint\/typecheck\/build|sleep\/poll on a background run)$/;
+function optOn(cfg, k) { const v = (((cfg || {}).options) || {})[k]; return v === true || v === 'true' || v === 'on'; }
+function gateAt(cfg) { return String((((cfg || {}).options) || {}).gateAt || 'approve') === 'ship' ? 'ship' : 'approve'; }
+function gateAutoOn(cfg) { const v = (((cfg || {}).options) || {}).gateAuto; return gateAt(cfg) === 'ship' && !(v === false || v === 'false' || v === 'off'); }
+function gateLogRel(m) { return path.relative(PROJECT, path.join(STATE, `gate-${m}.log`)).split(path.sep).join('/'); }
+// the milestone's full run, if one is running now (a foreground run holds the verify lock; a background one also
+// leaves its pid in forge/state/gate-<m>.json before it gets the lock)
+function gateRunning(m) {
+  let h = null; try { h = JSON.parse(fs.readFileSync(VERIFY_LOCK, 'utf8')); } catch (_) { }
+  if (h && !h.released && h.item === `milestone:${m}` && h.pid && pidAlive(h.pid)) return { pid: h.pid, since: h.ts || null, log: gateLogRel(m) };
+  let g = null; try { g = JSON.parse(fs.readFileSync(path.join(STATE, `gate-${m}.json`), 'utf8')); } catch (_) { }
+  if (g && g.pid && !g.ended && pidAlive(g.pid)) return { pid: g.pid, since: g.ts || null, log: g.log || gateLogRel(m) };
+  return null;
+}
+// the milestone's last full run passed on the code as it is now
+function gateCurrent(w, m) {
+  const gv = (((w || {}).gates || {})[m] || {}).verify;
+  return !!(gv && gv.passed && (gv.ctree ? gv.ctree === contentTree() : (gv.tree && treeState() && gv.tree === treeState())));
+}
+// v0.31: which files differ between two recorded trees — said in a refusal, so nobody has to guess
+function treeDiffLine(a, b) {
+  const [ta, ea] = String(a || '').split('+'), [tb, eb] = String(b || '').split('+');
+  const names = ta && tb ? git(['diff-tree', '-r', '--name-only', ta, tb]).out.split('\n').filter(Boolean) : [];
+  return (names.length ? `Changed since: ${names.slice(0, 10).join(', ')}${names.length > 10 ? ` … (+${names.length - 10})` : ''}\n` : '') + (ea !== eb ? 'Changed since: a root .env file\n' : '');
+}
+function startGateRun(m, why) {
+  fs.mkdirSync(STATE, { recursive: true });
+  const log = path.join(STATE, `gate-${m}.log`);
+  const fd = fs.openSync(log, 'w');
+  const child = require('child_process').spawn(process.execPath, [__filename, 'milestone', 'verify', m], { cwd: PROJECT, detached: true, stdio: ['ignore', fd, fd],
+    env: Object.assign({}, process.env, { CLAUDE_PROJECT_DIR: PROJECT, FORGE_GATE_BG: '1' }) });
+  child.unref(); try { fs.closeSync(fd); } catch (_) { }
+  try { fs.writeFileSync(path.join(STATE, `gate-${m}.json`), JSON.stringify({ pid: child.pid, ts: ts(), why, log: gateLogRel(m) }) + '\n'); } catch (_) { }
+  return { pid: child.pid, log: gateLogRel(m) };
+}
+// start the full run in the background when the milestone is finished and has none on its current code
+function maybeStartGate(w, m, cfg, why) {
+  if (!m || !gateAutoOn(cfg) || !Object.keys(gateCmds(cfg)).length || process.env.FORGE_GATE_AUTO === '0') return null;
+  if (!milestoneComplete(w, m)) return null;
+  if ((w.order || []).some(id => w.items[id].milestone === m && w.items[id].status === 'IN_PROGRESS')) return null;
+  if (gateRunning(m) || gateCurrent(w, m)) return null;
+  try { return startGateRun(m, why); } catch (_) { return null; }
+}
+
+// The quick lanes at once. Each result has run()'s shape; a lane the same code already passed is not run.
+// The lanes run in a helper process (`forge __parallel`) so this stays a synchronous CLI.
+function runMany(cmds, cfg, prior) {
+  const res = cmds.map(c => (prior && prior.get(c)) ? runOrReuse(prior, c) : null);
+  const todo = cmds.map((c, i) => res[i] ? null : i).filter(i => i !== null);
+  if (todo.length > 1 && optOn(cfg, 'parallelChecks')) {
+    const r = spawnSync(process.execPath, [__filename, '__parallel'], { cwd: PROJECT, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024,
+      input: JSON.stringify(todo.map(i => ({ cmd: cmds[i], timeout: 600000 }))), env: Object.assign({}, process.env, { CLAUDE_PROJECT_DIR: PROJECT }) });
+    let arr = null; try { arr = JSON.parse(String(r.stdout || '').trim().split('\n').pop()); } catch (_) { }
+    if (Array.isArray(arr) && arr.length === todo.length) { todo.forEach((i, j) => { res[i] = Object.assign(arr[j], { parallel: true }); }); return res; }
+  }
+  for (const i of todo) res[i] = run(cmds[i]);
+  return res;
+}
+// One more try for a check that failed (not timed out): a pass is recorded as flaky, a second failure stands.
+function rerunOnce(cfg, r, again) {
+  if (!r || r.exit === 0 || r.reused || r.timedOut || r.exit === -1 || !optOn(cfg, 'flakyRerun')) return r;
+  const r2 = again(r);
+  if (!r2) return r;
+  if (r2.exit === 0) return Object.assign({}, r2, { cmd: r.cmd, ms: (r.ms || 0) + (r2.ms || 0),
+    flaky: { firstExit: r.exit, specs: r.failedSpecs || undefined, rerun: r2.cmd !== r.cmd ? r2.cmd : undefined, firstTail: String(r.tail || '').split('\n').slice(-12).join('\n') },
+    note: (r2.note ? r2.note + ' · ' : '') + `failed, then passed on one re-run${r.failedSpecs ? ` (${r.failedSpecs.length} spec file(s))` : ''} — recorded as flaky (options.flakyRerun); fix it if it fails again in the milestone's full run` });
+  return Object.assign({}, r, { ms: (r.ms || 0) + (r2.ms || 0), tail: r2.tail, failedSpecs: r2.failedSpecs || r.failedSpecs, note: (r.note ? r.note + ' · ' : '') + 'failed again on one re-run' });
+}
+
 function treeState() {
   const head = run('git rev-parse HEAD', { timeout: 10000 });
   const st = run('git status --porcelain', { timeout: 20000 });
@@ -4373,6 +4677,8 @@ function baselineCompare(cfg, full, ran) {
     // v0.22.1: a baseline row that belongs to a gate lane is compared only on a full verify
     const inGate = !!gateCmds(cfg)[b.kind] && !(cfg.verify || {})[b.kind];
     if (inGate && !(Array.isArray(full) ? full.includes(b.kind) : full)) continue;
+    // v0.30: this verify ran only the lane's affected tests — compared on the next whole run (full verify, gate)
+    if (prior.some(r => r.affected && r.kind === `project:${b.kind}`)) continue;
     const currentCmd = (cfg.verify || {})[b.kind] || gateCmds(cfg)[b.kind];
     if (currentCmd && currentCmd !== b.cmd) {
       // 3.4: command changed since capture — comparison would be meaningless
@@ -4659,9 +4965,12 @@ function briefLines(item, cfg) {
   // 12 Oct): workers spent 1.5 h of 4.5 h in Playwright, mostly other tasks' specs that verify ran again afterwards.
   {
     const gates = Object.entries(gateCmds(cfgB));
+    const affTpl = Object.entries(cfgB.verify || {}).map(([k, c]) => affectedTemplate(cfgB, k, c)).find(Boolean); // v0.31
     lines.push('', `## What you run`,
       `- The fast lanes above, and the checks of your own criteria${item.criteria.some(c => c.check && (c.guard === true || GUARD_RE.test(String(c.desc || '')))) ? ' that are not marked regression guard' : ''}. Iterate on those until green.`,
-      `- Not the whole suite, and not other tasks' specs: Forge's task verify runs the regression checks after you${gates.length ? ` (${gates.map(([k]) => k).join(', ')} at the full tier)` : ''}. If verify finds a regression, the failure comes back to you.`);
+      `- Not the whole suite, and not other tasks' specs: Forge's task verify runs the regression checks after you${gates.length ? ` (${gates.map(([k]) => k).join(', ')} at the full tier)` : ''}. If verify finds a regression, the failure comes back to you.`,
+      ...(affTpl ? [`- The unit tests your change affects: \`${affTpl.split('{files}').join('<the files you changed>')}\`.`] : []),
+      ...(optOn(cfgB, 'flakyRerun') ? [`- A test that fails only under load (it passes alone): run it once more; if it passes, report it as flaky. Do not loop on it.`] : []));
   }
   // provider failures carry no approach diagnosis — only real failed attempts inform the retry
   const fails = item.attempts.filter(a => a.outcome === 'failed' && a.kind !== 'provider');
@@ -5359,6 +5668,14 @@ const commands = {
           if (ci.workflows.length) {
             const miss = ci.missing.filter(k => k !== 'findings');
             check('ci checks', !miss.length, miss.length ? `${ciChecksLine(ci)} — add them: forge ci checks --write` : ciChecksLine(ci) + (ci.missing.includes('findings') ? ' (findings for the hardening milestone: forge ci checks --write)' : ''), 'warning');
+            // v0.30: what the git flow costs in CI runs
+            if (perMilestone(cfg) && hasRemote(cfg)) {
+              const wP = readJson(WORK_FILE, null); if (wP) ensureMilestones(wP);
+              const rr = ciRunsReport(PROJECT, cfg, wP);
+              check('ci runs', !rr.perTask || !rr.onMilestonePush.length,
+                rr.perTask && rr.onMilestonePush.length ? `${rr.onMilestonePush.join(', ')} run on every task push (options.push ${rr.push}: ${rr.why}) — forge ci runs` :
+                `task commits ${rr.perTask ? 'pushed as they close (no workflow listens)' : `stay local until forge milestone ship (${rr.why})`}${rr.twiceAtShip.length ? ` · ${rr.twiceAtShip.join(', ')} run twice at ship — forge ci runs` : ''}`, 'warning');
+            }
           }
         } catch (_) { }
       } else {
@@ -5386,6 +5703,7 @@ const commands = {
         const p = run('npx --no-install playwright --version', { timeout: 30000 });
         check('playwright', p.exit === 0,
           p.exit === 0 ? 'available' : 'web project without Playwright — E2E acceptance criteria cannot be machine-verified (degraded: manual milestone checks)', 'warning');
+        for (const n of e2eHarnessNotes(PROJECT)) check('e2e harness', false, n, 'warning'); // v0.30
       }
     }
 
@@ -5760,6 +6078,9 @@ const commands = {
       const results = [];
       // v0.22.1: verify.* every time; gate.* when --full, after a high-risk task, or every Nth task
       const t0Verify = Date.now();
+      // v0.30: what this exact code already passed (options.reuseResults; --fresh runs everything)
+      const ctreeBefore = contentTree();
+      const prior = priorPasses(wV, ctreeBefore, cfg);
       // v0.23.3: --full when no full is due needs a reason. Field (cisc, 13 Oct morning): 7 of 10 verifies were forced
       // full by habit, ~8 min each, while the tier runs by itself every Nth task and CI runs it on every push.
       if (flag('full') && !opt('reason') && Object.keys(gateCmds(cfg)).length && String(((cfg.options || {}).forcedFull) || 'reason') !== 'free') {
@@ -5776,11 +6097,32 @@ const commands = {
       // periodic full run (default local). Forced (--full) and high-risk runs are always local and complete.
       const plan = fullPlan(wV, cfg, item, fullWhy, flag('full'), flag('all-lanes'));
       fullWhy = plan.why;
-      for (const [k, cmd] of Object.entries(cfg.verify || {})) results.push(Object.assign({ kind: `project:${k}` }, run(cmd)));
+      // v0.30: off a full verify, a fast lane runs the tests the change affects (options.affectedTests); the whole
+      // lane runs at every full verify and at the milestone gate
+      const aff = !plan.full && affectedApplies(cfg) ? affectedFiles() : null;
+      // v0.31: the quick lanes run at once (options.parallelChecks)
+      const fastJobs = Object.entries(cfg.verify || {}).map(([k, cmd]) => {
+        const tpl = aff && !prior.has(cmd) ? affectedTemplate(cfg, k, cmd) : null;
+        if (tpl && aff.files.length && !aff.whole.length && aff.files.length <= AFFECTED_MAX) return { k, cmd: tpl.split('{files}').join(aff.files.map(shq1).join(' ')), affected: true, laneCmd: cmd };
+        return { k, cmd, tpl };
+      });
+      const fastRes = runMany(fastJobs.map(j => j.cmd), cfg, prior);
+      fastJobs.forEach((j, i) => {
+        const r = fastRes[i];
+        if (j.affected) {
+          results.push(Object.assign({ kind: `project:${j.k}` }, r, { affected: true, laneCmd: j.laneCmd,
+            note: (r.note ? r.note + ' · ' : '') + `tests affected by ${aff.files.length} changed file(s) — the whole lane runs in the milestone's full run` }));
+          return;
+        }
+        if (j.tpl && !r.reused) r.note = (r.note ? r.note + ' · ' : '') + `whole lane: ${aff.whole.length ? `${aff.whole[0]}${aff.whole.length > 1 ? ` (+${aff.whole.length - 1})` : ''} changed — outside what the import graph sees` : aff.files.length ? `${aff.files.length} changed files (over ${AFFECTED_MAX})` : 'no changed code file'}`;
+        results.push(Object.assign({ kind: `project:${j.k}` }, r));
+      });
       if (plan.ci) results.push(plan.ci);
       for (const k of plan.lanes) {
         const retryCmd = plan.retry ? gateRetryCmd(cfg, k, (plan.failedSpecs || {})[k]) : null;
-        const r = run(retryCmd || gateCmds(cfg)[k], { specs: lanePlaywright(cfg, gateCmds(cfg)[k], true), timeout: gateTimeoutMs(cfg), timeoutKey: 'options.gateTimeoutSec' });
+        const laneOpts = { specs: lanePlaywright(cfg, gateCmds(cfg)[k], true), timeout: gateTimeoutMs(cfg), timeoutKey: 'options.gateTimeoutSec' };
+        const r0 = (plan.retry ? run : (c, o) => runOrReuse(prior, c, o))(retryCmd || gateCmds(cfg)[k], laneOpts);
+        const r = plan.retry ? r0 : rerunOnce(cfg, r0, x => { const c = gateRetryCmd(cfg, k, x.failedSpecs); return c ? run(c, laneOpts) : null; }); // v0.31
         slowGateNote(cfg, k, r);
         if (plan.retry) { r.retry = true; r.laneCmd = gateCmds(cfg)[k]; r.note = (r.note ? r.note + ' · ' : '') + (retryCmd ? `retry of the failed full: ${retryCmd}` : 'retry of the failed full: the whole lane (no failed spec list)'); }
         results.push(Object.assign({ kind: `gate:${k}` }, r));
@@ -5791,7 +6133,7 @@ const commands = {
         const cover = coveringLane(cfg, c.check, results);
         if (cover) { results.push({ kind: `criterion: ${c.desc}`, cmd: c.check, exit: 0, tail: '', ms: 0, covered: cover, note: `covered by gate:${cover} (passed in this verify)` }); continue; }
         if ((((cfg || {}).options) || {}).gateCovers !== false && coveredBySegments(c.check, results)) { results.push({ kind: `criterion: ${c.desc}`, cmd: c.check, exit: 0, tail: '', ms: 0, covered: 'lanes', note: 'covered: every command in it ran and passed as a lane of this verify' }); continue; }
-        results.push(Object.assign({ kind: `criterion: ${c.desc}` }, run(c.check)));
+        results.push(Object.assign({ kind: `criterion: ${c.desc}` }, rerunOnce(cfg, runOrReuse(prior, c.check), () => run(c.check)))); // v0.31: one re-run
       }
       if (results.length === 0)
         die(`Nothing executable to verify for '${item.id}': no project verify commands and no criterion checks.\n` +
@@ -5814,12 +6156,16 @@ const commands = {
         out(`WARNING: --artifact ${a} does not exist — not recorded.`); return false;
       });
       const tree = treeState();
+      // v0.30: the code this evidence is about, by content: all of it (reuse), and this task's view (done)
+      const ctree = contentTree();
+      const ocV = othersChanged(wV, item);
+      const ownTree = ocV.length ? contentTree({ skip: ocV }) : ctree;
       releaseVerifyLock();
       // re-read state under the state lock: other workers may have written while checks ran
       acquireWorkLock();
       const wNow = readJson(WORK_FILE, w);
       item = wNow.items[item.id] || item;
-      item.verifications.push({ ts: ts(), passed, results, tree, skippedBaseline, artifacts: artifacts.length ? artifacts : undefined,
+      item.verifications.push({ ts: ts(), passed, results, tree, ctree: ctree || undefined, ctreeBefore: ctreeBefore || undefined, ownTree: ownTree || undefined, skippedBaseline, artifacts: artifacts.length ? artifacts : undefined,
         full: plan.full ? true : undefined, fullWhy: (fullWhy && flag('full') && opt('reason') ? `${fullWhy} — ${opt('reason')}` : fullWhy) || undefined, retryLanes: plan.retry ? plan.lanes : undefined, ciTier: plan.ci ? true : undefined,
         durationMs: results.reduce((a, r) => a + (r.ms || 0), 0), wallMs: Date.now() - t0Verify });
       item.updated = ts();
@@ -5839,6 +6185,10 @@ const commands = {
           out(`  ✗ ${r.kind} — exit ${r.exit}${r.note ? ` (${r.note})` : ''}\n${String(r.tail || '').split('\n').slice(-20).map(l => '    ' + l).join('\n')}`);
         }
         if (!failed.length) out(`  (full output of every check is recorded in work.json — options.verifyVerbose true prints it here)`);
+        const nReused = results.filter(r => r.reused).length;
+        if (nReused) out(`  ${nReused} check(s) not run again: the same code passed them earlier (options.reuseResults; --fresh runs them)`);
+        const nFlaky = results.filter(r => r.flaky).length;
+        if (nFlaky) out(`  ${nFlaky} check(s) passed only on a re-run — recorded as flaky; fix one if it fails again in the milestone's full run`);
       }
       if (skippedBaseline) out(`NOTE: baseline check SKIPPED — reason recorded: ${skippedBaseline}`);
       const gateOnly = r => String(r.kind).startsWith('gate:') || (String(r.kind).startsWith('baseline:') && !!gateCmds(cfg)[String(r.kind).slice(9)] && !(cfg.verify || {})[String(r.kind).slice(9)]);
@@ -5851,13 +6201,20 @@ const commands = {
       const item = getItem(w, argv[2]);
       if (item.status !== 'IN_PROGRESS') die(`Cannot complete '${item.id}' from status ${item.status}.`);
       const v = lastVerification(item);
+      // v0.31: a verify of this task running in the background is the evidence on its way
+      { let h = null; try { h = JSON.parse(fs.readFileSync(VERIFY_LOCK, 'utf8')); } catch (_) { }
+        if (h && !h.released && h.item === item.id && h.pid && pidAlive(h.pid))
+          die(`Refused: the verify of '${item.id}' is still running (pid ${h.pid}). Close the task when it has passed — brief or dispatch the next task meanwhile.`); }
       if (!v || !v.passed)
         die(`Refused: '${item.id}' has no passing verification record.\n` +
             `Run: forge task verify ${item.id} — DONE is granted by evidence, not by claim.`);
       // 3.1/F7: evidence must describe the CURRENT tree
-      const now = treeState();
-      if (v.tree && now && v.tree !== now)
-        die(`Refused: the tree changed since the passing verification (${v.ts}).\n` +
+      // v0.30: by content — two edits of the same file look identical to `git status`, not to this
+      const ocD = v.ownTree ? othersChanged(w, item) : [];
+      const nowOwn = v.ownTree ? contentTree(ocD.length ? { skip: ocD } : {}) : null;
+      const staleTree = v.ownTree ? v.ownTree !== nowOwn : (v.tree && treeState() && v.tree !== treeState());
+      if (staleTree)
+        die(`Refused: the tree changed since the passing verification (${v.ts}).\n` + (v.ownTree ? treeDiffLine(v.ownTree, nowOwn) : '') +
             `Stale evidence proves nothing — re-verify: forge task verify ${item.id}`);
       // v0.21 (C5): delegation is enforced — a task closes on a worker's launch, or on a recorded self-close
       const cfgSw = loadConfig() || {};
@@ -5886,7 +6243,7 @@ const commands = {
         out(`TESTER WARNING: most of '${item.id}''s criteria are tests, and no forge-tester was dispatched (options.requireTester=${testerRule}). Turn off: forge config set options.requireTester false`);
       // 1.2/F5: red-first — green-before, green-after, nothing changed ⇒ the checks proved nothing
       const checked = (item.preState || []).filter(p => p && p.exit !== null && p.exit !== undefined); // v0.22.1: a check cut at start proves nothing either way
-      if (checked.length && checked.every(p => p.exit === 0) && item.startTree && now && item.startTree === now)
+      if (checked.length && checked.every(p => p.exit === 0) && item.startTree && (() => { const now = treeState(); return now && item.startTree === now; })())
         die(`Refused: every criterion check already passed BEFORE work started, and the tree is unchanged since start.\n` +
             `These checks prove nothing about this item. Either the item was already satisfied (forge task cancel ${item.id} --reason "already satisfied")\n` +
             `or the checks are vacuous (forge task update ${item.id} --criterion-remove/--criterion-add --reason "...").`);
@@ -5968,15 +6325,19 @@ const commands = {
               `Fix the cause and run 'forge task done ${item.id}' again. Never --no-verify.`);
         }
         const sha = git(['rev-parse', 'HEAD']).out;
-        let pushed = false, pushErr = null;
+        let pushed = false, pushErr = null, pushDeferred = null;
         if (hasRemote(cfgD)) {
-          const pr = git(['push', '-u', gitCfg(cfgD).remote, commitPlan.branch]);
-          pushed = pr.code === 0; if (!pushed) pushErr = (pr.err || pr.out).split('\n').slice(-6).join('\n');
+          // v0.30: a push to the milestone branch starts every workflow listening to it (options.push)
+          const pp = commitPlan.branch === milestoneBranch(cfgD, item.milestone) ? pushPerTask(cfgD, commitPlan.branch) : { push: true };
+          if (pp.push) {
+            const pr = git(['push', '-u', gitCfg(cfgD).remote, commitPlan.branch]);
+            pushed = pr.code === 0; if (!pushed) pushErr = (pr.err || pr.out).split('\n').slice(-6).join('\n');
+          } else pushDeferred = pp.why;
         }
-        item.commit = { sha, branch: commitPlan.branch, pushed, ts: ts(), files: files.length };
+        item.commit = { sha, branch: commitPlan.branch, pushed, pushDeferred: pushDeferred || undefined, ts: ts(), files: files.length };
         saveWork(w);
         out(`${item.id}: committed ${sha.slice(0, 10)} on ${commitPlan.branch} (${files.length} file(s))` +
-            (pushed ? ' and pushed.' : hasRemote(cfgD) ? ` — PUSH FAILED, the commit is local only:\n${pushErr}\nPush before 'milestone ship': git push -u ${gitCfg(cfgD).remote} ${commitPlan.branch}` : ' — no remote configured, local only.'));
+            (pushed ? ' and pushed.' : pushDeferred ? ` — kept local: ${pushDeferred}, so each task push would start CI. forge milestone ship pushes the milestone once (options.push).` : hasRemote(cfgD) ? ` — PUSH FAILED, the commit is local only:\n${pushErr}\nPush before 'milestone ship': git push -u ${gitCfg(cfgD).remote} ${commitPlan.branch}` : ' — no remote configured, local only.'));
         if (commitPlan.deferred.length) out(`  ${commitPlan.deferred.length} changed file(s) belong to other in-progress items and were left for their own commits.`);
         if (item.ownBranch) out(`  Own-branch item: open a PR ${item.ownBranch.branch} → ${item.ownBranch.from} (merge commit), merge it, then: forge milestone branch ${item.milestone}`);
       }
@@ -5988,12 +6349,19 @@ const commands = {
       // F9: surface the gate the moment a milestone completes
       if (item.milestone && milestoneComplete(w, item.milestone) && !((w.gates || {})[item.milestone] || {}).approved
           && ((loadConfig() || {}).options || {}).gates !== 'end-only')
+      {
+        const cfgH = loadConfig() || {};
+        const bgRun = gateAt(cfgH) === 'ship' ? maybeStartGate(w, item.milestone, cfgH, 'hand-over') : null;
         out(`\nMILESTONE '${milestoneLabel(w, item.milestone)}' IS COMPLETE and now awaits human review.\n` +
-            (Object.keys(gateCmds(loadConfig() || {})).length ? `First the gate run — every lane over the finished slice: forge milestone verify ${item.milestone}   (approve refuses without it)\n` : '') +
+            (!Object.keys(gateCmds(cfgH)).length ? '' : gateAt(cfgH) === 'ship'
+              ? (bgRun ? `The full run started in the background (pid ${bgRun.pid}, log ${bgRun.log}) — it runs while the owner reviews; do not wait for it. ship needs it green.\n`
+                       : `The full run is needed before ship, not before the demo: forge milestone verify ${item.milestone} --background (it is skipped when one is running or already passed on this code).\n`)
+              : `First the gate run — every lane over the finished slice: forge milestone verify ${item.milestone}   (approve refuses without it)\n`) +
             `Demo it to the user, collect their verdict, AND ask: "anything you want to change or add before the next milestone?"\n` +
             `— their answer becomes decisions + work-graph updates. Then: forge milestone approve ${item.milestone} --note "..."\n` +
             `Items in later milestones will refuse to start until then.\n` +
             `📊 Point the user at forge/dashboard.html for the visual state of the project.`);
+      }
 
     } else if (sub === 'fail') {
       const item = getItem(w, argv[2]);
@@ -7241,7 +7609,22 @@ const commands = {
   // -- ci (v0.26) — the deterministic checks CI should run, and a workflow holding the missing ones ---------
   ci() {
     const sub = argv[1];
-    if (sub !== 'checks') die('Usage: forge ci checks [--json] [--write [--release-branch <branch>]]');
+    if (sub === 'runs') {
+      const cfgR = loadConfig() || {};
+      const wR = readJson(WORK_FILE, null); if (wR) ensureMilestones(wR);
+      const rep = ciRunsReport(PROJECT, cfgR, wR);
+      if (flag('json')) { out(JSON.stringify(rep, null, 2)); return; }
+      const L = x => x.length ? x.join(', ') : 'none';
+      out(`# CI runs per milestone — ${rep.branch} → ${rep.base || '(no base branch)'} · options.push ${rep.push}`);
+      out(`Each task push   ${rep.perTask ? L(rep.onMilestonePush) + ' — once per task' : rep.onMilestonePush.length ? `none — task commits stay local (${rep.why})` : 'none — no workflow listens to pushes to ' + rep.branch}`);
+      out(`At ship          push: ${L(rep.onMilestonePush)} · pull request: ${L(rep.onPullRequest)}`);
+      out(`After the merge  push to ${rep.base || 'the base'}: ${L(rep.onBasePush)}`);
+      if (rep.twiceAtShip.length) out(`\nRuns twice on the same code at ship (push and pull request): ${rep.twiceAtShip.join(', ')} — limit its push trigger to ${rep.base || 'the base branch'}.`);
+      if (rep.againAfterMerge.length) out(`${rep.twiceAtShip.length ? '' : '\n'}Runs again after the merge on the code the pull request tested: ${rep.againAfterMerge.join(', ')} — keep the heavy jobs on pull_request if branch protection requires them there.`);
+      out(`\nPer milestone of N tasks: ${rep.perTask ? `${rep.onMilestonePush.length}×N + ` : ''}${rep.onMilestonePush.length + rep.onPullRequest.length + rep.onBasePush.length} workflow run(s)${rep.perTask ? '' : ' (plus one per later push to an open pull request)'}. Forge reads the triggers only — this is not a bill.`);
+      return;
+    }
+    if (sub !== 'checks') die('Usage: forge ci checks [--json] [--write [--release-branch <branch>]] · forge ci runs [--json]');
     const st = ciChecksState(PROJECT);
     const release = ciReleaseBranch();
     if (flag('json')) { out(JSON.stringify(Object.assign({ releaseBranch: release }, st), null, 2)); return; }
@@ -7398,6 +7781,28 @@ const commands = {
   // tool execution by kind, and idle gaps labelled by what ended them (a worker hand-back, a background
   // command finishing, the owner, compaction). Field use (cisc, 12 Oct): 7.8 h orchestrator — 10% model,
   // ~40% waiting on tests, 23% on workers, 14% on the owner. Read-only; prints totals.
+  // v0.31: internal — run the commands on stdin at once, print their results as one JSON line (runMany)
+  __parallel() {
+    TRACED = true;
+    let jobs = []; try { jobs = JSON.parse(fs.readFileSync(0, 'utf8') || '[]'); } catch (_) { }
+    const { spawn } = require('child_process');
+    return Promise.all(jobs.map(j => new Promise(resolve => {
+      const t0 = Date.now(); let buf = ''; let timedOut = false; let done = false;
+      const ch = spawn(j.cmd, { shell: true, cwd: PROJECT, detached: true });
+      const keep = d => { buf += d; if (buf.length > 4e6) buf = buf.slice(-2e6); };
+      ch.stdout.on('data', keep); ch.stderr.on('data', keep);
+      const timer = setTimeout(() => { timedOut = true; try { process.kill(-ch.pid, 'SIGKILL'); } catch (_) { try { ch.kill('SIGKILL'); } catch (__) { } } }, j.timeout || 600000);
+      const finish = r => { if (done) return; done = true; clearTimeout(timer); resolve(r); };
+      ch.on('error', e => finish({ cmd: j.cmd, exit: 127, tail: String(e && e.message), ms: Date.now() - t0 }));
+      ch.on('close', code => {
+        const text = buf.trim();
+        const r = { cmd: j.cmd, exit: timedOut || code === null ? -1 : code, tail: text.split('\n').slice(-40).join('\n'), ms: Date.now() - t0 };
+        if (r.exit === -1) { r.timedOut = true; r.note = `timed out after ${Math.round((j.timeout || 600000) / 1000)} s — killed by Forge, not failed by the code`; }
+        finish(r);
+      });
+    }))).then(rs => out(JSON.stringify(rs)));
+  },
+
   clock() {
     const sinceArg = opt('since'); const untilArg = opt('until');
     const SINCE = sinceArg ? Date.parse(sinceArg) : Date.now() - 24 * 3600e3;
@@ -7469,12 +7874,16 @@ const commands = {
         }
       }
     }
-    if (flag('json')) { out(JSON.stringify({ since: new Date(SINCE).toISOString(), until: Number.isFinite(UNTIL) ? new Date(UNTIL).toISOString() : null, transcripts: nf, ms: T }, null, 2)); return; }
+    if (flag('json')) { out(JSON.stringify({ since: new Date(SINCE).toISOString(), until: Number.isFinite(UNTIL) ? new Date(UNTIL).toISOString() : null, transcripts: nf, ms: T,
+      testWaitMs: { main: Object.entries(T.main).filter(([k]) => CLOCK_TEST_RE.test(k)).reduce((a, [, v]) => a + v, 0), side: Object.entries(T.side).filter(([k]) => CLOCK_TEST_RE.test(k)).reduce((a, [, v]) => a + v, 0) } }, null, 2)); return; }
     const fmt = ms => { const m = ms / 60000; return m >= 60 ? `${(m / 60).toFixed(1)} h` : `${m.toFixed(1)} min`; };
     for (const th of ['main', 'side']) {
       const tot = Object.values(T[th]).reduce((a, b) => a + b, 0);
       out(`\n${th === 'main' ? 'ORCHESTRATOR (main thread)' : 'WORKERS (subagents, summed across parallel threads)'} — ${nf[th]} transcript(s), ${fmt(tot)}`);
       for (const [k, v] of Object.entries(T[th]).sort((a, b) => b[1] - a[1]).filter(([, v]) => v >= 30000)) out(`  ${fmt(v).padStart(9)}  ${String(Math.round(100 * v / (tot || 1))).padStart(3)}%  ${k}`);
+      // v0.31: the split the testing budget is about
+      const tw = Object.entries(T[th]).filter(([k]) => CLOCK_TEST_RE.test(k)).reduce((a, [, v]) => a + v, 0);
+      if (tot) out(`  — waiting on tests: ${fmt(tw)} (${Math.round(100 * tw / tot)}%) · everything else: ${fmt(tot - tw)}`);
     }
     if (flag('samples')) for (const th of ['main', 'side']) for (const [k, m] of Object.entries(S[th])) {
       out(`\n[${th}] top of: ${k}`);
@@ -8218,6 +8627,22 @@ const commands = {
       if (/^(main|master|prod|production)$/i.test(gc.base)) die(`Refused: base branch '${gc.base}' is a production branch — Forge never ships straight to production.`);
       const g = w.gates[m] || {};
       if (!g.approved) die(`Refused: milestone '${m}' is not approved. ship comes after the human gate: forge milestone approve ${m} --note "..."`);
+      // v0.31: options.gateAt ship — the milestone's one full run must be green on the code being shipped
+      let shipGateSkip = null;
+      if (gateAt(cfgS) === 'ship' && Object.keys(gateCmds(cfgS)).length) {
+        const runningS = gateRunning(m);
+        if (runningS) die(`Refused: the full run of '${m}' is still running (pid ${runningS.pid}, log ${runningS.log}). Ship when it has passed.`);
+        if (!gateCurrent(w, m)) {
+          if (flag('skip-gate')) { if (!opt('reason')) die('--skip-gate requires --reason "..." (recorded on the ship record).'); shipGateSkip = opt('reason'); }
+          else {
+            const red = ((g.verify || {}).passed === false);
+            const st = maybeStartGate(w, m, cfgS, 'ship');
+            die(`Refused: '${m}' has no green full run on the code as it is now${red ? ' (the last one was red — fix it first; the next run re-runs only what failed)' : ''}.\n` +
+                (st ? `Started it in the background (pid ${st.pid}, log ${st.log}); ship when it has passed.` : `  forge milestone verify ${m} --background`) +
+                `\nShip anyway: forge milestone ship ${m} --skip-gate --reason "..."`);
+          }
+        }
+      }
       const b = milestoneBranch(cfgS, m);
       if (currentBranch() !== b) die(`Refused: switch to the milestone branch first: git switch ${b}`);
       const bad = staleStateProblems();
@@ -8287,7 +8712,7 @@ const commands = {
         if (requiredChecks === true) { const am = gh(['pr', 'merge', url, '--auto', `--${gc.merge === 'merge' ? 'merge' : gc.merge}`]); autoMerge = am.code === 0; if (!autoMerge) out(`⚠ auto-merge could not be enabled: ${am.err}`); }
         else out(`⚠ NOT enabling auto-merge: '${gc.base}' has ${requiredChecks === false ? 'NO required status checks' : 'unknown protection (no admin rights to read it)'} — auto-merge would merge before CI finishes.`);
       }
-      w.gates[m] = Object.assign({}, w.gates[m], { ship: { pr: url, branch: b, head: git(['rev-parse', 'HEAD']).out, ts: ts(), requiredChecks, autoMerge, extraReason: extra.length ? opt('reason') : undefined } });
+      w.gates[m] = Object.assign({}, w.gates[m], { ship: { pr: url, branch: b, head: git(['rev-parse', 'HEAD']).out, ts: ts(), requiredChecks, autoMerge, extraReason: extra.length ? opt('reason') : undefined, gateSkipped: shipGateSkip || undefined } });
       saveWork(w);
       out(`Milestone ${m} shipped for review: ${url}`);
       if (noCommit.length) out(`  Note: ${noCommit.length} DONE item(s) have no Forge commit (done before the git flow, or nothing to commit): ${noCommit.slice(0, 8).join(', ')}`);
@@ -8375,27 +8800,66 @@ const commands = {
       if (!Object.keys(lanes).length) die('No verify or gate commands configured.');
       const open = w.order.filter(id => w.items[id].milestone === m && w.items[id].status === 'IN_PROGRESS');
       if (open.length && !flag('force')) die(`Refused: ${open.join(', ')} still IN_PROGRESS in '${m}' — a gate run tests a finished slice. Settle them first (or --force).`);
+      // v0.31: --background — start the run detached and return; forge status shows it, ship waits for it
+      if (flag('background')) {
+        const running = gateRunning(m);
+        if (running) { out(`The full run of '${m}' is already running (pid ${running.pid}, log ${running.log}).`); return; }
+        const st = startGateRun(m, 'requested');
+        out(`The full run of '${m}' started in the background (pid ${st.pid}) — log: ${st.log}. forge status shows it while it runs.`);
+        return;
+      }
       releaseWorkLock();
       acquireVerifyLock(`milestone:${m}`, flag('no-wait'));
       const results = [];
-      for (const [k, cmd] of Object.entries(cfgV.verify || {})) results.push(Object.assign({ kind: `project:${k}` }, run(cmd)));
-      for (const [k, cmd] of Object.entries(gateCmds(cfgV))) { const r = run(cmd, { specs: lanePlaywright(cfgV, cmd, true), timeout: gateTimeoutMs(cfgV), timeoutKey: 'options.gateTimeoutSec' }); slowGateNote(cfgV, k, r); results.push(Object.assign({ kind: `gate:${k}` }, r)); }
-      if (fs.existsSync(BASELINE_FILE)) for (const r of baselineCompare(cfgV, true, results.slice())) results.push(r);
+      // v0.30: a lane that passed on exactly this code (the last task's full verify, usually) is not run again
+      const ctreeBefore = contentTree();
+      const prior = priorPasses(w, ctreeBefore, cfgV);
+      // v0.31: after a red full run, the next one re-runs only what failed (Playwright: the failed spec files);
+      // its pass counts as the full run. --all-lanes, --fresh or options.gateRetry false run everything.
+      const lvG = ((w.gates || {})[m] || {}).verify;
+      const grOn = ((cfgV.options || {}).gateRetry) !== false && ((cfgV.options || {}).gateRetry) !== 'false';
+      const badG = lvG && !lvG.passed && grOn && !flag('all-lanes') && !flag('fresh') ? (lvG.results || []).filter(r => r.exit !== 0) : [];
+      const laneOf = r => String(r.kind).replace(/^(project|gate|baseline):/, '');
+      const retryFast = [...new Set(badG.filter(r => /^(project|baseline):/.test(r.kind)).map(laneOf).filter(k => (cfgV.verify || {})[k]))];
+      const retryGate = [...new Set(badG.filter(r => /^(gate|baseline):/.test(r.kind)).map(laneOf).filter(k => gateCmds(cfgV)[k]))];
+      const isRetry = retryFast.length + retryGate.length > 0;
+      if (isRetry) {
+        const fr = runMany(retryFast.map(k => cfgV.verify[k]), cfgV, null);
+        retryFast.forEach((k, i) => results.push(Object.assign({ kind: `project:${k}` }, fr[i], { retry: true, note: 'only what failed in the last full run' })));
+        for (const k of retryGate) {
+          const was = badG.find(r => r.kind === `gate:${k}`);
+          const narrow = was && !was.timedOut ? gateRetryCmd(cfgV, k, was.failedSpecs) : null;
+          const r = run(narrow || gateCmds(cfgV)[k], { specs: lanePlaywright(cfgV, gateCmds(cfgV)[k], true), timeout: gateTimeoutMs(cfgV), timeoutKey: 'options.gateTimeoutSec' });
+          slowGateNote(cfgV, k, r);
+          r.retry = true; r.note = (r.note ? r.note + ' · ' : '') + (narrow ? `only what failed in the last full run: ${narrow}` : 'the whole lane again (no failed spec list)');
+          results.push(Object.assign({ kind: `gate:${k}` }, r));
+        }
+      } else {
+        const fr = runMany(Object.values(cfgV.verify || {}), cfgV, prior);
+        Object.keys(cfgV.verify || {}).forEach((k, i) => results.push(Object.assign({ kind: `project:${k}` }, fr[i])));
+        for (const [k, cmd] of Object.entries(gateCmds(cfgV))) { const r = runOrReuse(prior, cmd, { specs: lanePlaywright(cfgV, cmd, true), timeout: gateTimeoutMs(cfgV), timeoutKey: 'options.gateTimeoutSec' }); slowGateNote(cfgV, k, r); results.push(Object.assign({ kind: `gate:${k}` }, r)); }
+        if (fs.existsSync(BASELINE_FILE)) for (const r of baselineCompare(cfgV, true, results.slice())) results.push(r);
+      }
       const tree = treeState();
+      const ctree = contentTree();
       releaseVerifyLock();
       acquireWorkLock();
       const wNow = readJson(WORK_FILE, w); ensureMilestones(wNow);
       const passed = results.every(r => r.exit === 0);
-      wNow.gates[m] = Object.assign({}, wNow.gates[m], { verify: { ts: ts(), passed, tree, head: gitHead(), results, durationMs: results.reduce((a, r) => a + (r.ms || 0), 0) } });
+      wNow.gates[m] = Object.assign({}, wNow.gates[m], { verify: { ts: ts(), passed, tree, ctree: ctree || undefined, ctreeBefore: ctreeBefore || undefined, retry: isRetry || undefined, background: process.env.FORGE_GATE_BG === '1' || undefined, head: gitHead(), results, durationMs: results.reduce((a, r) => a + (r.ms || 0), 0) } });
       saveWork(wNow);
+      if (process.env.FORGE_GATE_BG === '1') try { const gf = path.join(STATE, `gate-${m}.json`); const g = JSON.parse(fs.readFileSync(gf, 'utf8')); g.ended = ts(); g.passed = passed; fs.writeFileSync(gf, JSON.stringify(g) + '\n'); } catch (_) { }
       const failed = results.filter(r => r.exit !== 0);
-      out(`GATE VERIFY ${m} — ${passed ? 'PASS' : 'FAIL'} ${results.length - failed.length}/${results.length} · ${Math.round(results.reduce((a, r) => a + (r.ms || 0), 0) / 1000)}s`);
+      out(`GATE VERIFY ${m} — ${passed ? 'PASS' : 'FAIL'} ${results.length - failed.length}/${results.length} · ${Math.round(results.reduce((a, r) => a + (r.ms || 0), 0) / 1000)}s` +
+          (results.some(r => r.reused) ? ` · ${results.filter(r => r.reused).length} not run again (the same code passed them earlier; --fresh runs them)` : ''));
       for (const r of results) {
         if (r.exit === 0) { out(`  ✓ ${r.kind}${r.note ? ` (${r.note})` : ''}`); continue; }
         out(`  ✗ ${r.kind} — exit ${r.exit}${r.note ? ` (${r.note})` : ''}\n${String(r.tail || '').split('\n').slice(-20).map(l => '    ' + l).join('\n')}`);
       }
-      if (!passed) { out(`\nA red gate lane is a regression somewhere in '${m}': each task commit is on the branch, so bisect them (git bisect, or re-run the lane at each item commit — forge task show <id> has the sha), fix it as a task (--origin discovery), then run this again.`); process.exit(1); }
-      out(`\nRecorded on the gate. Next: the security pass if not done, the demo, then forge milestone approve ${m}.`);
+      if (!passed) { out(`\nA red lane is a regression somewhere in '${m}': each task commit is on the branch, so bisect them (git bisect, or re-run the lane at each item commit — forge task show <id> has the sha), fix it as a task (--origin discovery), then run this again${grOn ? ' — it re-runs only what failed (--all-lanes: everything)' : ''}.`); process.exit(1); }
+      out(gateAt(cfgV) === 'ship'
+        ? `\nRecorded on the gate${isRetry ? ' (the re-run of what failed counts as the full run)' : ''}. ship needs it on the code as it is then — a change after this (a review fix) needs another run.`
+        : `\nRecorded on the gate. Next: the security pass if not done, the demo, then forge milestone approve ${m}.`);
 
     } else if (sub === 'security') {
       // v0.8: record the milestone security review (fresh-context reviewer over the slice's diff)
@@ -8462,9 +8926,9 @@ const commands = {
       let gateSkip = null;
       {
         const cfgA = loadConfig() || {};
-        if (Object.keys(gateCmds(cfgA)).length) {
+        if (Object.keys(gateCmds(cfgA)).length && gateAt(cfgA) !== 'ship') { // v0.31: with gateAt ship, ship holds it
           const gv = (w.gates[m] || {}).verify;
-          const current = gv && gv.passed && gv.tree && treeState() && gv.tree === treeState();
+          const current = gv && gv.passed && (gv.ctree ? gv.ctree === contentTree() : (gv.tree && treeState() && gv.tree === treeState()));
           if (!current) {
             if (flag('skip-gate')) { if (!opt('reason')) die('--skip-gate requires --reason "..." (recorded in the decisions log).'); gateSkip = opt('reason'); }
             else die(`Refused: milestone '${m}' has no passing gate verification for the current tree (gate lanes: ${Object.keys(gateCmds(cfgA)).join(', ')}).\n` +
@@ -8490,6 +8954,13 @@ const commands = {
         `\n### ${ts()} — Milestone '${m}' approved\n- Authority: human\n- Decision: milestone gate approved after human review${secSkip ? ` (SECURITY REVIEW SKIPPED: ${secSkip})` : ''}${gateSkip ? ` (GATE VERIFY SKIPPED: ${gateSkip})` : ''}\n- Why: ${opt('note') || '(no note recorded)'}\n`);
       freezeLabels(w); saveWork(w);
       out(`Milestone ${computeLabels(w).milestone[m]} '${milestoneLabel(w, m)}' approved — later milestones may now start.`);
+      { const cfgG = loadConfig() || {}; // v0.31: the full run on the approved code, in the background (none if one is running or already green)
+        if (gateAt(cfgG) === 'ship' && Object.keys(gateCmds(cfgG)).length) {
+          const bg = maybeStartGate(w, m, cfgG, 'approve');
+          out(bg ? `The full run started in the background on the approved code (pid ${bg.pid}, log ${bg.log}); ship needs it green.`
+                 : gateRunning(m) ? `The full run is still running (log ${gateLogRel(m)}); ship needs it green.`
+                 : gateCurrent(w, m) ? 'The full run already passed on this code.' : `ship needs a green full run: forge milestone verify ${m} --background`);
+        } }
       {
         const rel = releaseOf(w, m);
         if (rel && milestoneSeq(w).filter(x => releaseOf(w, x) === rel).every(x => ((w.gates || {})[x] || {}).approved))
@@ -8949,7 +9420,7 @@ const commands = {
   task dispatch <id> [--agent name] [--kind launch|message] [--note n]
                                          record the handoff to a worker (state, not transcript inference);
                                          kind=message audits a mid-flight message to a running worker
-  task verify <id> [--skip-baseline --reason r]
+  task verify <id> [--skip-baseline --reason r] [--fresh]
                                          project checks + criterion checks + baseline (when captured); records evidence + tree state
   task done <id>                         refuses: no passing verification, tree changed since verification,
                                          checks that were green before work with an unchanged tree
