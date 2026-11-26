@@ -1036,6 +1036,15 @@ claude</span>
   for you only. Every button is one <code>forge</code> command; nothing reaches Claude, and a test holds it to
   that. Turn it off with the plugin's <code>cockpit</code> setting; older Claude Code ignores it.</p>
 
+  <h3>The cockpit boards (v0.32)</h3>
+  <p>The <code>/forge</code> pane says in plain words what the terminal is doing; keys 1–7 switch boards.
+  <b>Now</b>: what is happening, what needs you (questions with a button per answer), what happened.
+  <b>Tasks</b>: the milestone as an aligned table in plain steps. <b>Running</b>: each worker on its task, its calls
+  in plain words, a progress bar for a running check. <b>Gate</b>: tasks → full test run → security → your review →
+  ship, the next step marked. <b>Project</b>: the headline and the next milestones with progress bars.
+  <b>Steer</b>: pause or start autopilot, type a note for the next task. <b>Config</b>: the switches, grouped.
+  The band keeps one line that fits the terminal; a waiting question gets its own line.</p>
+
   <h3>The testing budget (v0.31)</h3>
   <p>A task closes on its own checks: the quick lanes (run at once), its criteria and the unit tests its change
   affects — never the full suite. Run <code>task verify</code> in the background and brief the next task;

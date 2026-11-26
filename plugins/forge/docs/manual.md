@@ -435,6 +435,20 @@ Everything a view needs, as data, read-only, with no tokens spent:
   your next prompt, a main-thread tool call, or the session ending. A subagent's tool call does not
   clear it.
 
+## The cockpit boards (v0.32)
+
+The `/forge` pane says in plain words what the terminal is doing. Keys 1–7 switch boards:
+
+1. **Now** — one paragraph: the milestone and how far it is, what is in progress, whether checks are running, what autopilot is doing and why it paused. Then each question with one button per answer, anything else that needs you, and *What happened* (the last events: started, passed its checks, closed, failed, approved…).
+2. **Tasks** — the active milestone as an aligned table: step in plain words (to do, building, checking, reviewing, waiting, done), task, what it is, who works on it, its last checks. Cancelled tasks are folded into a count.
+3. **Running** — each worker with the task it is on, its model, time and tokens, and its tool calls in plain words (`forge task verify cart-4`, `e2e checkout.spec.ts`, `edit Totals.tsx` — no paths, `cd` or shell plumbing). A running check shows a progress bar against how long it took last time.
+4. **Gate** — the milestone on its way out, in order: tasks closed → full test run (none / running with a bar / passed / failed and what failed) → security pass → your review → ship, the next step marked.
+5. **Project** — the headline (milestones approved, tasks, how much was added after planning, open questions), the active milestone and the next five with progress bars and how each grew; approved ones folded into one line.
+6. **Steer** — pause autopilot after the current task or start it; type a note for the next task's brief; drop a queued note.
+7. **Config** — the switches grouped, toggles first, one line each.
+
+The band above the prompt keeps one line in a fixed order and drops the least important parts first when the terminal is narrow; a waiting question gets its own line. Autopilot now takes a not-yet-ready task of the active milestone before a ready task of a later one, and when it does stop at a milestone boundary it says why the active milestone's tasks cannot start. With `options.gates end-only`, the full test run still starts in the background when the last task closes.
+
 ## The testing budget (v0.31)
 
 New projects get it; an existing project takes it with `forge config adopt`.

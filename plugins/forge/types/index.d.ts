@@ -1,4 +1,4 @@
-// The Forge cockpit's state contract (v0.28): what its band and pane draw from.
+// The Forge cockpit's state contract (v0.28; v0.32 boards): what its band and pane draw from.
 // The snapshot is `forge status --json`, typed only as far as the cockpit reads it.
 
 export type NeedsYou = {
@@ -7,6 +7,7 @@ export type NeedsYou = {
   item?: string
   release?: string
   session?: string
+  milestone?: string
   count?: number
 }
 export type QuestionOption = { key: string; label: string; recommended: boolean }
@@ -22,6 +23,7 @@ export type TaskRow = {
   failedAttempts: number
   lastVerify: { passed: boolean; ts: string } | null
   blockReason: string | null
+  worker?: string | null
 }
 export type MilestoneRow = {
   id: string
@@ -42,15 +44,32 @@ export type ConfigRow = {
   change: string
   risk: string
 }
+// v0.32: the Gate board — where the milestone stands on its way out
+export type GateState = {
+  milestone: string
+  name: string | null
+  done: number
+  total: number
+  complete: boolean
+  gateAt: string
+  hasGate: boolean
+  fullRun: { state: string; ts?: string | null; since?: string | null; expectedMs?: number | null; failed?: string[]; changedSince?: boolean; retry?: boolean } | null
+  security: { agent: string; ts: string } | null
+  securityOff: boolean
+  approved: boolean
+  ship: { pr: string | null; ts: string } | null
+  perMilestone: boolean
+}
+export type RecentEvent = { ts: string; text: string; tone: string }
 export type Snapshot = {
   schema: number
   forge: string
   project: string
   phase: string | null
   counts: Record<string, number>
-  milestone: { id: string; total: number; counts: Record<string, number> } | null
-  inProgress: { id: string; title: string; worker: { agent: string | null; since: string } | null }[]
-  verify: { item: string | null; since: string | null; alive: boolean | null } | null
+  milestone: { id: string; name?: string | null; total: number; counts: Record<string, number> } | null
+  inProgress: { id: string; title: string; milestone?: string | null; worker: { agent: string | null; since: string } | null }[]
+  verify: { item: string | null; since: string | null; alive: boolean | null; expectedMs?: number | null } | null
   autopilot: { on: boolean; next?: string | null; stop?: { kind: string; reason: string } | null }
   questions: Question[]
   notes: { n: number; text: string; for: string }[]
@@ -58,8 +77,10 @@ export type Snapshot = {
   tasks: TaskRow[]
   milestones: MilestoneRow[]
   config: ConfigRow[]
+  gate?: GateState | null
+  recent?: RecentEvent[]
 }
-// One tool call, as the Workers view lists it.
+// One tool call, as the Running board lists it: already said in plain words.
 export type Call = { tool: string; what: string; at: number }
 export type Worker = {
   id: string
@@ -70,7 +91,7 @@ export type Worker = {
   model: string | null
   startTime: number
 }
-export type View = 'overview' | 'tasks' | 'workers' | 'project' | 'config'
+export type View = 'now' | 'tasks' | 'running' | 'gate' | 'project' | 'steer' | 'config'
 
 declare module 'claude-code' {
   interface PluginState {

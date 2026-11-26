@@ -1448,18 +1448,31 @@ function autopilotDecision(w, cfg, run) {
     return { go: true, next: nx, label: lab(nx.id), question: { id: open.id, key: qKey(open), label: lab(open.id), reason: open.blockReason || 'no reason recorded', asked: asked.includes(qKey(open)) } };
   }
   // a thin task (no criteria or file scope yet) whose dependencies are done is the next piece of
-  // work, not a dead end: the orchestrator fleshes it out from the spec, then starts it
-  if (!nx) {
+  // work, not a dead end: the orchestrator fleshes it out from the spec, then starts it.
+  // v0.32: the active milestone comes first — also when a later milestone has a startable task (cisc, 26 Nov:
+  // autopilot stopped at "the next task belongs to another milestone" while 6 tasks of the active one waited for scope)
+  if (!nx || (nx.milestone || null) !== actM) {
     const thin = milestoneDisplayOrder(w, actM).map(id => w.items[id]).find(t => t && t.status === 'TODO' &&
       (t.deps || []).every(d => !w.items[d] || w.items[d].status === 'DONE') &&
       (!(t.criteria || []).length || !((t.scope || {}).allowed || []).length));
     if (thin) return { go: true, next: thin, label: lab(thin.id), prepare: true };
-    const waiting = w.order.filter(id => w.items[id].status === 'IN_PROGRESS');
+    const waiting = w.order.filter(id => w.items[id].status === 'IN_PROGRESS' && (nx ? w.items[id].milestone === actM : true));
     if (waiting.length) return { go: false, kind: 'waiting', reason: `the rest of ${actM} waits on ${waiting.join(', ')}`, ask: 'Report what is in flight.' };
   }
   if (!nx) return { go: false, kind: 'stuck', reason: `nothing in ${actM} is startable (unmet dependencies, or tasks without criteria / file scope)`,
     ask: 'Say which tasks are not startable and why, and what you need (criteria, scope, a dependency decision).' };
-  if ((nx.milestone || null) !== actM) return { go: false, kind: 'boundary', reason: `the next task ${lab(nx.id)} belongs to another milestone`, ask: 'Report the milestone boundary and wait for the user.' };
+  if ((nx.milestone || null) !== actM) {
+    // v0.32: say why the active milestone's own tasks cannot start, not only where the next one is
+    const open = milestoneDisplayOrder(w, actM).map(id => w.items[id]).filter(t => t && ['TODO', 'BLOCKED'].includes(t.status));
+    const why = {};
+    for (const t of open) {
+      const unmet = (t.deps || []).filter(d => w.items[d] && w.items[d].status !== 'DONE');
+      const k = t.status === 'BLOCKED' ? 'blocked' : unmet.length ? `waiting on ${unmet.slice(0, 2).join(', ')}${unmet.length > 2 ? ' …' : ''}` : 'not ready (no criteria or file scope)';
+      why[k] = (why[k] || 0) + 1;
+    }
+    const whyText = Object.entries(why).map(([k, n]) => `${n} ${k}`).join(', ');
+    return { go: false, kind: 'boundary', reason: `${actM} has ${open.length} task(s) that cannot start yet${whyText ? ` (${whyText})` : ''}; the next task that can, ${lab(nx.id)}, is in milestone ${nx.milestone || '(none)'}`, ask: 'Report the milestone boundary and wait for the user.' };
+  }
   return { go: true, next: nx, label: lab(nx.id) };
 }
 
@@ -2278,6 +2291,44 @@ function cockpitPages(snap) {
 
 // v0.25: one compact, machine-readable picture of the project for the dashboard, the cockpit and scripts
 // (forge status --json). Read-only: it takes no lock and writes nothing. schema bumps on breaking changes.
+// v0.32: the last things that happened, in plain words, from the tail of the trace — the cockpit's "What happened"
+function recentEvents(n) {
+  let txt = '';
+  try {
+    const fd = fs.openSync(TRACE_FILE, 'r'); const st = fs.fstatSync(fd); const len = Math.min(st.size, 131072);
+    const b = Buffer.alloc(len); fs.readSync(fd, b, 0, len, st.size - len); fs.closeSync(fd); txt = b.toString('utf8');
+  } catch (_) { return []; }
+  const res = [];
+  for (const line of txt.split('\n').slice(1)) { let e; try { e = JSON.parse(line); } catch (_) { continue; } const x = eventText(e); if (x) res.push(Object.assign({ ts: e.ts }, x)); }
+  return res.slice(-n);
+}
+function eventText(e) {
+  const a = String(e.cmd || '').split(/\s+/); const ok = e.outcome === 'ok'; const failed = e.outcome === 'exit' && e.exit === 1;
+  const id = a[2] || ''; const flagIn = f => a.includes(f);
+  if (a[0] === 'task') {
+    if (a[1] === 'start' && ok) return { text: `${id || 'the next task'} started`, tone: 'info' };
+    if (a[1] === 'done' && ok) return { text: `${id} closed`, tone: 'good' };
+    if (a[1] === 'verify' && ok) return { text: `${id} passed its checks`, tone: 'good' };
+    if (a[1] === 'verify' && failed) return { text: `${id} failed its checks`, tone: 'bad' };
+    if (a[1] === 'fail' && ok) return { text: `${id}: an attempt failed — it is retried with a new brief`, tone: 'bad' };
+    if (a[1] === 'block' && ok) return { text: `${id} is waiting${flagIn('--question') ? ' on your answer to a question' : ''}`, tone: 'warn' };
+    if (a[1] === 'unblock' && ok) return { text: `${id} can continue`, tone: 'info' };
+    if (a[1] === 'cancel' && ok) return { text: `${id} cancelled`, tone: 'info' };
+    if (a[1] === 'add' && ok) { const i = a.indexOf('--id'); return { text: `task ${i >= 0 ? a[i + 1] + ' ' : ''}added`, tone: 'info' }; }
+  }
+  if (a[0] === 'question' && a[1] === 'answer' && ok) return { text: `question ${id} answered`, tone: 'good' };
+  if (a[0] === 'milestone') {
+    if (a[1] === 'verify' && flagIn('--background') && ok) return { text: `full test run of ${id} started`, tone: 'info' };
+    if (a[1] === 'verify' && ok) return { text: `full test run of ${id} passed`, tone: 'good' };
+    if (a[1] === 'verify' && failed) return { text: `full test run of ${id} failed`, tone: 'bad' };
+    if (a[1] === 'approve' && ok) return { text: `milestone ${id} approved`, tone: 'good' };
+    if (a[1] === 'ship' && ok) return { text: `milestone ${id} shipped: pull request opened`, tone: 'good' };
+    if (a[1] === 'security' && ok && !flagIn('--brief')) return { text: `security pass of ${id} recorded`, tone: 'good' };
+  }
+  if (a[0] === 'autopilot' && ok && (a[1] === 'on' || a[1] === 'off')) return { text: `autopilot ${a[1]}`, tone: 'info' };
+  if (a[0] === 'note' && a[1] === 'add' && ok) return { text: 'a note was queued for the next task', tone: 'info' };
+  return null;
+}
 function statusSnapshot() {
   const cfg = loadConfig();
   if (!cfg) return { schema: 1, forge: VERSION, initialized: false };
@@ -2295,7 +2346,7 @@ function statusSnapshot() {
     const mc = {}; STATUSES.forEach(st => mc[st] = 0);
     const ids = w.order.filter(id => w.items[id].milestone === am);
     ids.forEach(id => mc[w.items[id].status]++);
-    milestone = { id: am, total: ids.length, counts: mc };
+    milestone = { id: am, name: milestoneName(w, am) || null, total: ids.length, counts: mc };
   }
   const awaitingReview = milestoneSeq(w).filter(m => milestoneComplete(w, m) && !(((w.gates || {})[m]) || {}).approved);
   const live = liveWorkers(w, cfg);
@@ -2309,6 +2360,12 @@ function statusSnapshot() {
     const v = JSON.parse(fs.readFileSync(VERIFY_LOCK, 'utf8'));
     if (!v.released) verify = { item: v.item || null, since: v.ts || null, alive: v.pid ? pidAlive(v.pid) : null };
   } catch (_) { }
+  // v0.32: how long this check took last time — the cockpit's progress bar
+  if (verify && verify.item) {
+    const mm = String(verify.item).startsWith('milestone:') ? String(verify.item).slice(10) : null;
+    const prev = mm ? (((w.gates || {})[mm] || {}).verify || null) : (w.items[verify.item] ? lastVerification(w.items[verify.item]) : null);
+    verify.expectedMs = prev ? (prev.wallMs || prev.durationMs || null) : null;
+  }
   const ap = autopilotCfg(cfg);
   let autopilot = { on: !!ap.on };
   if (ap.on) {
@@ -2345,7 +2402,8 @@ function statusSnapshot() {
     const t = w.items[id], lv = lastVerification(t);
     return { id, title: t.title, status: t.status, stage: stageOf(id, t), origin: originOf(t), criteria: (t.criteria || []).length,
       starts: (t.attempts || []).filter(a => a.outcome === 'started').length, failedAttempts: failedAttempts(t),
-      lastVerify: lv ? { passed: !!lv.passed, ts: lv.ts } : null, blockReason: t.blockReason || null };
+      lastVerify: lv ? { passed: !!lv.passed, ts: lv.ts } : null, blockReason: t.blockReason || null,
+      worker: (live.find(x => x.id === id) || {}).agent || null };
   }) : [];
   const milestones = (w.milestoneOrder || []).filter(m => w.order.some(id => w.items[id].milestone === m)).map(m => {
     const ids = w.order.filter(id => w.items[id].milestone === m);
@@ -2359,8 +2417,29 @@ function statusSnapshot() {
     const k = d.key.slice(8);
     return { key: k, value: flat[k] === undefined ? null : flat[k], default: d.def, group: d.group, what: d.what, change: d.change, risk: d.risk };
   });
-  return { schema: 1, forge: VERSION, ts: ts(), project: cfg.project || path.basename(PROJECT), phase: cfg.phase || null,
-    counts, milestone, awaitingReview, inProgress, verify, autopilot, questions, notes, attention, needsYou, tasks, milestones, config };
+  // v0.32: the Gate board — the milestone on its way out (the first one waiting for review, else the active one)
+  let gate = null;
+  const gm = awaitingReview.find(m => !((((w.gates || {})[m]) || {}).ship)) || am;
+  if (gm) {
+    const g = (w.gates || {})[gm] || {};
+    const ids = w.order.filter(id => w.items[id].milestone === gm);
+    const hasGate = Object.keys(gateCmds(cfg)).length > 0;
+    const gv = g.verify || null; const runG = hasGate ? gateRunning(gm) : null;
+    // the code changed after the last green run when a task closed after it (cheap: no tree hashing on a poll)
+    const closedAfter = gv ? ids.some(id => { const a = [...(w.items[id].attempts || [])].reverse().find(x => x.outcome === 'passed'); return a && a.ts > gv.ts; }) : false;
+    gate = { milestone: gm, name: milestoneName(w, gm) || null, total: ids.length,
+      done: ids.filter(id => ['DONE', 'CANCELLED'].includes(w.items[id].status)).length, complete: milestoneComplete(w, gm),
+      gateAt: gateAt(cfg), hasGate,
+      fullRun: !hasGate ? null : runG ? { state: 'running', since: runG.since, expectedMs: gv ? (gv.durationMs || null) : null }
+        : gv ? { state: gv.passed ? 'green' : 'red', ts: gv.ts, retry: !!gv.retry, changedSince: !!(gv.passed && closedAfter),
+                 failed: (gv.results || []).filter(r => r.exit !== 0).map(r => r.kind) } : { state: 'none' },
+      security: g.security ? { agent: g.security.agent, ts: g.security.ts } : null,
+      securityOff: String(((cfg.options || {}).security) || '') === 'off',
+      approved: !!g.approved, ship: g.ship ? { pr: g.ship.pr || null, ts: g.ship.ts } : null, perMilestone: perMilestone(cfg) };
+  }
+  return { schema: 2, forge: VERSION, ts: ts(), project: cfg.project || path.basename(PROJECT), phase: cfg.phase || null,
+    counts, milestone, awaitingReview, inProgress, verify, autopilot, questions, notes, attention, needsYou, tasks, milestones, config,
+    gate, recent: recentEvents(12) };
 }
 // First pass: done with no failed attempt AND no attempt corrected mid-flight by review findings.
 // Clean run (unchanged): one start, no failed attempt, no failed verify run.
@@ -6347,6 +6426,12 @@ const commands = {
           `spec layer file(s) NOW, citing the decision/discovery that drove it — the spec must always describe ` +
           `the product as built and intended.`);
       // F9: surface the gate the moment a milestone completes
+      // v0.32: with options.gates end-only the review prompt is skipped, but the full run still starts at hand-over
+      if (item.milestone && milestoneComplete(w, item.milestone) && ((loadConfig() || {}).options || {}).gates === 'end-only') {
+        const cfgE = loadConfig() || {};
+        const bgE = gateAt(cfgE) === 'ship' ? maybeStartGate(w, item.milestone, cfgE, 'hand-over') : null;
+        if (bgE) out(`\nThe full test run of '${item.milestone}' started in the background (pid ${bgE.pid}, log ${bgE.log}) — ship needs it green.`);
+      }
       if (item.milestone && milestoneComplete(w, item.milestone) && !((w.gates || {})[item.milestone] || {}).approved
           && ((loadConfig() || {}).options || {}).gates !== 'end-only')
       {

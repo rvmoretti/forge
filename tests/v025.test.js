@@ -165,7 +165,7 @@ test('status --json is one machine-readable snapshot: counts, work in progress, 
   forge(['task', 'block', 'S2', '--question', 'Which?', '--option', 'a=A', '--option', 'b=B', '--recommend', 'a']);
   forge(['note', 'add', 'Hello']);
   const s = json(['status', '--json']);
-  assert.strictEqual(s.schema, 1);
+  assert.strictEqual(s.schema, 2); // v0.32: + gate, recent, verify.expectedMs (additive)
   assert.strictEqual(s.project, 'test');
   assert.strictEqual(s.phase, 'build');
   assert.strictEqual(s.counts.IN_PROGRESS, 1);
