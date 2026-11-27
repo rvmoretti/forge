@@ -85,7 +85,11 @@ function traceEvent(fields) {
     { ts: new Date().toISOString(), v: VERSION, cmd: process.argv.slice(2).join(' ').slice(0, 300), ms: Date.now() - T0 },
     fields));
 }
-process.on('exit', (code) => traceEvent({ outcome: code === 0 ? 'ok' : 'exit', exit: code }));
+let REGEN_AT_EXIT = false; // v0.33: see regenDashboard
+process.on('exit', (code) => {
+  traceEvent({ outcome: code === 0 ? 'ok' : 'exit', exit: code });
+  if (REGEN_AT_EXIT) { REGEN_AT_EXIT = false; regenNow(); }
+});
 function out(msg) { process.stdout.write(msg + '\n'); }
 // v0.19: piping into head/less and quitting early is normal, not a crash
 process.stdout.on('error', e => { if (e && e.code === 'EPIPE') process.exit(0); });
@@ -2174,27 +2178,31 @@ function newWorkItem(fields) {
 }
 
 // ============================================================================
-// v0.29: the dashboard as the place to manage Forge — three pages drawn from statusSnapshot() (the same data the
-// cockpit reads): Needs you, Loop, Project. The dashboard ADVISES on Claude and never drives it: every card says
-// where to act and what to type, and what it offers to copy is built only from Forge's own ids and keys. Text that
-// came from elsewhere (a Claude Code notification, a question's wording) is shown as quoted context, never as the
-// thing to type. It is a file on disk: it reloads itself while "live" is on, and Forge regenerates it on every state
-// change and whenever a Claude Code session starts or stops waiting on you.
+// v0.29: the dashboard as the place to manage Forge, drawn from statusSnapshot() (the same data the cockpit
+// reads). The dashboard ADVISES on Claude and never drives it: every card says where to act and what to type,
+// and what it offers to copy is built only from Forge's own ids and keys. Text that came from elsewhere (a
+// Claude Code notification, a question's wording) is shown as quoted context, never as the thing to type.
+// v0.33: reorganized around what the owner does, and every fact is said once. Five destinations: Home (the
+// state in a sentence, what needs you, what is in flight, the milestone on its way out, what just happened),
+// Plan (releases → milestones → tasks; a task opens beside the list), Insights (quality, forecast, scope, time,
+// tokens), Product (specs, screens, architecture, journal) and Setup (configuration, commands, health).
+// The page no longer reloads: it reads its own newer copy in a hidden frame and patches only what changed
+// (dashClient), so the scroll, an open task and a typed filter stay where they are.
 // ============================================================================
 const STAGE_ORDER = ['todo', 'brief', 'cto', 'prepare', 'implement', 'test', 'verify', 'review', 'done', 'blocked'];
 const STAGE_NAME = { todo: 'To do', brief: 'Brief', cto: 'CTO', prepare: 'Prepare', implement: 'Implement', test: 'Test',
   verify: 'Verify', review: 'Review', done: 'Done', blocked: 'Blocked', cancelled: 'Cancelled' };
-const ORIGIN_COLOR = { plan: '#8a8e9a', split: '#b3660a', review: '#7c4dcc', discovery: '#bb2d2d', human: '#0c8a70', audit: '#4553c4' };
+// v0.33: one hue — planned is neutral, added is the accent (see ORIGINS for the order)
 function copyCmd(cmd) { return `<code class="copyable">${esc(cmd)}</code>`; }
 function sayIt(text) { return `<code class="copyable say">${esc(text)}</code>`; }
 function needsCard(n, snap) {
   const q = n.kind === 'question' ? (snap.questions || []).find(x => x.id === n.item) : null;
   if (q) {
-    return `<div class="panel ncard"><h3><span class="nk">Question</span> ${esc(q.id)} <span class="mut">— ${esc(q.title)}</span></h3>
+    return `<div class="ncard" data-key="q:${esc(q.id)}"><h3><span class="nk">Question</span> <a href="#/plan/${encodeURIComponent(q.id)}">${esc(q.id)}</a> <span class="mut">— ${esc(q.title)}</span></h3>
       <blockquote>${esc(q.question)}</blockquote>
-      ${q.options.length ? `<div class="nopts">${q.options.map(o => `<div class="nopt${o.recommended ? ' rec' : ''}"><b>${esc(o.key)}</b> ${esc(o.label)}${o.recommended ? ' <span class="pill" style="color:var(--done);border:1px solid #17874433">recommended</span>' : ''}
-        <div class="nhow">In the Claude session, type ${sayIt(`${q.id}: ${o.key}`)} · or in a terminal ${copyCmd(`forge question answer ${q.id} --choice ${o.key}`)}</div></div>`).join('')}</div>`
-        : `<div class="nhow">Answer it in the Claude session, or in a terminal: ${copyCmd(`forge question answer ${q.id} --note "<your answer>"`)}</div>`}
+      ${q.options.length ? `<div class="nopts">${q.options.map(o => `<div class="nopt${o.recommended ? ' rec' : ''}"><span class="nlab"><b>${esc(o.key)}</b> ${esc(o.label)}${o.recommended ? ' <span class="pill" data-t="rec">recommended</span>' : ''}</span><span class="nsay">${sayIt(`${q.id}: ${o.key}`)}</span>
+        <div class="nalt">or in a terminal ${copyCmd(`forge question answer ${q.id} --choice ${o.key}`)}</div></div>`).join('')}</div><div class="footnote">Type the highlighted answer in the Claude session — click it to copy.</div>`
+        : `<div class="nhow"><span>Answer it in the Claude session, or in a terminal:</span> ${copyCmd(`forge question answer ${q.id} --note "<your answer>"`)}</div>`}
       ${q.since ? `<div class="mut">asked <span data-since="${esc(q.since)}" data-post=" ago"></span></div>` : ''}</div>`;
   }
   if (n.kind === 'claude') {
@@ -2202,91 +2210,1323 @@ function needsCard(n, snap) {
       : n.type === 'idle_prompt' ? 'is waiting for your reply in that terminal'
       : n.type === 'elicitation_dialog' || n.type === 'elicitation_url_dialog' ? 'is asking you something in a dialog in that terminal'
       : n.type === 'agent_needs_input' ? 'has a worker that needs your input in that terminal' : 'is waiting for you in that terminal';
-    return `<div class="panel ncard claude"><h3><span class="nk">Claude Code</span> session <code>${esc(String(n.session || '').slice(0, 8))}</code> ${esc(what)}</h3>
+    return `<div class="ncard claude" data-key="s:${esc(String(n.session || ''))}"><h3><span class="nk">Claude Code</span> session <code>${esc(String(n.session || '').slice(0, 8))}</code> ${esc(what)}</h3>
       ${n.text ? `<blockquote>${esc(n.text)}</blockquote>` : ''}
       <div class="mut">The dashboard cannot answer it for you — go to that terminal.${n.since ? ` Waiting <span data-since="${esc(n.since)}" data-post=""></span>.` : ''}</div></div>`;
   }
   if (n.kind === 'milestone-review') {
-    return `<div class="panel ncard"><h3><span class="nk">Your review</span> milestone ${esc(n.milestone)}</h3>
+    return `<div class="ncard" data-key="r:${esc(n.milestone)}"><h3><span class="nk">Your review</span> milestone <a href="#/plan/${encodeURIComponent(n.milestone)}">${esc(n.milestone)}</a></h3>
       <div>It is finished. Try it, then tell the Claude session your verdict and any changes. To approve it as it is, type ${sayIt(`approve ${n.milestone}`)}</div></div>`;
   }
   if (n.kind === 'hardening-due') {
-    return `<div class="panel ncard"><h3><span class="nk">Release</span> ${esc(n.release)} is ready to be hardened</h3>
+    return `<div class="ncard" data-key="h:${esc(n.release)}"><h3><span class="nk">Release</span> ${esc(n.release)} is ready to be hardened</h3>
       <div>Every feature milestone is approved. Before it ships, add its hardening milestone: type ${sayIt(`harden release ${n.release}`)} in the Claude session, or in a terminal ${copyCmd(`forge release harden ${n.release}`)}</div></div>`;
   }
   if (n.kind === 'audit-triage') {
-    return `<div class="panel ncard"><h3><span class="nk">Audit triage</span> release ${esc(n.release)} — ${esc(n.count)} finding(s)</h3>
+    return `<div class="ncard" data-key="a:${esc(n.release)}"><h3><span class="nk">Audit triage</span> release ${esc(n.release)} — ${esc(n.count)} finding(s)</h3>
       <div>See them: ${copyCmd(`forge audit list ${n.release}`)} · then decide: ${copyCmd(`forge audit triage ${n.release} --accept floor`)} (and <code>--defer</code> / <code>--dismiss … --reason</code> for the rest)</div></div>`;
   }
-  return `<div class="panel ncard"><h3><span class="nk">${esc(n.kind)}</span></h3><blockquote>${esc(n.text)}</blockquote><div class="mut">Reply in the Claude session.</div></div>`;
+  return `<div class="ncard" data-key="k:${esc(n.kind)}"><h3><span class="nk">${esc(n.kind)}</span></h3><blockquote>${esc(n.text)}</blockquote><div class="mut">Reply in the Claude session.</div></div>`;
 }
+// The blocks the pages are assembled from. Every block is plain HTML: the page works with scripts off.
 function cockpitPages(snap) {
-  if (!snap || !snap.schema) return { nav: '', pages: '', css: '', js: '' };
+  const none = { ok: false, count: 0, needs: '', steer: '', flow: '', flowHead: '', scope: '', scopeHead: '', recent: '', gate: '', stages: {} };
+  if (!snap || !snap.schema) return none;
   const need = snap.needsYou || [];
-  const nav = `<a href="#/needs" data-p="needs">Needs you${need.length ? ` <span class="k warnk">${need.length}</span>` : ''}</a>
-    <a href="#/loop" data-p="loop">Loop <span class="k">${(snap.tasks || []).filter(t => t.status === 'IN_PROGRESS').length || ''}</span></a>
-    <a href="#/project" data-p="project">Project <span class="k">${(snap.milestones || []).length}</span></a>`;
   const ap = snap.autopilot || {};
-  const needsPage = `<section class="page" data-page="needs" id="needs" hidden>
-  <div class="phead"><h2>Needs you</h2><span class="mut">what Forge and your Claude sessions are waiting on — act where each card says</span></div>
-  ${need.length ? need.map(n => needsCard(n, snap)).join('\n') : '<div class="panel"><h3>Nothing needs you right now.</h3></div>'}
-  <div class="panel"><h3>Autopilot <span class="mut">— ${ap.on ? (ap.stop ? `stopped: ${esc(ap.stop.reason)}` : `running${ap.next ? `, next ${esc(ap.next)}` : ''}`) : 'off'}</span></h3>
-    <div class="nhow">${ap.on ? `Stop it after the current task: ${copyCmd('forge autopilot off --reason "stopped from the dashboard"')}` : `Start it: type ${sayIt('autopilot on')} in the Claude session`}</div>
-    <div class="nhow">Leave a note for the next task's brief: ${copyCmd('forge note add "<your note>"')}${(snap.notes || []).length ? ` · waiting: ${snap.notes.map(x => `<i>${esc(x.text)}</i>`).join(' · ')}` : ''}</div></div>
-  <p class="mut">Commands run in a terminal at the project root (the Claude session knows the full form). Click one to copy it.</p>
-</section>`;
+  const needs = `<div class="needs" id="needs">${need.length
+    ? `<h2 class="tl">Needs you <span class="cnt">${need.length}</span></h2><div class="nlist">${need.map(n => needsCard(n, snap)).join('\n')}</div>`
+    : '<div class="nempty"><b>Nothing needs you right now.</b><span class="mut">Questions, reviews and sessions waiting on you appear here the moment they happen.</span></div>'}</div>`;
+  // Steer: the two things the owner can do without being asked — start or stop autopilot, leave a note
+  const steer = `<div class="panel" id="autopilot"><h3>Autopilot <span class="mut">— ${ap.on ? (ap.stop ? `stopped: ${esc(ap.stop.reason)}` : `running${ap.next ? `, next ${esc(ap.next)}` : ''}`) : 'off'}</span><i class="sw${ap.on && !ap.stop ? ' on' : ''}" aria-hidden="true"></i></h3>
+    <div class="nhow">${ap.on ? `<span>Stop it after the current task:</span> ${copyCmd('forge autopilot off --reason "stopped from the dashboard"')}` : `<span>Start it: type</span> ${sayIt('autopilot on')} <span>in the Claude session</span>`}</div>
+    <div class="nhow"><span>Leave a note for the next task's brief:</span> ${copyCmd('forge note add "<your note>"')}</div>
+    ${(snap.notes || []).length ? `<ul class="notes">${snap.notes.map(x => `<li>${esc(x.text)}</li>`).join('')}</ul>` : ''}</div>`;
+  // The active milestone as one bar: how many of its tasks stand at each step of the loop
   const tasks = snap.tasks || [];
+  const stagesById = {}; for (const t of tasks) stagesById[t.id] = t.stage;
   const per = {}; for (const t of tasks) per[t.stage] = (per[t.stage] || 0) + 1;
-  const stages = STAGE_ORDER.filter(s => per[s] || ['todo', 'implement', 'verify', 'review', 'done'].includes(s));
-  const live = {}; for (const t of (snap.inProgress || [])) live[t.id] = t.worker;
-  const loopPage = `<section class="page" data-page="loop" id="loop" hidden>
-  <div class="phead"><h2>Loop</h2><span class="mut">${snap.milestone ? `milestone ${esc(snap.milestone.id)} — ${esc(snap.milestone.counts.DONE || 0)}/${esc(snap.milestone.total)} done` : 'no active milestone'}${snap.verify && snap.verify.item ? ` · verify running on ${esc(snap.verify.item)}` : ''}</span></div>
-  <div class="lpipe">${stages.map(s => `<div class="lst${per[s] && !['todo', 'done'].includes(s) ? ' hot' : ''}"><b>${esc(STAGE_NAME[s] || s)}</b><span class="num">${per[s] || 0}</span></div>`).join('<span class="larr">→</span>')}</div>
-  <div class="panel"><table class="ltab"><thead><tr><th>Step</th><th>Task</th><th>Worker</th><th>Criteria</th><th>Starts</th><th>Last verify</th><th>Origin</th></tr></thead><tbody>
-  ${tasks.map(t => `<tr class="s-${esc(t.stage)}"><td>${esc(STAGE_NAME[t.stage] || t.stage)}</td><td><code>${esc(t.id)}</code> ${esc(t.title)}${t.blockReason ? `<div class="mut">${esc(t.blockReason)}</div>` : ''}</td>
-    <td>${live[t.id] ? `${esc(live[t.id].agent || 'worker')} <span class="mut" data-since="${esc(live[t.id].since)}" data-post=""></span>` : ''}</td>
-    <td class="num">${esc(t.criteria)}</td><td class="num">${esc(t.starts)}${t.failedAttempts ? ` <span class="warnk">(${esc(t.failedAttempts)} failed)</span>` : ''}</td>
-    <td>${t.lastVerify ? (t.lastVerify.passed ? '✓' : '✗') : ''}</td><td>${t.origin === 'plan' ? '' : esc(t.origin)}</td></tr>`).join('\n')}
-  </tbody></table></div>
-</section>`;
+  const stages = ['done', 'review', 'verify', 'test', 'implement', 'prepare', 'cto', 'brief', 'blocked', 'todo'].filter(s => per[s]);
+  const flowHead = `${snap.milestone ? `milestone ${esc(snap.milestone.id)} — ${esc(snap.milestone.counts.DONE || 0)}/${esc(snap.milestone.total)} done` : 'no active milestone'}${snap.verify && snap.verify.item ? ` · verify running on ${esc(snap.verify.item)}` : ''}`;
+  // one ring, cut by step: how much is done, how much is moving, how much has not started, what is stuck
+  const RC = 2 * Math.PI * 52, gap = stages.length > 1 ? 3 : 0;
+  let off = 0;
+  const arcs = stages.map(s => { const len = RC * per[s] / tasks.length; const a = `<circle class="f-${esc(s)}" cx="64" cy="64" r="52" stroke-dasharray="${Math.max(1, len - gap).toFixed(1)} ${(RC - Math.max(1, len - gap)).toFixed(1)}" stroke-dashoffset="${(-off).toFixed(1)}"><title>${esc(STAGE_NAME[s] || s)} ${per[s]}</title></circle>`; off += len; return a; }).join('');
+  const flow = tasks.length ? `<div class="flow" id="flow"><svg class="ring" viewBox="0 0 128 128" role="img" aria-label="${esc(stages.map(s => `${per[s]} ${STAGE_NAME[s] || s}`).join(', '))}"><g transform="rotate(-90 64 64)">${arcs}</g><text class="rn" x="64" y="66" text-anchor="middle">${esc(per.done || 0)}</text><text class="rl" x="64" y="84" text-anchor="middle">of ${esc(tasks.length)} done</text></svg>
+    <ul class="flowkey">${stages.map(s => `<li><span class="f-${esc(s)}"><i></i><b class="num">${per[s]}</b> ${esc((STAGE_NAME[s] || s).toLowerCase())}</span></li>`).join('')}</ul></div>` : '';
+  // Scope: every milestone, how many of its tasks were planned and how many were added while building
   const ms = snap.milestones || [];
   const total = ms.reduce((n, m) => n + m.total, 0), planned = ms.reduce((n, m) => n + (m.origins.plan || 0), 0);
-  const origins = Object.keys(ORIGIN_COLOR);
-  const projectPage = `<section class="page" data-page="project" id="project" hidden>
-  <div class="phead"><h2>Project</h2><span class="mut">${esc(ms.length)} milestones · ${esc(total)} tasks · ${esc(total - planned)} added after planning (${total ? Math.round(100 * (total - planned) / total) : 0}%) · ${esc(ms.filter(m => m.approved).length)} approved</span></div>
-  <div class="panel"><div class="plegend">${origins.map(o => `<span><i style="background:${ORIGIN_COLOR[o]}"></i>${esc(o)}</span>`).join('')}</div>
-  ${ms.map(m => `<div class="prow${snap.milestone && snap.milestone.id === m.id ? ' cur' : ''}"><div class="plab"><b>${m.approved ? '✓ ' : ''}${esc(m.id)}</b>${m.release ? ` <span class="mut">${esc(m.release)}</span>` : ''}${m.hardening ? ' <span class="pill" style="color:var(--progc);border:1px solid #4553c433">hardening</span>' : ''}<div class="mut">${esc(m.name || '')}</div></div>
-    <div class="pbar">${origins.filter(o => m.origins[o]).map(o => `<i title="${esc(o)} ${esc(m.origins[o])}" style="flex:${m.origins[o]};background:${ORIGIN_COLOR[o]}"></i>`).join('')}</div>
-    <div class="num pv">${esc(m.counts.DONE || 0)}/${esc(m.total)}</div></div>`).join('\n')}
-  </div>
-</section>`;
-  const css = `.ncard blockquote{border-left:3px solid var(--line);padding:2px 0 2px 10px;color:var(--ink2)}
-.ncard.claude{border-color:#4553c455}.nk{font-size:10px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--accent);margin-right:6px}
-.nopts{display:flex;flex-direction:column;gap:8px}.nopt{padding:8px 10px;border:1px solid var(--line);border-radius:8px}.nopt.rec{border-color:#17874455;background:#17874408}
-.nhow{font-size:12.5px;color:var(--ink2);margin-top:4px}code.say{background:#d4551a10}
-.lpipe{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:0 0 12px}.lst{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:8px 12px;display:flex;flex-direction:column;min-width:84px}
-.lst.hot{border-color:var(--progc)}.lst span{font-size:20px;font-weight:700}.larr{color:var(--ink3)}
-.ltab{width:100%;border-collapse:collapse;font-size:13px}.ltab th,.ltab td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line2);vertical-align:top}
-.ltab tr.s-done td{color:var(--ink3)}.ltab tr.s-implement td:first-child,.ltab tr.s-verify td:first-child,.ltab tr.s-review td:first-child{color:var(--progc);font-weight:700}
-.plegend{display:flex;flex-wrap:wrap;gap:12px;font-size:12px}.plegend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:4px}
-.prow{display:grid;grid-template-columns:minmax(0,1.2fr) minmax(0,2fr) 64px;gap:10px;align-items:center;padding:6px 0;border-bottom:1px solid var(--line2)}
-.prow.cur{background:#4553c40a}.pbar{display:flex;height:14px;border-radius:4px;overflow:hidden;background:var(--line2)}.pv{text-align:right}
-.livebox{display:flex;align-items:center;gap:6px;margin-top:6px;cursor:pointer}
-@media (max-width:700px){.prow{grid-template-columns:1fr}.ltab th:nth-child(n+4),.ltab td:nth-child(n+4){display:none}}`;
-  // live: reload every 10 s while the tab is visible, keeping the page and the scroll; off is remembered
-  const js = `(function(){
-  var box=document.getElementById('forgeLive'); if(!box) return;
-  var key='forgeLive', on=true; try{ on=localStorage.getItem(key)!=='off'; }catch(_){}
-  box.checked=on;
-  box.addEventListener('change',function(){ try{ localStorage.setItem(key, box.checked?'on':'off'); }catch(_){} });
-  try{ var y=sessionStorage.getItem('forgeY:'+location.hash); if(y) setTimeout(function(){ window.scrollTo(0,+y); },60); }catch(_){}
-  setInterval(function(){
-    if(!box.checked||document.visibilityState!=='visible') return;
-    try{ sessionStorage.setItem('forgeY:'+location.hash, String(window.scrollY)); }catch(_){}
-    location.reload();
-  },10000);
-})();`;
-  return { nav, pages: [needsPage, loopPage, projectPage].join('\n'), css, js };
+  const scopeHead = `${esc(ms.length)} milestones · ${esc(total)} tasks · ${esc(total - planned)} added after planning (${total ? Math.round(100 * (total - planned) / total) : 0}%) · ${esc(ms.filter(m => m.approved).length)} approved`;
+  const scope = ms.length ? `<div class="panel" id="scope">
+  <div class="prows">${ms.map(m => { const added = ORIGINS.filter(o => o !== 'plan' && m.origins[o]); return `<a class="prow${snap.milestone && snap.milestone.id === m.id ? ' cur' : ''}" href="#/plan/${encodeURIComponent(m.id)}" data-key="m:${esc(m.id)}"><div class="plab"><b>${m.approved ? '✓ ' : ''}${esc(m.id)}</b>${m.release ? ` <span class="mut">${esc(m.release)}</span>` : ''}${m.hardening ? ' <span class="pill" data-t="hard">hardening</span>' : ''}<div class="mut">${esc(m.name || '')}</div></div>
+    <div class="pstack"><div class="pbar">${ORIGINS.filter(o => m.origins[o]).map(o => `<i class="o-${o}" title="${esc(o)} ${esc(m.origins[o])}" style="flex:${m.origins[o]}"></i>`).join('')}</div><span class="mut">${esc(m.origins.plan || 0)} planned${added.length ? ` · <b class="grew">+${added.reduce((n, o) => n + m.origins[o], 0)}</b> ${added.map(o => `${esc(o)} ${esc(m.origins[o])}`).join(', ')}` : ''}</span></div>
+    <div class="num pv">${esc(m.counts.DONE || 0)}/${esc(m.total)}</div></a>`; }).join('\n')}</div>
+  </div>` : '';
+  // Home: the last things that happened, newest first
+  const ev = (snap.recent || []).slice().reverse().slice(0, 7);
+  const recent = `<div class="panel" id="recent"><h3>What happened</h3>
+    ${ev.length ? `<ul class="feed">${ev.map(e => `<li class="t-${esc(e.tone || 'info')}"><i></i><span>${esc(e.text)}</span><time data-since="${esc(e.ts)}" data-post=" ago"></time></li>`).join('')}</ul>` : '<p class="mut">Nothing yet — events appear as tasks start, pass and close.</p>'}</div>`;
+  // Home: what stands between the active milestone and shipped
+  const g = snap.gate;
+  let gate = '';
+  if (g) {
+    const step = (state, label, note) => `<li class="g-${state}"><i>${state === 'ok' ? '✓' : state === 'bad' ? '✕' : ''}</i><b>${label}</b><span>${note}</span></li>`;
+    const fr = g.fullRun;
+    const steps = [step(g.complete ? 'ok' : 'now', 'Tasks', `${esc(g.done)}/${esc(g.total)} closed`)];
+    if (g.hasGate) steps.push(!fr || fr.state === 'none' ? step('wait', 'Full test run', g.complete ? 'not started' : 'starts when the last task closes')
+      : fr.state === 'running' ? step('run', 'Full test run', `running <span data-since="${esc(fr.since || '')}" data-post=""></span>`)
+      : fr.state === 'green' ? step(fr.changedSince ? 'warn' : 'ok', 'Full test run', fr.changedSince ? 'green, but code changed since' : `green${fr.retry ? ' after one re-run' : ''}`)
+      : step('bad', 'Full test run', `red${(fr.failed || []).length ? ` — ${fr.failed.map(esc).join(', ')}` : ''}`));
+    if (!g.securityOff) steps.push(g.security ? step('ok', 'Security pass', `recorded by ${esc(g.security.agent || 'worker')}`) : step('wait', 'Security pass', 'not recorded yet'));
+    steps.push(g.approved ? step('ok', 'Your review', 'approved') : step(g.complete ? 'you' : 'wait', 'Your review', g.complete ? 'waiting for you' : 'after the tasks close'));
+    if (g.perMilestone) steps.push(g.ship ? step('ok', 'Ship', g.ship.pr ? `<a href="${esc(g.ship.pr)}">pull request opened</a>` : 'shipped') : step('wait', 'Ship', 'one pull request, after your review'));
+    gate = `<ol class="gsteps" id="gate" aria-label="What stands between ${esc(g.milestone)} and shipped">${steps.join('')}</ol>`;
+  }
+  return { ok: true, count: need.length, needs, steer, flow, flowHead, scope, scopeHead, recent, gate, stages: stagesById };
+}
+
+// v0.33: the look — panes of dark glass over a dim, softly lit ground. One surface is solid: the thing that waits
+// on the owner, and the button that answers it (white in the dark theme, near-black in the light one). "Selected"
+// and "you are here" are raised glass, never solid. Amber says someone has to look; coral says it failed. Colours
+// are variables only: a block that hard-codes one stops following the theme. The few icons are drawn here (no
+// icon font, no network: the file stays self-contained).
+const DASH_ICONS = {
+  search: 'M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14zM20 20l-4-4',
+  moon: 'M20 14.5A8 8 0 0 1 9.5 4 8 8 0 1 0 20 14.5z',
+  sun: 'M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8zM12 2v2.5M12 19.5V22M2 12h2.5M19.5 12H22M4.9 4.9l1.8 1.8M17.3 17.3l1.8 1.8M4.9 19.1l1.8-1.8M17.3 6.7l1.8-1.8',
+  copy: 'M11.5 9h6a2.5 2.5 0 0 1 2.5 2.5v6a2.5 2.5 0 0 1-2.5 2.5h-6A2.5 2.5 0 0 1 9 17.500v-6A2.5 2.5 0 0 1 11.5 9zM5 15V6.500A2.5 2.5 0 0 1 7.5 4H15',
+  check: 'M5 12.5l4.5 4.5L19 7.5',
+  down: 'M6 9l6 6 6-6',
+};
+function dashIcon(d) {
+  return `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='${d}'/%3E%3C/svg%3E")`;
+}
+const DASH_DARK = 'color-scheme:dark;--bg:#1b1a18;--glow-a:rgba(214,170,120,.4);--glow-b:rgba(96,124,156,.5);--glow-c:rgba(70,84,104,.62);' +
+  '--ink:rgba(255,255,255,.96);--ink2:rgba(255,255,255,.86);--ink3:rgba(255,255,255,.78);--ink4:rgba(255,255,255,.5);' +
+  '--pane:rgba(0,0,0,.3);--paneshadow:.5px .5px 1px 0 rgba(255,255,255,.4) inset,-.5px -.5px 1px 0 rgba(255,255,255,.1) inset,0 1px 2px 0 rgba(0,0,0,.1);' +
+  '--well:rgba(255,255,255,.1);--chip:rgba(255,255,255,.12);--raised:rgba(255,255,255,.2);--raisering:inset 0 0 0 1px rgba(255,255,255,.45);' +
+  '--line:rgba(255,255,255,.12);--line2:rgba(255,255,255,.1);--line3:rgba(255,255,255,.3);--track:rgba(255,255,255,.16);' +
+  '--hover:rgba(255,255,255,.06);--hover2:rgba(255,255,255,.14);--scrim:rgba(0,0,0,.5);--sheet:rgba(30,29,27,.86);--card:#2b2a28;' +
+  '--c-lit:rgba(244,244,241,.95);--c-onlit:#1a1917;--c-onlit2:#55524d;--c-litchip:rgba(26,25,23,.07);--c-litline:rgba(26,25,23,.12);--c-litline3:rgba(26,25,23,.3);--c-litacc:#8a4a12;' +
+  '--litshadow:0 0 0 .5px rgba(255,255,255,.9) inset,0 18px 50px -18px rgba(255,236,205,.5);' +
+  '--accent:#ffcf8f;--accsoft:rgba(255,207,143,.16);--danger:#ffb0a1;--ondanger:#1a1917;' +
+  '--shadow3:0 30px 80px -24px rgba(0,0,0,.8);--logo:none;';
+const DASH_LIGHT = 'color-scheme:light;--bg:#e9ebee;--glow-a:rgba(255,226,190,.85);--glow-b:rgba(150,172,200,.55);--glow-c:rgba(176,188,206,.6);' +
+  '--ink:#17181b;--ink2:#34373d;--ink3:#4d5158;--ink4:rgba(23,24,27,.5);' +
+  '--pane:rgba(255,255,255,.56);--paneshadow:inset 0 1px 0 #fff,inset 0 0 0 .5px rgba(255,255,255,.9),0 22px 44px -30px rgba(40,52,74,.5);' +
+  '--well:rgba(23,24,27,.06);--chip:rgba(23,24,27,.07);--raised:#fff;--raisering:inset 0 0 0 1px rgba(23,24,27,.1),0 12px 26px -16px rgba(40,52,74,.6);' +
+  '--line:rgba(23,24,27,.12);--line2:rgba(23,24,27,.08);--line3:rgba(23,24,27,.3);--track:rgba(23,24,27,.12);' +
+  '--hover:rgba(23,24,27,.04);--hover2:rgba(23,24,27,.08);--scrim:rgba(23,24,27,.26);--sheet:rgba(246,247,249,.9);--card:#ffffff;' +
+  '--c-lit:rgba(23,24,27,.96);--c-onlit:#f5f5f3;--c-onlit2:rgba(255,255,255,.78);--c-litchip:rgba(255,255,255,.12);--c-litline:rgba(255,255,255,.16);--c-litline3:rgba(255,255,255,.34);--c-litacc:#ffcf8f;' +
+  '--litshadow:inset 0 1px 0 rgba(255,255,255,.18),0 18px 40px -18px rgba(23,24,27,.55);' +
+  '--accent:#8a4a12;--accsoft:rgba(138,74,18,.1);--danger:#a93226;--ondanger:#ffffff;' +
+  '--shadow3:0 30px 80px -30px rgba(40,52,74,.5);--logo:invert(1);';
+
+const DASH_CSS = `/* Forge dashboard. Panes of glass over a dim, softly lit ground; a status rail on the left, a dock at the bottom.
+   ONE surface is solid: what waits on the owner and the button that answers it. Selected and "you are here" are
+   raised glass. Amber: someone has to look. Coral: it failed. Controls are at least 44px tall, text at least 13px. */
+:root{--font:"Outfit",system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;--mono:"DM Mono",ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+--r:20px;--r2:16px;--r3:12px;--ease:cubic-bezier(.2,.8,.2,1);
+@@DARK@@}
+:root[data-theme="light"]{@@LIGHT@@}
+@media (prefers-color-scheme:light){:root[data-theme="auto"]{@@LIGHT@@}}
+/* the names the blocks use for states all resolve to the neutral scale or to the one attention colour */
+:root{--done:var(--ink2);--readyc:var(--ink2);--progc:var(--ink);--blockc:var(--accent);--awaitc:var(--accent);--link:var(--ink);
+--solid:var(--c-lit);--onsolid:var(--c-onlit)}
+*{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth;scroll-padding-top:40px}
+body{font-family:var(--font);background:var(--bg);color:var(--ink);line-height:1.4;font-size:15px;-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility;min-height:100vh}
+.bg{position:fixed;inset:0;z-index:-1;pointer-events:none;background:radial-gradient(900px 620px at 8% 0,var(--glow-a),transparent 70%),radial-gradient(820px 700px at 96% 220px,var(--glow-b),transparent 70%),radial-gradient(1000px 640px at 55% 100%,var(--glow-c),transparent 70%),var(--bg)}
+h1,h2,h3,h4{font-weight:500;letter-spacing:-.01em;line-height:1.25}
+h2{font-size:22px;font-weight:400} h3{font-size:17px;margin:0}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
+.skip{position:fixed;left:16px;top:-80px;z-index:100;background:var(--solid);color:var(--onsolid);padding:12px 18px;border-radius:var(--r3);font-weight:500;text-decoration:none;transition:top .15s}
+.skip:focus{top:16px}
+.mut{color:var(--ink3);font-size:13px;font-weight:400;letter-spacing:0}
+.num{font-variant-numeric:tabular-nums}
+code{font-family:var(--mono);font-size:13px;background:var(--chip);border-radius:7px;padding:1px 6px}
+a{color:inherit;text-decoration:underline;text-decoration-color:var(--line3);text-underline-offset:3px;text-decoration-thickness:1px}
+a:hover{text-decoration-color:currentColor}
+button{font:inherit;color:inherit;letter-spacing:inherit}
+:focus-visible{outline:2px solid var(--ink);outline-offset:2px;border-radius:8px}
+main:focus{outline:0}
+::selection{background:var(--hover2)}
+[hidden]{display:none!important}
+/* ---- the pane ---- */
+.side,.panel,.ncard,.nempty,.tile>a,details.sec.sub,.tblwrap,.syscard,.jcol,.pacestrip,.scard,.archcard,.empty,.filter,.seg,.ghost,#snav{border-radius:var(--r);background:var(--pane);box-shadow:var(--paneshadow);-webkit-backdrop-filter:blur(20px);backdrop-filter:blur(20px)}
+/* inside a solid surface every nested rule keeps working: the scale it draws from is turned over */
+.ncard:not(.claude),.t-you>a,details.icd[data-q="1"]>summary.irow,.railneed,.cnt,.toast{--ink:var(--c-onlit);--ink2:var(--c-onlit);--ink3:var(--c-onlit2);--ink4:var(--c-onlit2);--line:var(--c-litline);--line2:var(--c-litline);--line3:var(--c-litline3);--chip:var(--c-litchip);--well:var(--c-litchip);--hover:var(--c-litchip);--hover2:var(--c-litchip);--track:var(--c-litline);--accent:var(--c-litacc);--solid:var(--c-onlit);--onsolid:var(--c-lit);background:var(--c-lit);color:var(--c-onlit);box-shadow:var(--litshadow);-webkit-backdrop-filter:none;backdrop-filter:none}
+/* ---- shell: the rail says where things stand, the stage holds the page, the dock moves between pages ---- */
+.shell{display:flex;align-items:flex-start;gap:24px;padding:28px;max-width:1720px;margin:0 auto}
+.side{position:sticky;top:28px;flex:none;width:292px;max-height:calc(100vh - 56px);border-radius:28px;display:flex;overflow:hidden}
+.sidein{flex:1;min-width:0;overflow-y:auto;scrollbar-width:none;padding:22px 22px 14px;display:flex;flex-direction:column;gap:20px}
+.sidein::-webkit-scrollbar{display:none}
+.railtop{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.brand{display:block;border-radius:8px}
+.brand img{height:30px;display:block;filter:var(--logo)}
+.ver{font-family:var(--mono);font-size:13px;padding:0 10px;line-height:24px;border-radius:99px;background:var(--chip);color:var(--ink2);white-space:nowrap}
+.proj,.railsub{font-size:15px;color:var(--ink3);overflow-wrap:anywhere}
+.railnum{font-size:64px;font-weight:300;letter-spacing:-.03em;line-height:1.05;white-space:nowrap}
+.railnum b{font-weight:300}
+.railneed{display:flex;align-items:center;gap:12px;min-height:44px;padding:12px 14px;border-radius:var(--r2);text-decoration:none}
+.railneed b{display:block;font-weight:500}
+.railneed span span{font-size:13px;color:var(--ink3)}
+.phases{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.phase{display:flex;flex-direction:column;padding:12px 14px;border-radius:var(--r2);background:var(--well);font-size:17px;font-weight:500;text-transform:capitalize;min-width:0;overflow:hidden;text-overflow:ellipsis}
+.phase::before{content:attr(data-k);font-size:13px;font-weight:400;color:var(--ink3);text-transform:none}
+.phase.apstop{color:var(--accent)}
+.railsec{display:flex;flex-direction:column;gap:8px}
+.railsec h2{font-size:17px;font-weight:500;letter-spacing:0}
+.railfoot{margin-top:auto;display:flex;align-items:center;gap:8px}
+.livebox{flex:1;display:flex;align-items:center;gap:12px;min-height:44px;padding:0 6px;border-radius:var(--r3);cursor:pointer;color:var(--ink2);user-select:none;white-space:nowrap}
+.livebox input{position:absolute;opacity:0;pointer-events:none}
+.livebox i{width:9px;height:9px;border-radius:50%;background:var(--ink4);flex:none}
+.livebox input:checked+i{background:var(--ink);box-shadow:0 0 0 5px var(--track)}
+.livebox.beat input:checked+i{animation:beat .9s ease}
+.livebox:has(input:focus-visible){outline:2px solid var(--ink);outline-offset:2px}
+@keyframes beat{30%{transform:scale(1.7)}}
+@keyframes pulse{50%{opacity:.3}}
+.iconbtn{width:44px;height:44px;border-radius:50%;border:0;background:var(--well);cursor:pointer;display:grid;place-items:center;color:var(--ink);flex:none}
+.iconbtn:hover{background:var(--hover2)}
+.iconbtn::before{content:"";width:18px;height:18px;background:currentColor;-webkit-mask:var(--ic-theme) center/contain no-repeat;mask:var(--ic-theme) center/contain no-repeat}
+.stage{flex:1;min-width:0;display:flex;flex-direction:column;min-height:calc(100vh - 56px);transition:padding .28s var(--ease)}
+.dockwrap{position:sticky;bottom:20px;z-index:20;margin-top:24px}
+#snav{display:flex;gap:4px;padding:6px;border-radius:22px;background:var(--sheet)}
+/* where something is cut off, a pair of arrows at its bottom edge says so and moves it a screen at a time */
+.cues{position:absolute;left:0;right:0;bottom:12px;z-index:3;display:flex;justify-content:center;gap:8px;pointer-events:none}
+.dockwrap>.cues{bottom:calc(100% + 10px)}
+.cues button{pointer-events:auto;width:44px;height:44px;border-radius:50%;border:0;cursor:pointer;display:grid;place-items:center;color:var(--ink);background:var(--sheet);box-shadow:var(--paneshadow),0 10px 24px -12px rgba(0,0,0,.5);-webkit-backdrop-filter:blur(20px);backdrop-filter:blur(20px)}
+.cues button:hover{filter:brightness(1.12)}
+.cues button::before{content:"";width:18px;height:18px;background:currentColor;-webkit-mask:var(--ic-down) center/contain no-repeat;mask:var(--ic-down) center/contain no-repeat}
+.cues button[data-cue="up"]::before{transform:rotate(180deg)}
+#snav>*{flex:1 1 0;min-width:0;min-height:44px;display:inline-flex;align-items:center;justify-content:center;gap:8px;padding:0 8px;border:0;border-radius:var(--r2);background:none;font-size:15px;color:var(--ink);text-decoration:none;white-space:nowrap;cursor:pointer;transition:background .15s}
+#snav>*:hover{background:var(--hover2)}
+#snav a.on{background:var(--raised);box-shadow:var(--raisering);font-weight:500}
+.searchbtn{color:var(--ink3)}
+.searchbtn::before{content:"";flex:none;width:17px;height:17px;background:currentColor;-webkit-mask:var(--ic-search) center/contain no-repeat;mask:var(--ic-search) center/contain no-repeat}
+.searchbtn kbd{display:none}
+kbd{font-family:var(--font);font-size:13px;color:var(--ink3);background:var(--chip);border-radius:7px;padding:2px 7px}
+.k{font-size:13px;font-weight:400;font-variant-numeric:tabular-nums;color:var(--ink3)}
+.k:empty{display:none}
+.k.warnk,.warnk{color:var(--accent)}
+#snav a[data-g="home"] .k.warnk{color:var(--c-onlit);background:var(--c-lit);border-radius:99px;min-width:22px;padding:0 6px;line-height:22px;text-align:center}
+.tabs{display:flex;flex-wrap:wrap;gap:4px;margin:0 0 20px}
+.tabs a{display:inline-flex;align-items:center;gap:8px;min-height:44px;padding:0 16px;border-radius:var(--r3);color:var(--ink);text-decoration:none;white-space:nowrap;transition:background .15s}
+.tabs a:hover{background:var(--hover2)}
+.tabs a.on{background:var(--raised);box-shadow:var(--raisering);font-weight:500}
+main.wrap{flex:1}
+.foot{margin:40px 4px 0;font-size:13px;color:var(--ink3)}
+.foot b{font-weight:500;color:var(--ink2)}
+section.page[hidden]{display:none}
+section.page{animation:pagein .22s var(--ease)}
+@keyframes pagein{from{opacity:0;transform:translateY(6px)}}
+.phead{display:flex;align-items:baseline;gap:6px 14px;flex-wrap:wrap;margin:0 4px 16px}
+.phead h2{font-size:36px;font-weight:300;letter-spacing:-.02em;line-height:1.15}
+.phead .mut{font-size:15px}
+/* under tabs the tab already names the page: the heading stays for screen readers, the sentence leads */
+.tabs:not([hidden])~main .phead h2{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
+.h3s{margin:28px 4px 14px;font-size:22px;font-weight:400} .phead+.h3s{margin-top:8px}
+.h3s .mut{font-size:13px;margin-left:6px}
+.tl{font-size:22px;font-weight:400;margin:0 4px;display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.tl a{text-decoration:none} .tl a:hover{text-decoration:underline}
+/* ---- surfaces ---- */
+.panel{padding:22px;display:flex;flex-direction:column;gap:14px}
+.panel>h3{font-size:13px;font-weight:400;color:var(--ink3);letter-spacing:0;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.panel>h3 a{text-decoration:none;color:var(--ink)} .panel>h3 a:hover{text-decoration:underline}
+.panel h4{font-size:13px;font-weight:400;color:var(--ink3);margin:4px 0 -6px;letter-spacing:0}
+.footnote{font-size:13px;color:var(--ink3)}
+.pill{display:inline-flex;align-items:center;font-size:13px;border-radius:99px;padding:0 10px;line-height:24px;white-space:nowrap;color:var(--ink2);background:var(--chip);vertical-align:1px}
+.pill[data-t="you"]{color:var(--c-onlit);background:var(--c-lit)}
+.pill[data-t="rec"]{background:none;padding:0;color:var(--ink3)}
+.ok{color:var(--ink3)} .warn{color:var(--accent)} .bad{color:var(--danger)}
+.pbar{height:6px;border-radius:99px;background:var(--track);overflow:hidden;display:block}
+.pbar i{display:block;height:100%;border-radius:99px;background:var(--ink)}
+/* ---- home ---- */
+.hero{margin:0 4px 20px}
+.needsyou .glyph{display:none}
+.needsyou h3{font-size:clamp(28px,3vw,40px);font-weight:300;letter-spacing:-.02em;line-height:1.1}
+.needsyou p{font-size:16px;color:var(--ink3);margin-top:10px;max-width:72ch}
+.needs{display:flex;flex-direction:column;gap:14px}
+.cnt{display:inline-block;min-width:22px;text-align:center;font-size:13px;font-weight:500;border-radius:99px;padding:0 6px;line-height:22px;align-self:center}
+.nlist{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(400px,100%),1fr));gap:14px;align-items:start}
+.ncard{padding:24px;display:flex;flex-direction:column;gap:14px}
+.ncard h3{font-size:13px;font-weight:400;color:var(--ink3);letter-spacing:0;line-height:1.6;display:flex;align-items:center;gap:4px 8px;flex-wrap:wrap}
+.ncard h3 a{font-family:var(--mono);color:var(--ink);text-decoration:none;background:var(--chip);border-radius:7px;padding:1px 8px}
+.ncard h3 .mut{color:var(--ink3)}
+.nk{font-weight:500;color:var(--ink)}
+.ncard.claude .nk{display:inline-flex;align-items:center;gap:10px;color:var(--accent)}
+.ncard.claude .nk::before{content:"";width:9px;height:9px;border-radius:50%;background:var(--accent)}
+.ncard blockquote{font-size:24px;font-weight:500;letter-spacing:-.02em;line-height:1.2;max-width:34ch;text-wrap:pretty}
+.ncard.claude blockquote{font-size:20px}
+.ncard>div:not([class]){font-size:15px;line-height:2.2}
+.nopts{display:flex;flex-direction:column;gap:10px}
+.nopt{display:flex;flex-wrap:wrap;align-items:center;gap:2px 10px}
+.nlab{flex:1 1 200px;min-width:0} .nlab b{font-weight:500;margin-right:2px}
+.nsay{margin-left:auto}
+.nalt{flex-basis:100%;font-size:13px;color:var(--ink3);min-width:0}
+.nalt code.copyable{display:inline;white-space:normal;overflow-wrap:anywhere;box-shadow:none;background:none;color:var(--ink3);padding:0 4px;line-height:32px;text-decoration:underline;text-decoration-color:var(--line3);text-underline-offset:3px}
+.nalt code.copyable::before{display:none}
+.nalt code.copyable:hover{color:var(--ink)}
+.nhow{font-size:15px;color:var(--ink2);display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px}
+.nempty{display:flex;flex-direction:column;gap:4px;padding:22px 24px}
+.nempty b{font-size:19px;font-weight:500;display:flex;align-items:center;gap:12px}
+.nempty b::before{content:"";width:18px;height:18px;flex:none;background:currentColor;-webkit-mask:var(--ic-check) center/contain no-repeat;mask:var(--ic-check) center/contain no-repeat}
+.notes{list-style:none;display:flex;flex-direction:column;gap:6px;font-size:13px;color:var(--ink2)}
+.notes li{padding:10px 14px;border-radius:var(--r3);background:var(--well)}
+.notes li::before{content:"Queued for the next brief";display:block;color:var(--ink3)}
+/* anything you can copy is a button: the text, a copy mark, a tick once it is on the clipboard */
+code.copyable{display:inline-flex;align-items:center;gap:10px;flex-direction:row-reverse;min-height:44px;max-width:100%;cursor:pointer;border-radius:var(--r3);background:var(--chip);color:var(--ink);padding:2px 14px;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;vertical-align:middle;transition:background .15s}
+code.copyable::before{content:"";flex:none;width:15px;height:15px;background:currentColor;-webkit-mask:var(--ic-copy) center/contain no-repeat;mask:var(--ic-copy) center/contain no-repeat}
+code.copyable:hover{background:var(--hover2)}
+code.copyable.say,.nopt.rec code.copyable.say{background:var(--solid);color:var(--onsolid);font-weight:500}
+.ncard:not(.claude) .nopt:not(.rec) code.copyable.say{background:var(--chip);color:var(--ink);font-weight:400}
+code.copyable.say:hover{filter:brightness(.94)}
+code.copyable.copied::before{-webkit-mask-image:var(--ic-check);mask-image:var(--ic-check)}
+code.copyable.copied{box-shadow:var(--raisering)}
+code.copyable.cmd{white-space:pre-wrap;word-break:break-word;overflow:visible;padding-top:8px;padding-bottom:8px}
+/* the active milestone, one tile per task: the solid one is yours */
+.msec{display:flex;flex-direction:column;gap:14px;margin-top:28px}
+.tiles{list-style:none;display:grid;grid-template-columns:repeat(auto-fit,minmax(min(168px,100%),1fr));gap:14px}
+.tile>a{min-height:124px;height:100%;padding:16px;display:flex;flex-direction:column;gap:2px;text-decoration:none;color:var(--ink);transition:filter .15s}
+.tile>a:hover{filter:brightness(1.12)}
+.tn{margin-top:auto;padding-top:14px;font-weight:500;line-height:1.25;overflow-wrap:anywhere}
+.ts{font-size:13px;color:var(--ink3)} .ts b{font-family:var(--mono);font-weight:400;margin-right:6px} .ts i{font-style:normal}
+.mk,.stripe{width:26px;height:26px;border-radius:50%;display:grid;place-items:center;flex:none;border:1.5px solid var(--ink4)}
+.mk::after,.stripe::after{content:"";display:block}
+.t-run>a{background:linear-gradient(var(--well),var(--well)),var(--pane)}
+.t-run .mk,details.icd[data-s="IN_PROGRESS"] .stripe{border-color:var(--ink)}
+.t-run .mk::after,details.icd[data-s="IN_PROGRESS"] .stripe::after{width:8px;height:8px;border-radius:50%;background:var(--ink);animation:pulse 2s ease-in-out infinite}
+.t-you .mk,.railneed .mk,details.icd[data-q="1"] .stripe{border:0;background:var(--ink)}
+.t-you .mk::after,.railneed .mk::after,details.icd[data-q="1"] .stripe::after{width:8px;height:8px;border-radius:50%;background:var(--onsolid)}
+.t-done>a{color:var(--ink3)}
+.t-done .mk,details.icd[data-s="DONE"] .stripe,.t-wait .mk,details.icd[data-s="BLOCKED"]:not([data-q="1"]) .stripe,details.icd[data-s="CANCELLED"] .stripe{border:0;background:var(--chip)}
+.t-done .mk::after,details.icd[data-s="DONE"] .stripe::after{width:13px;height:13px;background:currentColor;-webkit-mask:var(--ic-check) center/contain no-repeat;mask:var(--ic-check) center/contain no-repeat}
+.t-wait .mk::after,details.icd[data-s="BLOCKED"]:not([data-q="1"]) .stripe::after{width:6px;height:10px;border-left:2px solid currentColor;border-right:2px solid currentColor}
+details.icd[data-s="CANCELLED"] .stripe::after{width:10px;border-top:2px solid currentColor}
+.t-more>a{background:none;box-shadow:inset 0 0 0 1px var(--line);-webkit-backdrop-filter:none;backdrop-filter:none}
+.ovgrid{display:grid;grid-template-columns:minmax(0,1.7fr) minmax(0,1fr);gap:14px;align-items:start;margin-top:28px}
+.ovgrid>*,.panel{min-width:0}
+.duo{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(320px,100%),1fr));gap:14px;align-items:stretch}
+.feed{list-style:none;display:flex;flex-direction:column}
+.feed li{display:grid;grid-template-columns:8px minmax(0,1fr) auto;gap:14px;align-items:baseline;padding:11px 0;border-bottom:1px solid var(--line2)}
+.feed li:last-child{border-bottom:0;padding-bottom:0} .feed li:first-child{padding-top:0}
+.feed i{width:7px;height:7px;border-radius:50%;background:var(--ink4);transform:translateY(-2px);justify-self:center}
+.feed .t-good{font-weight:500} .feed .t-good i{background:var(--ink)}
+.feed .t-bad i{background:var(--danger)} .feed .t-warn i{background:var(--accent)}
+.feed time{font-size:13px;color:var(--ink3);font-variant-numeric:tabular-nums;white-space:nowrap}
+.sw{margin-left:auto;width:9px;height:9px;border-radius:50%;background:var(--ink4)}
+.sw.on{background:var(--ink);box-shadow:0 0 0 5px var(--track);animation:pulse 2s ease-in-out infinite}
+/* before it ships: the gate, step by step */
+.gsteps{list-style:none;display:flex;flex-direction:column;gap:8px}
+.gsteps li{display:grid;grid-template-columns:26px minmax(0,1fr);gap:0 12px;align-items:center;padding:10px 14px;border-radius:var(--r2);background:var(--well)}
+.gsteps i{grid-row:1/3;width:26px;height:26px;border-radius:50%;display:grid;place-items:center;font-style:normal;font-size:12px;border:1.5px solid var(--ink4);color:transparent}
+.gsteps b{font-weight:500} .gsteps span{color:var(--ink3);font-size:13px;min-width:0}
+.gsteps .g-ok i{border:0;background:var(--chip);color:var(--ink)}
+.gsteps .g-bad i{border:0;background:var(--danger);color:var(--ondanger)} .gsteps .g-bad span{color:var(--danger)}
+.gsteps .g-now i,.gsteps .g-run i{border-color:var(--ink)}
+.gsteps .g-now i::after,.gsteps .g-run i::after{content:"";width:8px;height:8px;border-radius:50%;background:var(--ink)}
+.gsteps .g-run i::after{animation:pulse 1.6s ease-in-out infinite}
+.gsteps .g-you i,.gsteps .g-warn i{border-color:var(--accent)} .gsteps .g-you span,.gsteps .g-warn span{color:var(--accent)}
+/* ---- charts ---- */
+#milestone>h3 a{font-size:19px;font-weight:500;letter-spacing:-.01em}
+.flow{display:flex;flex-wrap:wrap;align-items:center;gap:24px}
+.ring{width:136px;height:136px;flex:none}
+.ring circle{fill:none;stroke-width:10;stroke-linecap:round;stroke:var(--track)}
+.ring .f-done{stroke:var(--ink)}
+.ring .f-review,.ring .f-verify,.ring .f-test,.ring .f-implement,.ring .f-prepare,.ring .f-cto,.ring .f-brief{stroke:var(--ink4)}
+.ring .f-blocked{stroke:var(--accent)}
+.ring .rn{font-size:38px;font-weight:300;letter-spacing:-.03em;fill:var(--ink);font-variant-numeric:tabular-nums}
+.ring .rl{font-size:12px;fill:var(--ink3)}
+.flowkey{list-style:none;display:flex;flex-direction:column;gap:7px;font-size:14px;min-width:0}
+.flowkey span{display:inline-flex;align-items:center;gap:10px;white-space:nowrap}
+.flowkey i{width:9px;height:9px;border-radius:50%;display:block;background:var(--ink4)}
+.flowkey b{font-weight:500}
+.flowkey .f-done i{background:var(--ink)} .flowkey .f-blocked i{background:var(--accent)} .flowkey .f-todo i{background:var(--track)}
+.msfacts{display:flex;flex-direction:column;gap:12px;border-top:1px solid var(--line2);padding-top:14px}
+.msfacts>div{display:grid;grid-template-columns:104px minmax(0,1fr);gap:12px;font-size:14px}
+.msfacts dt{color:var(--ink3);font-size:13px} .msfacts dd b{font-weight:500}
+.msfacts .pbar{margin-top:8px}
+.actnum{display:flex;align-items:center;gap:14px;font-size:13px;color:var(--ink3)}
+.actnum b{font-size:44px;font-weight:300;letter-spacing:-.03em;line-height:1;color:var(--ink)}
+.bars{display:flex;align-items:flex-end;gap:5px;height:76px;margin-top:auto}
+.bars i{flex:1;height:var(--h);min-height:5px;border-radius:99px;background:var(--ink4)}
+.bars i.z{background:var(--track)} .bars i.now{background:var(--ink)}
+.barsx{display:flex;justify-content:space-between;font-size:13px;color:var(--ink3)}
+/* ---- plan ---- */
+.workbar{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin:0 0 12px}
+.filter{flex:1;min-width:200px;max-width:460px;font:inherit;height:52px;padding:0 16px;border:0;border-radius:var(--r2);color:var(--ink);outline:none}
+.filter::placeholder{color:var(--ink3)}
+.filter:focus{box-shadow:var(--paneshadow),inset 0 0 0 1.5px var(--ink3)}
+.seg{display:flex;flex-wrap:wrap;gap:4px;padding:4px;border-radius:var(--r2)}
+.seg button{min-height:44px;padding:0 16px;border:0;border-radius:var(--r3);background:none;color:var(--ink);cursor:pointer;white-space:nowrap;transition:background .15s}
+.seg button:hover{background:var(--hover2)}
+.seg button.on{background:var(--raised);box-shadow:var(--raisering);font-weight:500}
+.seg button .n{font-size:13px;font-weight:400;color:var(--ink3);margin-left:8px;font-variant-numeric:tabular-nums}
+.ghost{min-height:52px;padding:0 18px;border:0;border-radius:var(--r2);color:var(--ink);cursor:pointer;margin-left:auto;white-space:nowrap}
+.ghost[aria-pressed="true"]{background:var(--raised);box-shadow:var(--raisering);font-weight:500}
+.compfilter{display:inline-flex;align-items:center;gap:6px;font-size:13px;background:var(--chip);border-radius:var(--r3);padding:0 6px 0 14px;height:44px}
+.compfilter button{border:0;background:none;color:inherit;cursor:pointer;width:36px;height:36px;border-radius:8px}
+.noresult{color:var(--ink3);padding:24px 4px}
+.relh{margin:24px 4px 12px;font-size:15px;font-weight:500;display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;letter-spacing:0}
+.relh .mut{font-size:15px}
+.vtag{display:inline-block;font-size:13px;font-weight:400;color:var(--ink3);font-family:var(--mono)}
+.vlab{font-weight:400;color:var(--ink3);margin-right:8px} .vlab i{font-style:normal}
+details.sec{margin:14px 0 0;scroll-margin-top:40px}
+details.sec>summary{cursor:pointer;user-select:none;list-style:none;display:flex;align-items:baseline;gap:10px}
+details.sec>summary::-webkit-details-marker{display:none}
+details.sec>summary::before{content:"";flex:none;width:7px;height:7px;border-right:1.6px solid var(--ink2);border-bottom:1.6px solid var(--ink2);transform:rotate(-45deg);transition:transform .2s var(--ease);align-self:center;margin:0 4px}
+details.sec[open]>summary::before{transform:rotate(45deg) translate(-2px,-2px)}
+details.sec.sub{margin:12px 0 0;overflow:hidden}
+details.sec.sub>summary{min-height:60px;padding:10px 20px;align-items:center;flex-wrap:wrap;gap:6px 14px;color:var(--ink3)}
+details.sec.sub>summary>code{background:none;padding:0;color:var(--ink3)}
+/* the name pushes the rest to the right; the bar has a fixed slot at the edge so the bars line up down the page */
+details.sec.sub>summary>b{font-weight:500;color:var(--ink);font-size:17px;margin-right:auto}
+details.sec.sub>summary>.mut[title^="git log"]{display:none}
+.mprog{order:9;display:flex;align-items:center;justify-content:flex-end;gap:14px;flex:none;margin-left:auto}
+.mprog .pbar{width:90px;flex:none} .mprog .mut{min-width:64px;text-align:right}
+.grow{color:var(--accent)!important}
+.mcount{font-size:13px;color:var(--ink3)}
+.mgb{padding:0 6px 6px;display:flex;flex-direction:column}
+summary.irow{display:grid;grid-template-columns:26px 84px minmax(0,1fr) auto;gap:0 14px;align-items:center;padding:6px 14px;cursor:pointer;user-select:none;list-style:none;min-height:52px;border-radius:14px;transition:background .12s}
+summary.irow::-webkit-details-marker{display:none}
+summary.irow:hover{background:var(--hover)}
+details.icd.cur:not([data-q="1"])>summary.irow,details.icd[open]:not([data-q="1"])>summary.irow{background:var(--raised);box-shadow:var(--raisering)}
+details.icd[data-q="1"].cur>summary.irow{outline:2px solid var(--c-lit);outline-offset:2px}
+details.icd[data-q="1"]>summary.irow:hover{filter:brightness(.97)}
+details.icd[data-s="DONE"] .tt,details.icd[data-s="CANCELLED"] .tt{color:var(--ink3);font-weight:400}
+details.icd[data-s="CANCELLED"] .tt{text-decoration:line-through}
+.iid{font-family:var(--mono);font-size:13px;color:var(--ink3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+summary.irow .iid .vlab{display:none}
+.itt{padding:4px 0;display:flex;align-items:center;gap:2px 8px;flex-wrap:wrap;min-width:0}
+.tt{font-weight:500}
+.itt .sub,.itt .warnv,.warnv{font-size:13px;color:var(--ink3);flex-basis:100%}
+.itt .warnv,.warnv{color:var(--accent)}
+.dot-open{display:none}
+.imeta{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--ink3);justify-content:flex-end;font-variant-numeric:tabular-nums;white-space:nowrap}
+summary.irow .imeta .st{display:none}
+.imeta .stg{font-weight:400}
+.st{font-size:13px;border-radius:99px;padding:0 10px;line-height:24px;white-space:nowrap;background:var(--chip);color:var(--ink2);text-transform:lowercase}
+.st.s-block{color:var(--accent)}
+.cchip{display:inline-flex;align-items:center;gap:5px;font-size:13px;font-weight:400;border-radius:7px;padding:0 8px;line-height:24px;background:var(--chip);color:var(--ink3);white-space:nowrap}
+button.cchip{border:0;cursor:pointer}
+button.cchip:hover{color:var(--ink)}
+.docopen{cursor:pointer}
+.icdb{margin:4px 0 8px;border-radius:var(--r2);background:var(--well);padding:18px 20px;font-size:14px;color:var(--ink2)}
+.icdb h4,.docbody.task h4{font-size:13px;font-weight:400;color:var(--ink3);margin:0 0 8px;letter-spacing:0}
+.icdb h4+h4,.dgrid h4:not(:first-child){margin-top:18px}
+.dgrid{display:grid;grid-template-columns:1.25fr 1fr;gap:24px}
+.crit{list-style:none;display:flex;flex-direction:column;gap:8px;font-size:15px}
+.crit li{display:flex;gap:12px;align-items:center;padding:10px 14px;border-radius:var(--r2);background:var(--well)}
+.crit .ck{flex:none;width:26px;height:26px;border-radius:50%;display:grid;place-items:center;font-size:12px;border:1.5px solid var(--ink4);color:transparent}
+.ck.ok{border:0;background:var(--chip);color:var(--ink)} .ck.no{border:0;background:var(--danger);color:var(--ondanger)}
+.kv{display:flex;flex-direction:column;gap:8px;font-size:14px}
+.kv .row{display:flex;gap:14px}
+.kv .k{flex:none;width:104px;color:var(--ink3);font-size:13px;padding-top:1px}
+.kv .vl{min-width:0;word-break:break-word}
+.dsp{list-style:none;display:flex;flex-direction:column;gap:6px;font-size:14px}
+.dsp li{display:flex;gap:12px;align-items:baseline}
+.dsp .t{color:var(--ink3);font-size:13px;flex:none;width:92px;font-family:var(--mono)}
+.briefbtn{display:inline-flex;align-items:center;gap:8px;margin-top:18px;min-height:44px;font-weight:500;color:var(--ink);border:0;background:var(--chip);border-radius:var(--r3);padding:0 16px;cursor:pointer;text-align:left}
+.briefbtn:hover{background:var(--hover2)}
+.obj{margin-top:14px} .obj b{font-weight:400;font-size:13px;color:var(--ink3);margin-right:8px}
+.design{margin-bottom:16px} .design>h4{margin-bottom:10px}
+.dpair{display:grid;grid-template-columns:1fr 1fr;gap:12px;max-width:640px}
+.dpair a{display:block} .dpair img{width:100%;max-height:170px;object-fit:cover;object-position:top;border-radius:12px;background:#fff;display:block}
+.dpair span{display:block;font-size:13px;color:var(--ink3);margin-top:6px}
+.dmiss{border:1px dashed var(--line3);border-radius:12px;display:grid;place-items:center;min-height:80px;font-size:13px;color:var(--ink3);padding:10px;text-align:center}
+details.icd.flash>summary,details.sec.sub.flash>summary,.flash{animation:flash 1.6s ease}
+@keyframes flash{0%,40%{background:var(--hover2)}100%{background:transparent}}
+/* ---- side panels: a task, a document ---- */
+.docscrim{position:fixed;inset:0;background:var(--scrim);opacity:0;pointer-events:none;transition:opacity .2s;z-index:40}
+.docscrim.on{opacity:1;pointer-events:auto}
+#docscrim{z-index:44}
+.docpanel{position:fixed;top:28px;right:28px;bottom:28px;width:min(760px,calc(100vw - 56px));background:var(--sheet);border-radius:28px;box-shadow:var(--paneshadow),var(--shadow3);-webkit-backdrop-filter:blur(30px);backdrop-filter:blur(30px);transform:translateX(calc(100% + 56px));transition:transform .28s var(--ease),visibility .28s;z-index:41;display:flex;flex-direction:column;overflow:hidden;visibility:hidden}
+.docpanel.on{transform:none;visibility:visible}
+#taskpanel{width:min(420px,calc(100vw - 56px))} #docpanel{z-index:45}
+/* on a wide screen a task opens beside the list, which moves over and stays usable: click another row to switch */
+@media (min-width:941px){#taskscrim{display:none}}
+@media (min-width:1181px){.shell:has(~ #taskpanel.on) .stage{padding-right:444px}}
+.dochead{flex:none;padding:22px 22px 14px;display:flex;flex-direction:column-reverse;gap:14px}
+.dochead>div:first-child{min-width:0}
+.dochead h3{font-size:24px;font-weight:500;letter-spacing:-.02em;line-height:1.2}
+.dochead .p{font-family:var(--mono);font-size:13px;color:var(--ink3);margin-top:6px;word-break:break-all}
+#taskmeta{font-family:var(--font);word-break:normal;display:flex;gap:4px 10px;align-items:center;flex-wrap:wrap;font-variant-numeric:tabular-nums}
+.docacts{display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end}
+.docbtn{display:inline-flex;align-items:center;justify-content:center;min-width:44px;height:44px;font-size:14px;color:var(--ink);background:var(--well);border:0;border-radius:22px;padding:0 14px;cursor:pointer;text-decoration:none;white-space:nowrap}
+.docbtn:hover{background:var(--hover2)}
+.docbtn:disabled{opacity:.35;cursor:default}
+.docbody{flex:1;overflow-y:auto;padding:8px 24px 56px;font-size:15px;line-height:1.6;color:var(--ink2)}
+.docbody h1{font-size:22px;margin:0 0 12px;color:var(--ink)}
+.docbody h2{font-size:19px;font-weight:500;margin:26px 0 8px;color:var(--ink)}
+.docbody h3{font-size:16px;margin:20px 0 6px;color:var(--ink)}
+.docbody h4{font-size:15px;margin:16px 0 6px}
+.docbody p{margin:10px 0}
+.docbody ul,.docbody ol{margin:10px 0 10px 22px}
+.docbody li{margin:4px 0}
+.docbody pre,.gcard pre{background:var(--well);border-radius:var(--r3);padding:14px 16px;overflow-x:auto;margin:12px 0}
+.docbody pre code,.gcard pre code{background:none;padding:0;line-height:1.6}
+.docbody blockquote{border-left:2px solid var(--line3);margin:12px 0;padding:2px 0 2px 16px}
+.docbody hr{border:0;border-top:1px solid var(--line);margin:20px 0}
+.docbody table{margin:12px 0;font-size:14px}
+.docbody a{word-break:break-word}
+/* a task read on its own: what it is for first, then the checks, then the record */
+.docbody.task{font-size:14px;line-height:1.45}
+.docbody.task .icdb{background:none;margin:0;padding:0;display:flex;flex-direction:column;gap:22px}
+.docbody.task .obj{order:-1;margin:0;font-size:16px;color:var(--ink)}
+.docbody.task .obj b{display:block;margin:0 0 4px}
+.docbody.task .dgrid{grid-template-columns:minmax(0,1fr);gap:22px}
+.docbody.task ul{margin:0} .docbody.task li{margin:0} .docbody.task p{margin:0}
+.docbody.task .tsub{padding:12px 14px;border-radius:var(--r2);background:var(--accsoft);color:var(--ink);font-size:15px;margin-bottom:18px}
+.docmiss{color:var(--ink3)}
+/* ---- search ---- */
+.pal{position:fixed;inset:0;z-index:60;background:var(--scrim);display:flex;justify-content:center;align-items:flex-start;padding:12vh 16px 0}
+.palbox{width:min(680px,100%);background:var(--sheet);border-radius:24px;box-shadow:var(--paneshadow),var(--shadow3);-webkit-backdrop-filter:blur(30px);backdrop-filter:blur(30px);overflow:hidden;animation:pagein .18s var(--ease)}
+#palq{width:100%;border:0;outline:0;background:none;font:inherit;font-size:17px;color:var(--ink);padding:0 20px;height:60px;border-bottom:1px solid var(--line)}
+#palq::placeholder{color:var(--ink3)}
+#pallist{list-style:none;max-height:min(52vh,460px);overflow-y:auto;padding:8px;display:flex;flex-direction:column;gap:2px}
+#pallist li{display:grid;grid-template-columns:84px minmax(0,1fr) auto;gap:14px;align-items:center;min-height:52px;padding:0 14px;border-radius:14px;cursor:pointer}
+#pallist li.on{background:var(--raised);box-shadow:var(--raisering)}
+#pallist li>i{font-style:normal;font-size:13px;color:var(--ink3)}
+#pallist li>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#pallist li>span code{margin-right:10px;background:none;padding:0;color:var(--ink3)}
+#pallist li>em{font-style:normal;font-size:13px;color:var(--ink3);white-space:nowrap;text-transform:lowercase}
+#pallist .palnone{display:block;color:var(--ink3);cursor:default;padding:16px 14px}
+.palfoot{padding:12px 20px;border-top:1px solid var(--line);font-size:13px;color:var(--ink3);display:flex;gap:6px 20px;flex-wrap:wrap}
+.toast{position:fixed;left:50%;bottom:92px;transform:translate(-50%,20px);opacity:0;pointer-events:none;z-index:70;font-weight:500;padding:0 20px;line-height:44px;border-radius:99px;transition:opacity .2s,transform .2s var(--ease);max-width:min(560px,90vw);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.toast.on{opacity:1;transform:translate(-50%,0)}
+/* ---- insights ---- */
+.pacestrip{padding:22px;display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:24px 28px;align-items:start}
+.pacestrip+.pacestrip{margin-top:14px}
+.pacestrip>div{min-width:0}
+.pk{font-size:13px;color:var(--ink3);text-transform:lowercase;margin-bottom:4px}
+.pk::first-letter{text-transform:uppercase}
+.pacestrip .pv{font-weight:300;font-size:36px;line-height:1.15;letter-spacing:-.03em;font-variant-numeric:tabular-nums;text-align:left;color:var(--ink)!important}
+.pacestrip .pv small{display:block;font-size:13px;line-height:1.4;color:var(--ink3);font-weight:400;letter-spacing:0;margin-top:4px}
+.pacestrip .pv i{font-style:normal;color:var(--ink3)}
+.pacestrip .pv span[style]{font-size:13px!important;font-weight:400;letter-spacing:0;color:var(--ink2);line-height:1.5;display:block}
+.pdiv{display:none}
+.pnote{grid-column:1/-1;font-size:13px;color:var(--ink3);line-height:1.6;max-width:none!important;padding-top:14px;border-top:1px solid var(--line2);margin:0!important}
+.insec{margin-top:14px}
+details.pnote>summary{cursor:pointer;list-style:none;color:var(--ink2);min-height:44px;display:flex;align-items:center}
+details.pnote>summary::-webkit-details-marker{display:none}
+details.pnote>summary::before{content:"+";display:inline-block;width:16px;color:var(--ink3)}
+details.pnote[open]>summary::before{content:"–"}
+.prows{display:flex;flex-direction:column;margin:-6px 0}
+.prow{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,2fr) 56px;gap:16px;align-items:center;padding:12px 10px;margin:0 -10px;border-bottom:1px solid var(--line2);border-radius:14px;text-decoration:none}
+.prow:last-child{border-bottom:0}
+.prow:hover{background:var(--hover)}
+.plab b{font-weight:400;font-family:var(--mono);font-size:13px;color:var(--ink3)}
+.plab .mut{color:var(--ink);font-size:15px}
+.pstack{display:flex;flex-direction:column;gap:6px;min-width:0}
+.prow .pbar{display:flex;gap:3px;height:8px;border-radius:0;background:none;overflow:visible}
+.prow .pbar i{border-radius:99px;min-width:4px;background:var(--accent)}
+.prow .pbar .o-plan{background:var(--ink4)}
+.grew{color:var(--accent);font-weight:500}
+.pv{text-align:right;font-weight:500}
+.telgrid{display:grid;grid-template-columns:1.15fr 1fr;gap:14px;align-items:start}
+.telgrid.one{grid-template-columns:1fr}
+.hbar{display:grid;grid-template-columns:160px 1fr 110px;gap:14px;align-items:center}
+.hbar .lab{font-family:var(--mono);font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.hbar .tr{height:8px;border-radius:99px;background:var(--track);position:relative;overflow:hidden}
+.hbar .tr i{position:absolute;top:0;bottom:0;background:var(--ink4)}
+.hbar .tr i+i{background:var(--ink)}
+.hbar .vv{font-size:13px;color:var(--ink3);text-align:right;font-variant-numeric:tabular-nums}
+.legend{display:flex;gap:6px 18px;font-size:13px;color:var(--ink3);flex-wrap:wrap}
+.legend i{width:9px;height:9px;border-radius:50%;display:inline-block;margin-right:8px;background:var(--ink4)}
+.legend span+span i{background:var(--ink)}
+.tokrow{display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:12px;padding:10px 0;border-bottom:1px solid var(--line2);align-items:baseline}
+.tokrow:last-child{border-bottom:0}
+.tokrow b{font-variant-numeric:tabular-nums;font-weight:500} .tokrow .n{color:var(--ink3);font-size:13px}
+.tokrow .m{color:var(--ink2);overflow:hidden;text-overflow:ellipsis}
+.tokrow .m i{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:10px;background:var(--ink)!important}
+.tokrow+.tokrow .m i{background:var(--ink4)!important}
+.donutwrap{display:flex;gap:24px;align-items:center;flex-wrap:wrap}
+.donutwrap svg text{fill:var(--ink)} .donutwrap svg text+text{fill:var(--ink3)}
+.donutwrap svg circle:first-of-type{stroke:var(--ink)} .donutwrap svg circle:nth-of-type(2){stroke:var(--ink4)}
+.usfilter{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:0 0 14px;font-size:13px}
+.usfilter label{color:var(--ink3)}
+.usfilter select{font:inherit;height:44px;padding:0 12px;border:0;border-radius:var(--r3);background:var(--chip);color:var(--ink)}
+.usview+.usview,.usview>.panel+.panel,.usview>.pacestrip,.usview>.panel+.pacestrip{margin-top:14px}
+tr[data-ms].sel td{background:var(--hover2)}
+/* ---- product: architecture, screens, journal ---- */
+.draftnote{color:var(--ink);background:var(--accsoft);border-radius:var(--r2);padding:12px 18px;margin-bottom:14px}
+.archwrap{overflow-x:auto;border-radius:var(--r)}
+.archcard{position:relative;padding:12px;display:flex;flex-direction:column;gap:34px;min-width:760px}
+.archsvg{position:absolute;left:0;top:0;pointer-events:none;z-index:2;overflow:visible}
+.lane{display:grid;grid-template-columns:110px minmax(0,1fr);gap:14px;align-items:center;background:var(--well);border-radius:var(--r2);padding:14px}
+.lane.ext{background:none;border:1.5px dashed var(--line3)}
+.lanehead b{display:block;font-size:13px;font-weight:400;color:var(--ink3);text-transform:lowercase} .lanehead b::first-letter{text-transform:uppercase}
+.lanehead span{display:block;font-size:13px;color:var(--ink3);margin-top:2px}
+.lanebody{display:grid;gap:18px 22px;align-items:stretch}
+.acard{position:relative;z-index:3;text-align:left;background:var(--card);border:0;box-shadow:inset 0 0 0 1px var(--line);border-radius:var(--r2);padding:12px 14px;display:flex;flex-direction:column;gap:2px;cursor:pointer;width:100%;max-width:240px;justify-self:center;min-width:0;min-height:44px}
+.acard:hover{box-shadow:inset 0 0 0 1px var(--line3)}
+.acard.sel{box-shadow:inset 0 0 0 1.5px var(--ink)}
+.acard.draft{box-shadow:none;outline:1.5px dashed var(--accent);outline-offset:-1.5px}
+.acard b{font-size:15px;font-weight:500;color:var(--ink)}
+.acard .as{font-size:13px;color:var(--ink3);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;overflow-wrap:anywhere}
+.acard .ap{font-size:13px;color:var(--ink3);font-variant-numeric:tabular-nums}
+.acard .ap em{font-style:normal;color:var(--ink)} .acard .ap i{font-style:normal;color:var(--accent)}
+.aedge path{stroke:var(--ink4);stroke-width:1.2}
+.aedge.planned path{stroke-dasharray:5 4}
+.aedge.hl path{stroke:var(--ink);stroke-width:1.8}
+.aedge text{font-size:12px;fill:var(--ink2);font-family:inherit}
+.aedge.hl text{fill:var(--ink);font-weight:500}
+.aedge .lbg{fill:var(--card)}
+#archsvg marker path{fill:var(--ink4)}
+.archfoot{display:grid;grid-template-columns:minmax(0,1.3fr) minmax(0,1fr);gap:14px;margin-top:14px;align-items:start}
+.archfoot h4{margin-bottom:8px}
+.alink{font-weight:500;border:0;background:none;cursor:pointer;color:var(--ink);padding:0;text-align:left;min-height:24px}
+.alink:hover{text-decoration:underline}
+.selbtn{margin-top:14px;align-self:flex-start}
+.sgroup{margin-top:24px}
+.sgroup h3{display:flex;align-items:baseline;gap:12px;margin:0 4px 14px;font-size:22px;font-weight:400}
+.sgroup h3 a{font-size:13px;color:var(--ink3)}
+.sgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:14px}
+.scard{overflow:hidden;display:flex;flex-direction:column}
+.sthumb{display:block;height:120px;background:var(--well);overflow:hidden}
+.sthumb img{width:100%;height:100%;object-fit:cover;object-position:top;display:block}
+.sthumb.none{display:grid;place-items:center;font-size:13px;color:var(--ink3)}
+.sb{padding:14px 16px;display:flex;flex-direction:column;gap:2px;min-width:0}
+.sb b{font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sb .mut{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sp{font-size:13px;color:var(--ink3)}
+.jgrid{display:grid;grid-template-columns:1fr 1fr;gap:14px;align-items:start}
+.jcol{padding:22px}
+.jcol h3{margin-bottom:18px;font-size:13px;font-weight:400;color:var(--ink3);letter-spacing:0}
+.jitem{position:relative;padding:0 0 18px 23px}
+.jitem:last-child{padding-bottom:0}
+.jitem::before{content:"";position:absolute;left:0;top:6px;width:9px;height:9px;border-radius:50%;border:1.5px solid var(--ink4)}
+.jitem.human::before{border:0;background:var(--ink)}
+.jitem b{display:block;font-weight:500}
+.jitem p{font-size:14px;color:var(--ink2);margin-top:2px}
+.jitem .ts{font-size:13px;color:var(--ink3);font-variant-numeric:tabular-nums}
+.tag{font-size:13px;font-weight:400;border-radius:99px;padding:0 10px;line-height:24px;display:inline-block;margin-left:8px;background:var(--chip);color:var(--ink2)}
+/* ---- setup ---- */
+.syscard{overflow:hidden;display:flex;flex-direction:column;padding:6px 20px}
+.sysrow{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 14px;padding:12px 0;border-bottom:1px solid var(--line2)}
+.syscard>.sysrow:has(.bdg.ok){order:1}
+.sysrow .bdg{font-size:13px;width:56px;flex:none;text-transform:lowercase}
+.sysrow .n{width:190px;flex:none;font-weight:500}
+.sysrow .d{color:var(--ink3);font-size:13px;min-width:0;overflow-wrap:anywhere;flex:1 1 240px}
+.metmore{order:2} .metmore>summary{cursor:pointer;list-style:none;color:var(--ink2);min-height:48px;display:flex;align-items:center}
+.metmore>summary::-webkit-details-marker{display:none}
+.metmore>summary::before{content:"+";display:inline-block;width:18px;color:var(--ink3)}
+.metmore[open]>summary::before{content:"–"}
+.syscard>:last-child,.metmore>.sysrow:last-child{border-bottom:0}
+.empty{padding:22px 24px;max-width:760px}
+.empty h3{margin-bottom:6px;font-size:19px} .empty p{font-size:13px;color:var(--ink3);margin-top:4px}
+.cfgintro p{font-size:14px;color:var(--ink2);max-width:92ch}
+.gcard{margin:14px 0 0}
+.tblwrap{overflow-x:auto;padding:6px 20px}
+table{width:100%;border-collapse:collapse}
+th{font-size:13px;color:var(--ink3);text-align:left;padding:12px 16px 12px 0;border-bottom:1px solid var(--line);font-weight:400}
+td{padding:12px 16px 12px 0;border-bottom:1px solid var(--line2);vertical-align:top} tr:last-child td{border-bottom:none}
+td .docopen{display:inline-flex;align-items:center;min-height:24px}
+details.hint{gap:10px;padding:8px 22px} details.hint>summary{cursor:pointer;list-style:none;font-weight:500;min-height:44px;display:flex;align-items:center;flex-wrap:wrap;gap:0 8px} details.hint>summary::-webkit-details-marker{display:none}
+details.hint>summary::before{content:"+";display:inline-block;width:14px;color:var(--ink3)}
+details.hint[open]>summary::before{content:"–"}
+/* a setting reads as a card: what it is, what it does, what it is now, how to change it */
+table.cfgt,table.cfgt tbody{display:block;width:100%} table.cfgt colgroup,table.cfgt thead{display:none}
+table.cfgt tr{display:grid;grid-template-columns:minmax(0,240px) minmax(0,1fr) minmax(0,320px);grid-template-areas:"key what now" "def why chg" "def why risk";gap:4px 28px;padding:18px 0;border-bottom:1px solid var(--line2);align-items:start}
+table.cfgt tr:last-child{border-bottom:0}
+table.cfgt td{display:block;padding:0;border:0;overflow-wrap:anywhere;min-width:0} table.cfgt td div{margin:1px 0}
+table.cfgt td code{white-space:normal;word-break:break-word}
+table.cfgt td:nth-child(1){grid-area:key} table.cfgt td:nth-child(1) code{background:none;padding:0;font-size:15px;font-weight:500;color:var(--ink)}
+table.cfgt td:nth-child(2){grid-area:now;font-size:14px} table.cfgt td:nth-child(2)::before{content:"Now";display:block;font-size:13px;color:var(--ink3);margin-bottom:2px}
+table.cfgt .src{font-size:13px;color:var(--ink3)}
+table.cfgt td:nth-child(3){grid-area:def;font-size:13px;color:var(--ink3)} table.cfgt td:nth-child(3)::before{content:"Default: "}
+table.cfgt td:nth-child(4){grid-area:what;max-width:72ch}
+table.cfgt td:nth-child(5){grid-area:why;color:var(--ink3);font-size:13px;max-width:72ch} table.cfgt td:nth-child(5)::before{content:"Change it when: ";color:var(--ink2)}
+table.cfgt td:nth-child(6){grid-area:risk;font-size:13px;color:var(--ink3)} table.cfgt td:nth-child(6)::before{content:"Risk: "}
+table.cfgt td:nth-child(7){grid-area:chg;margin-top:6px}
+.risk{display:inline;font-size:13px;color:var(--ink2);white-space:nowrap}
+.risk-testfirst,.risk-medium{color:var(--accent)}
+table.cmdt td:first-child{width:44%}
+.cmdgroup{margin-top:14px}
+/* ---- narrower screens: the rail becomes a card on top, the dock stays under the thumb ---- */
+@media (max-width:1180px){.side{width:248px} .sidein{padding:18px 16px 10px} .railnum{font-size:52px}}
+@media (max-width:940px){
+  .shell{flex-direction:column;align-items:stretch;padding:16px;gap:16px}
+  .side{position:relative;top:0;width:auto;max-height:none} .railsec{display:none} .stage{min-height:0}
+  .ovgrid,.telgrid,.jgrid,.dgrid,.dpair,.archfoot{grid-template-columns:minmax(0,1fr)}
+  .lane{grid-template-columns:1fr}
+  summary.irow{grid-template-columns:26px minmax(0,1fr) auto} .iid{display:none}
+  .prow{grid-template-columns:minmax(0,1fr) 56px} .prow .pstack{grid-column:1/-1;grid-row:2}
+  .mprog .pbar{width:56px}
+  table.cfgt tr{grid-template-columns:minmax(0,1fr);grid-template-areas:"key" "what" "why" "now" "def" "chg" "risk"}
+  .docpanel{top:0;right:0;bottom:0;width:100vw!important;border-radius:0}
+  .dockwrap{bottom:12px}
+}
+@media (max-width:640px){
+  #snav{gap:0} #snav>*{font-size:13px;padding:0 2px;gap:4px} #snav .k:not(.warnk),.searchbtn span{display:none} .searchbtn{flex:0 0 44px!important}
+  .panel,.ncard,.jcol,.pacestrip{padding:18px} .ncard blockquote{font-size:21px}
+  .imeta>span:not(.st){display:none} .ghost{margin-left:0}
+  .hbar{grid-template-columns:96px 1fr 72px}
+  .msfacts>div{grid-template-columns:minmax(0,1fr);gap:2px}
+}
+@media (prefers-reduced-motion:reduce){html{scroll-behavior:auto}*,*::before,*::after{transition:none!important;animation:none!important}}
+@media print{.side,.dockwrap,.tabs,.bg,.skip{display:none}}`;
+function dashCss() {
+  const ic = `--ic-search:${dashIcon(DASH_ICONS.search)};--ic-copy:${dashIcon(DASH_ICONS.copy)};--ic-check:${dashIcon(DASH_ICONS.check)};--ic-down:${dashIcon(DASH_ICONS.down)};`;
+  return DASH_CSS.replace('@@DARK@@', () => DASH_DARK + ic + `--ic-theme:${dashIcon(DASH_ICONS.sun)}`)
+    .replace(/@@LIGHT@@/g, () => DASH_LIGHT + `--ic-theme:${dashIcon(DASH_ICONS.moon)}`);
+}
+
+// v0.33: everything the dashboard does in the browser. It is a real function (checked with the rest of this file)
+// and is written into the page as text. Every handler is delegated from the document and every lookup is made
+// when it is needed, because a live update may replace any node under #app.
+function dashClient() {
+  'use strict';
+  var D = document, W = window, app = D.getElementById('app');
+  if (!app) return;
+  /* This copy was loaded in a hidden frame by an open dashboard asking "anything new?". Hand the content over
+     when it differs from what the asker already shows, and do nothing else. */
+  var asked = /[?&]forgelive=([^&#]*)/.exec(location.search);
+  if (asked && W.parent !== W) {
+    var mine = D.body.getAttribute('data-stamp') || '';
+    try { W.parent.postMessage({ forge: 'live', stamp: mine, html: mine === decodeURIComponent(asked[1]) ? null : app.innerHTML }, '*'); } catch (_) { }
+    return;
+  }
+  var PREV = app.cloneNode(true); /* what Forge wrote, before anything here touches it — the base of the next patch */
+  var stamp = D.body.getAttribute('data-stamp') || '';
+  function $(id) { return D.getElementById(id); }
+  function all(sel, root) { return [].slice.call((root || D).querySelectorAll(sel)); }
+  function up(el, sel) { return el && el.closest ? el.closest(sel) : null; }
+  function store(k, v) { try { if (v === undefined) return localStorage.getItem(k); localStorage.setItem(k, v); } catch (_) { } return null; }
+  function cssEsc(s) { return W.CSS && CSS.escape ? CSS.escape(s) : String(s).replace(/["\\]/g, '\\$&'); }
+  var toastT = null;
+  function toast(msg) { var t = $('toast'); if (!t) return; t.textContent = msg; t.classList.add('on'); clearTimeout(toastT); toastT = setTimeout(function () { t.classList.remove('on'); }, 2200); }
+
+  /* ---- durations are computed here from embedded timestamps, so an open page keeps telling the truth ---- */
+  function human(ms) {
+    if (ms < 0) ms = 0; var s = ms / 1000;
+    if (s < 90) return Math.round(s) + 's';
+    var m = s / 60; if (m < 90) return Math.round(m) + 'm';
+    var h = m / 60; if (h < 36) return (h < 10 ? h.toFixed(1) : Math.round(h)) + 'h';
+    var d = h / 24; return (d < 10 ? d.toFixed(1) : Math.round(d)) + ' days';
+  }
+  function tick() {
+    var now = Date.now();
+    all('[data-since]').forEach(function (el) {
+      var t = Date.parse(el.getAttribute('data-since'));
+      if (!isFinite(t)) return;
+      var txt = (el.getAttribute('data-pre') || '') + human(now - t) + (el.getAttribute('data-post') || '');
+      if (el.textContent !== txt) el.textContent = txt;
+      if (!el.title) el.title = new Date(t).toLocaleString();
+    });
+  }
+  tick(); setInterval(tick,30000);
+
+  /* ---- Plan: one filter made of the search box, the quick filter and a part ---- */
+  var mode = 'all', comp = null, folded = false;
+  var EMPTY = {
+    needs: 'Nothing needs you right now — no item is blocked on a question for you and no milestone is waiting for your review.',
+    active: 'No work is in flight — nothing is in progress and nothing is open in the current milestone.',
+    done: 'Nothing is finished yet.',
+    all: 'No work items yet.'
+  };
+  /* "Needs me" is the owner's queue: an item blocked on your answer, and every item of a milestone whose gate
+     waits for your review — the gate IS the thing that needs you. "Active" is work in flight plus what is still
+     open in the milestone being built. */
+  function matches(r, gate, m) {
+    var s = r.getAttribute('data-s') || '';
+    if (m === 'all') return true;
+    if (m === 'needs') return (s === 'BLOCKED' && r.getAttribute('data-q') === '1') || gate==='awaiting';
+    if (m === 'active') return s === 'IN_PROGRESS' || s === 'READY' || (r.getAttribute('data-act') === '1' && s !== 'DONE' && s !== 'CANCELLED');
+    if (m === 'done') return s === 'DONE';
+    return true;
+  }
+  function applyFilter() {
+    var i = $('wgfilter'); if (!i) return;
+    var q = i.value.toLowerCase(), narrowed = !!q || mode !== 'all' || !!comp, total = 0;
+    var groups = all('details.sec.sub');
+    groups.forEach(function (d) {
+      var gate = d.getAttribute('data-gate') || '', n = 0;
+      all('details.icd', d).forEach(function (r) {
+        var hit = matches(r, gate, mode) && (!q || r.textContent.toLowerCase().indexOf(q) >= 0) &&
+          (!comp || r.getAttribute('data-comp') === comp || r.getAttribute('data-arch') === comp);
+        r.style.display = hit ? '' : 'none'; if (hit) n++;
+      });
+      total += n;
+      var c = d.querySelector('.mcount');
+      if (c) c.textContent = narrowed && n ? ('· ' + n + ' shown') : '';
+      if (narrowed) { if (d.dataset.wasOpen === undefined) d.dataset.wasOpen = d.open ? '1' : '0'; d.open = n > 0 && !folded; d.style.display = n ? '' : 'none'; }
+      else { d.style.display = ''; if (d.dataset.wasOpen !== undefined) { d.open = d.dataset.wasOpen === '1'; delete d.dataset.wasOpen; } }
+    });
+    all('.relh').forEach(function (h) { h.style.display = narrowed ? 'none' : ''; });
+    var none = $('wgnone');
+    if (none) {
+      var show = narrowed && !total;
+      none.hidden = !show;
+      none.textContent = show ? (q ? ('Nothing matches “' + i.value + '”.') : comp ? ('No work is tagged to ' + comp + '.') : EMPTY[mode]) : '';
+    }
+    /* counts use the same predicate the filter uses, so a button can never promise items the filter would not show */
+    all('#wgseg button').forEach(function (b) {
+      var m = b.getAttribute('data-f'), n = 0;
+      groups.forEach(function (d) { var gate = d.getAttribute('data-gate') || ''; all('details.icd', d).forEach(function (r) { if (matches(r, gate, m)) n++; }); });
+      var sp = b.querySelector('.n'); if (sp && sp.textContent !== String(n)) sp.textContent = n;
+      b.classList.toggle('on', m === mode);
+    });
+    var chip = $('wgcomp');
+    if (chip) { chip.hidden = !comp; var cb = chip.querySelector('b'); if (cb) cb.textContent = comp || ''; }
+  }
+  function setComp(id) { comp = id || null; applyFilter(); }
+  /* "Milestones only" folds every milestone: the plan read as a roadmap. Pressed again, the milestone being built opens. */
+  function setFold(on) {
+    folded = on;
+    all('#work details.sec.sub').forEach(function (d) {
+      delete d.dataset.wasOpen;
+      if (on) { d.dataset.fold0 = d.open ? '1' : '0'; d.open = false; }
+      else if (d.dataset.fold0 !== undefined) { d.open = d.dataset.fold0 === '1'; delete d.dataset.fold0; }
+    });
+    var b = $('wgfold'); if (b) b.setAttribute('aria-pressed', on ? 'true' : 'false');
+    applyFilter();
+  }
+  W.forgePlan = { setComp: setComp };
+  function filterList(groupSel, rowSel, value) {
+    var q = String(value || '').toLowerCase();
+    all(groupSel).forEach(function (g) {
+      var n = 0;
+      all(rowSel, g).forEach(function (r) { var hit = !q || (r.getAttribute('data-q') || '').indexOf(q) >= 0; r.style.display = hit ? '' : 'none'; if (hit) n++; });
+      g.style.display = n ? '' : 'none';
+    });
+  }
+
+  /* ---- Configuration: find a setting by any word on its row, or show only what this project changed ---- */
+  var cfgMode = null; /* decided on first use: what this project changed, when it changed anything */
+  function cfgFilter() {
+    var f = $('cfgfilter'); if (!f) return;
+    if (cfgMode === null) cfgMode = D.querySelector('table.cfgt tr[data-mine="1"]') ? 'mine' : 'all';
+    var q = f.value.toLowerCase(), total = 0, mine = 0;
+    all('table.cfgt').forEach(function (tb) {
+      var n = 0;
+      all('tbody tr', tb).forEach(function (r) {
+        var own = r.getAttribute('data-mine') === '1'; if (own) mine++;
+        var hit = q ? r.textContent.toLowerCase().indexOf(q) >= 0 : (cfgMode === 'all' || own); /* a search looks at every setting */
+        r.style.display = hit ? '' : 'none'; if (hit) n++;
+      });
+      total += n;
+      var wrap = up(tb, '.tblwrap'); if (wrap) { wrap.style.display = n ? '' : 'none'; var h = wrap.previousElementSibling; if (h && h.classList.contains('h3s')) h.style.display = n ? '' : 'none'; }
+    });
+    all('#cfgseg button').forEach(function (b) { b.classList.toggle('on', b.getAttribute('data-f') === cfgMode); var sp = b.querySelector('.n'); if (sp && sp.textContent !== String(mine)) sp.textContent = mine; });
+    var none = $('cfgnone'); if (none) none.hidden = total > 0;
+  }
+
+  /* ---- documents: briefs and spec files are embedded (a page opened from disk cannot fetch its siblings) ---- */
+  var DOCS = {};
+  function readDocs() { DOCS = {}; var el = $('docdata'); if (!el) return; try { DOCS = JSON.parse(el.textContent || '{}'); } catch (_) { } }
+  function esc(t) { return String(t == null ? '' : t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+  function inline(t) {
+    return t
+      .replace(/`([^`]+)`/g, function (m, c) { return '<code>' + c + '</code>'; })
+      .replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>')
+      .replace(/(^|[\s(])\*([^*\n]+)\*/g, '$1<i>$2</i>')
+      .replace(/(^|[\s(])_([^_\n]+)_/g, '$1<i>$2</i>')
+      .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, function (m, label, href) { return /^(https?:|mailto:|#|\.{0,2}\/|[\w.-]+(\/|$))/i.test(href) ? '<a href="' + href.replace(/"/g, '&quot;') + '">' + label + '</a>' : m; });
+  }
+  function md(src) {
+    var lines = esc(src).split('\n'), out = [], k = 0, fence = null, list = null;
+    function endList() { if (list) { out.push('</' + list + '>'); list = null; } }
+    for (; k < lines.length; k++) {
+      var l = lines[k];
+      if (/^\s*```/.test(l)) {
+        if (fence === null) { endList(); fence = ''; out.push('<pre><code>'); } else { out.push('</code></pre>'); fence = null; }
+        continue;
+      }
+      if (fence !== null) { out.push(l + '\n'); continue; }
+      if (/^\s*$/.test(l)) { endList(); continue; }
+      if (/^\s*(---+|\*\*\*+|___+)\s*$/.test(l)) { endList(); out.push('<hr>'); continue; }
+      var h = l.match(/^(#{1,6})\s+(.*)$/);
+      if (h) { endList(); var n = Math.min(h[1].length, 4); out.push('<h' + n + '>' + inline(h[2]) + '</h' + n + '>'); continue; }
+      var q = l.match(/^\s*&gt;\s?(.*)$/);
+      if (q) { endList(); out.push('<blockquote>' + inline(q[1]) + '</blockquote>'); continue; }
+      var ul = l.match(/^\s*[-*+]\s+(.*)$/);
+      if (ul) { if (list !== 'ul') { endList(); out.push('<ul>'); list = 'ul'; } out.push('<li>' + inline(ul[1]) + '</li>'); continue; }
+      var ol = l.match(/^\s*\d+[.)]\s+(.*)$/);
+      if (ol) { if (list !== 'ol') { endList(); out.push('<ol>'); list = 'ol'; } out.push('<li>' + inline(ol[1]) + '</li>'); continue; }
+      endList(); out.push('<p>' + inline(l) + '</p>');
+    }
+    if (fence !== null) out.push('</code></pre>');
+    endList();
+    return out.join('');
+  }
+  var docFocus = null, taskFocus = null, curDoc = null, curTask = null;
+  function isOpen(id) { var p = $(id); return !!p && p.classList.contains('on'); }
+  function setPanel(id, scrimId, on) {
+    var p = $(id), s = $(scrimId); if (!p) return;
+    p.classList.toggle('on', on); if (s) s.classList.toggle('on', on);
+    p.setAttribute('aria-hidden', on ? 'false' : 'true');
+    setTimeout(cues, 320);
+  }
+  function openDoc(key, fileHref) {
+    var d = DOCS[key]; if (!d) return;
+    if (!isOpen('docpanel')) docFocus = D.activeElement;
+    curDoc = key;
+    $('doctitle').textContent = d.title || key;
+    $('docpath').textContent = d.rel || '';
+    var href = fileHref || ('../' + d.rel), dl = $('docdownload');
+    $('docopenfile').href = href; dl.href = href;
+    dl.setAttribute('download', (d.rel || 'document').split('/').pop());
+    $('docfolder').href = href.replace(/[^/]+$/, '');
+    var body = $('docbody');
+    body.innerHTML = d.text == null
+      ? '<p class="docmiss">This file is ' + Math.round((d.size || 0) / 1024) + ' KB — too large to embed in the dashboard. Open it directly with the buttons above.</p>'
+      : md(d.text);
+    body.scrollTop = 0;
+    setPanel('docpanel', 'docscrim', true);
+    body.focus();
+  }
+  function closeDoc() {
+    if (!isOpen('docpanel')) return;
+    setPanel('docpanel', 'docscrim', false); curDoc = null;
+    if (docFocus && docFocus.focus && D.contains(docFocus)) docFocus.focus();
+  }
+
+  /* ---- a task opens beside the list instead of pushing the rows below it down ---- */
+  function taskEl(id) { var el = id ? $('it-' + id) : null; return el && el.classList.contains('icd') ? el : null; }
+  function renderTask() {
+    var el = taskEl(curTask); if (!el) return false;
+    var sum = el.querySelector('summary.irow'), src = el.querySelector('.icdb'), body = $('taskbody');
+    var tt = el.querySelector('.tt');
+    $('tasktitle').textContent = tt ? tt.textContent : (el.getAttribute('data-id') || '');
+    var meta = $('taskmeta'); meta.textContent = '';
+    all('.iid, .imeta .st, .imeta > span:not(.st), .itt > .cchip', sum).forEach(function (n) { var c = n.cloneNode(true); c.removeAttribute('style'); meta.appendChild(c); });
+    var keep = body.scrollTop;
+    body.textContent = '';
+    all('.itt > .sub, .itt > .warnv', sum).forEach(function (n) {
+      var p = D.createElement('p'); p.className = 'tsub'; p.textContent = n.textContent; body.appendChild(p);
+      if (el.getAttribute('data-q') === '1') { var l = D.createElement('a'); l.href = '#/needs'; l.textContent = 'Answer it on Home'; p.appendChild(D.createTextNode(' ')); p.appendChild(l); }
+    });
+    if (src) body.appendChild(src.cloneNode(true));
+    body.scrollTop = keep;
+    all('details.icd.cur').forEach(function (r) { if (r !== el) r.classList.remove('cur'); });
+    el.classList.add('cur');
+    var rows = visibleRows(), i = rows.indexOf(el);
+    $('taskprev').disabled = i <= 0; $('tasknext').disabled = i < 0 || i >= rows.length - 1;
+    return true;
+  }
+  function visibleRows() { return all('#work details.icd').filter(function (r) { return r.style.display !== 'none' && r.parentElement && r.parentElement.parentElement && r.parentElement.parentElement.style.display !== 'none'; }); }
+  function openTask(id) {
+    var el = taskEl(id); if (!el) return false;
+    if (!isOpen('taskpanel')) taskFocus = D.activeElement;
+    var fresh = curTask !== id; curTask = id;
+    renderTask();
+    if (fresh) $('taskbody').scrollTop = 0;
+    var g = up(el, 'details.sec.sub'); if (g && !g.open) g.open = true;
+    setPanel('taskpanel', 'taskscrim', true);
+    var r = el.getBoundingClientRect();
+    if (r.top < 80 || r.bottom > W.innerHeight - 20) el.scrollIntoView({ block: 'center' });
+    return true;
+  }
+  function closeTask(keepHash) {
+    if (!curTask && !isOpen('taskpanel')) return;
+    setPanel('taskpanel', 'taskscrim', false); curTask = null;
+    all('details.icd.cur').forEach(function (r) { r.classList.remove('cur'); });
+    if (!keepHash && /^#\/plan\/./.test(location.hash) && location.hash.indexOf('#/plan/c:') !== 0) history.replaceState(null, '', '#/plan');
+    if (taskFocus && taskFocus.focus && D.contains(taskFocus)) taskFocus.focus();
+  }
+  function stepTask(by) {
+    var rows = visibleRows(), i = rows.indexOf(taskEl(curTask)), n = rows[i + by];
+    if (i < 0 || !n) return;
+    location.hash = '#/plan/' + encodeURIComponent(n.getAttribute('data-id'));
+  }
+
+  /* ---- one page at a time; the hash is the address (#/plan/<task or milestone>, #/plan/c:<part or screen>,
+     #/architecture/<part>), so links, the back button and bookmarks work. Addresses from before v0.33 still land. ---- */
+  var LEGACY = { overview: 'overview', milestones: 'plan', work: 'plan', map: 'architecture', telemetry: 'insights', journal: 'journal', system: 'system' };
+  var ALIAS = { home: 'overview', needs: 'overview', loop: 'plan', tasks: 'plan', roadmap: 'plan', project: 'plan', usage: 'insights', product: 'specs', setup: 'configuration', health: 'system' };
+  var curPage = null, lastTab = {};
+  function groupOf(name) { var t = D.querySelector('.tabs a[data-p="' + name + '"]'); if (t) return t.parentElement.getAttribute('data-g'); var a = D.querySelector('#snav a[data-p="' + name + '"]'); return a ? a.getAttribute('data-g') : null; }
+  function show(name) {
+    var pages = all('section.page'), hit = pages.some(function (p) { return p.getAttribute('data-page') === name; });
+    if (!hit) name = 'overview';
+    pages.forEach(function (p) { p.hidden = p.getAttribute('data-page') !== name; });
+    var g = groupOf(name);
+    all('#snav a').forEach(function (a) { var on = a.getAttribute('data-g') === g; a.classList.toggle('on', on); if (on) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current'); });
+    all('.tabs').forEach(function (t) { t.hidden = t.getAttribute('data-g') !== g; });
+    var cur = D.querySelector('.tabs a[data-p="' + name + '"]') || D.querySelector('#snav a[data-p="' + name + '"]'), brand = D.querySelector('.proj');
+    if (cur) D.title = (cur.firstChild && cur.firstChild.nodeType === 3 ? cur.firstChild.nodeValue.trim() : name) + ' — ' + (brand ? brand.textContent : '') + ' — Forge';
+    all('.tabs a').forEach(function (a) { var on = a.getAttribute('data-p') === name; a.classList.toggle('on', on); if (on) { a.setAttribute('aria-current', 'page'); lastTab[g] = a.getAttribute('href'); } else a.removeAttribute('aria-current'); });
+    return name;
+  }
+  function focusEl(el) {
+    if (!el) return;
+    var d = el; while (d) { if (d.tagName === 'DETAILS') d.open = true; d = d.parentElement; }
+    el.classList.remove('flash'); void el.offsetWidth; el.classList.add('flash');
+    setTimeout(function () { el.scrollIntoView({ block: 'start' }); }, 30);
+  }
+  function route() {
+    var h = location.hash || '', m = h.match(/^#\/([\w-]+)(?:\/(.*))?$/), page, arg = null;
+    if (m) { page = m[1]; if (m[2]) { try { arg = decodeURIComponent(m[2]); } catch (_) { arg = m[2]; } } }
+    else page = LEGACY[h.replace(/^#/, '')] || 'overview';
+    var wanted = page; page = ALIAS[page] || page;
+    var before = curPage; curPage = show(page);
+    if (curPage === 'plan') {
+      var part = arg && arg.indexOf('c:') === 0 ? arg.slice(2) : null;
+      if (part !== comp) setComp(part);
+      if (arg && !part) {
+        if (openTask(arg)) return;
+        closeTask(true);
+        var g = D.querySelector('details.sec.sub[data-m="' + cssEsc(arg) + '"]');
+        if (g) { focusEl(g); return; }
+      } else closeTask(true);
+    } else closeTask(true);
+    if (curPage === 'architecture' && W.forgeArch) { W.forgeArch.draw(); if (arg) W.forgeArch.select(arg); }
+    if (wanted === 'needs') { focusEl($('needs')); return; }
+    if (curPage === 'insights' && (arg || wanted === 'usage')) { var sec = $('in-' + (arg || 'tokens')); if (sec) { setTimeout(function () { sec.scrollIntoView({ block: 'start' }); }, 30); return; } }
+    if (before !== curPage) W.scrollTo(0, 0);
+  }
+  W.addEventListener('hashchange', route);
+
+  /* ---- Usage: the whole project or one milestone; the per-milestone row is highlighted ---- */
+  function usageScope(save) {
+    var sel = $('usms'); if (!sel) return;
+    if (!save) { var saved = store('forge.usage.scope'); if (saved && [].some.call(sel.options, function (o) { return o.value === saved; })) sel.value = saved; }
+    var v = sel.value;
+    all('.usview').forEach(function (el) { el.hidden = el.getAttribute('data-ms') !== v; });
+    all('tr[data-ms]').forEach(function (tr) { tr.classList.toggle('sel', tr.getAttribute('data-ms') === v); });
+    if (save) store('forge.usage.scope', v);
+  }
+
+  /* ---- architecture: the generator lays the cards out; here they are measured and joined with arrows ---- */
+  var ARCH = {}, archSel = null, NS = 'http://www.w3.org/2000/svg';
+  function readArch() { ARCH = {}; var el = $('archdata'); if (!el) return; try { ARCH = JSON.parse(el.textContent || '{}'); } catch (_) { } }
+  function mk(tag, attrs) { var n = D.createElementNS(NS, tag); for (var k in attrs) n.setAttribute(k, attrs[k]); return n; }
+  function archDraw() {
+    var box = $('archbox'), svg = $('archsvg');
+    if (!box || !svg || box.offsetParent === null) return;
+    var B = box.getBoundingClientRect();
+    svg.setAttribute('width', B.width); svg.setAttribute('height', B.height);
+    svg.textContent = '';
+    var defs = mk('defs', {}), mar = mk('marker', { id: 'ah', viewBox: '0 0 10 10', refX: '9', refY: '5', markerWidth: '7', markerHeight: '7', orient: 'auto-start-reverse' });
+    mar.appendChild(mk('path', { d: 'M0,0 L10,5 L0,10 z' })); defs.appendChild(mar); svg.appendChild(defs);
+    var R = {}; all('.acard', box).forEach(function (c) { var r = c.getBoundingClientRect(); R[c.getAttribute('data-c')] = { x: r.left - B.left, y: r.top - B.top, w: r.width, h: r.height }; });
+    /* spread arrow ports along each side so parallel arrows do not overlap */
+    var edges = (ARCH.edges || []).map(function (e) { var c = {}; for (var k in e) c[k] = e[k]; return c; }), ports = {};
+    edges.forEach(function (e) {
+      var a = R[e.from], b = R[e.to]; if (!a || !b) return;
+      var down = b.y > a.y + a.h / 2, upw = b.y + b.h < a.y + a.h / 2;
+      e._sa = down ? 'b' : upw ? 't' : 'b'; e._sb = down ? 't' : upw ? 'b' : 'b';
+      (ports[e.from + e._sa] = ports[e.from + e._sa] || []).push({ e: e, end: 'a', o: b });
+      (ports[e.to + e._sb] = ports[e.to + e._sb] || []).push({ e: e, end: 'b', o: a });
+    });
+    Object.keys(ports).forEach(function (k) {
+      var ps = ports[k]; ps.sort(function (p, q) { return (p.o.x + p.o.w / 2) - (q.o.x + q.o.w / 2) || (p.o.y - q.o.y); });
+      ps.forEach(function (p, i) { p.e['_f' + p.end] = (i + 1) / (ps.length + 1); });
+    });
+    /* lane rects give each gap's top and bottom; arrows in a gap get evenly spaced tracks */
+    var L = {}; all('.lane', box).forEach(function (l) { var r = l.getBoundingClientRect(); L[l.getAttribute('data-li')] = { top: r.top - B.top, bottom: r.bottom - B.top }; });
+    function pt(r, side, f) {
+      f = f == null ? .5 : (.3 + .4 * f);
+      if (side === 'b') return [r.x + r.w * f, r.y + r.h]; if (side === 't') return [r.x + r.w * f, r.y];
+      if (side === 'r') return [r.x + r.w, r.y + r.h * f]; return [r.x, r.y + r.h * f];
+    }
+    var byGap = {};
+    edges.forEach(function (e) { var a = R[e.from], b = R[e.to]; if (!a || !b) return; e._s = pt(a, e._sa, e._fa); e._t = pt(b, e._sb, e._fb); if (e.g != null) (byGap[e.g] = byGap[e.g] || []).push(e); });
+    Object.keys(byGap).forEach(function (g) {
+      var es = byGap[g], top = (L[g] || {}).bottom, bot = (L[+g + 1] || {}).top; if (top == null || bot == null) return;
+      es.sort(function (p, q) { return Math.min(p._s[0], p._t[0]) - Math.min(q._s[0], q._t[0]); });
+      var step = es.length > 1 ? (bot - top - 20) / (es.length - 1) : 0;
+      es.forEach(function (e, i) { e._y = es.length > 1 ? top + 10 + i * step : (top + bot) / 2; });
+    });
+    var seen = {};
+    edges.forEach(function (e) {
+      if (!e._s) return;
+      var s = e._s, t = e._t, d, lx, ly, anchor = 'middle';
+      if (e._y != null) {
+        if (Math.abs(s[0] - t[0]) < 3) { d = 'M' + s[0] + ',' + s[1] + ' L' + t[0] + ',' + t[1]; lx = s[0] + 5; ly = e._y + 4; anchor = 'start'; }
+        else { d = 'M' + s[0] + ',' + s[1] + ' L' + s[0] + ',' + e._y + ' L' + t[0] + ',' + e._y + ' L' + t[0] + ',' + t[1]; lx = (s[0] + t[0]) / 2; ly = e._y - 3; }
+      } else { /* same lane: under the cards, in the lane's bottom padding */
+        var yy = Math.max(s[1], t[1]) + 16; d = 'M' + s[0] + ',' + s[1] + ' L' + s[0] + ',' + yy + ' L' + t[0] + ',' + yy + ' L' + t[0] + ',' + t[1]; lx = (s[0] + t[0]) / 2; ly = yy - 3;
+      }
+      var g = mk('g', { 'class': 'aedge' + (e.planned ? ' planned' : '') + (e.confirmed ? '' : ' draft'), 'data-from': e.from, 'data-to': e.to });
+      g.appendChild(mk('path', { d: d, fill: 'none', 'marker-end': 'url(#ah)' }));
+      /* one label per meaning: the same label into the same part, or out of the same part, is said once */
+      var k1 = e.to + '|' + e.label, k2 = e.from + '|' + e.label;
+      if (e.label && !seen[k1] && !seen[k2]) {
+        seen[k1] = seen[k2] = 1;
+        var tx = mk('text', { x: lx, y: ly, 'text-anchor': anchor }); tx.textContent = e.label;
+        g.appendChild(tx);
+      }
+      svg.appendChild(g);
+    });
+    /* label halos after layout so text stays readable over lines */
+    all('text', svg).forEach(function (tx) { try { var bb = tx.getBBox(); tx.parentNode.insertBefore(mk('rect', { x: bb.x - 4, y: bb.y - 1, width: bb.width + 8, height: bb.height + 2, rx: 4, 'class': 'lbg' }), tx); } catch (_) { } });
+    if (archSel) archMark(archSel);
+  }
+  function archMark(id) {
+    all('#archbox .acard').forEach(function (c) { c.classList.toggle('sel', c.getAttribute('data-c') === id); });
+    all('#archsvg .aedge').forEach(function (g) { g.classList.toggle('hl', g.getAttribute('data-from') === id || g.getAttribute('data-to') === id); });
+  }
+  function archSelect(id) {
+    var P = ARCH.parts || {}, p = P[id], sel = $('archsel'); if (!p || !sel) return;
+    archSel = id; archMark(id);
+    var E = ARCH.edges || [];
+    var outs = E.filter(function (e) { return e.from === id; }).map(function (e) { return esc((P[e.to] || {}).name || e.to) + (e.label ? ' <span class="mut">(' + esc(e.label) + ')</span>' : '') + (e.planned ? ' <span class="mut">· planned</span>' : ''); });
+    var ins = E.filter(function (e) { return e.to === id; }).map(function (e) { return esc((P[e.from] || {}).name || e.from) + (e.label ? ' <span class="mut">(' + esc(e.label) + ')</span>' : ''); });
+    var ev = (p.evidence || []).map(function (v) { return '<code>' + esc(v.path) + '</code>' + (v.why ? ' <span class="mut">' + esc(v.why) + '</span>' : ''); });
+    sel.innerHTML = '<h4>Selected · ' + esc(p.name) + (p.confirmed ? '' : ' <span class="warn">draft</span>') + '</h4>' +
+      '<div class="kv">' +
+      '<div class="row"><span class="k">Runs on</span><span class="vl">' + esc(p.runsOn) + ' · ' + esc(p.kind) + '</span></div>' +
+      (p.summary ? '<div class="row"><span class="k">What</span><span class="vl">' + esc(p.summary) + '</span></div>' : '') +
+      '<div class="row"><span class="k">Talks to</span><span class="vl">' + (outs.join(', ') || '<span class="mut">—</span>') + '</span></div>' +
+      '<div class="row"><span class="k">Called by</span><span class="vl">' + (ins.join(', ') || '<span class="mut">—</span>') + '</span></div>' +
+      '<div class="row"><span class="k">Items</span><span class="vl">' + esc(p.done) + '/' + esc(p.live) + ' done' + (p.run ? ' · ' + esc(p.run) + ' running' : '') + '</span></div>' +
+      (p.next ? '<div class="row"><span class="k">Next</span><span class="vl"><a href="#/plan/' + encodeURIComponent(p.next) + '">' + esc(p.next) + '</a></span></div>' : '') +
+      (p.screens ? '<div class="row"><span class="k">Screens</span><span class="vl"><a href="#/screens" data-scr="' + esc(id).replace(/"/g, '&quot;') + '">' + esc(p.screens) + ' screen(s)</a></span></div>' : '') +
+      (ev.length ? '<div class="row"><span class="k">Evidence</span><span class="vl">' + ev.join('<br>') + '</span></div>' : '') +
+      '</div>' + (p.live ? '<a class="docbtn selbtn" href="#/plan/c:' + encodeURIComponent(id) + '">Show its work items</a>' : '');
+  }
+  W.forgeArch = { draw: archDraw, select: archSelect };
+  var rsT = null; W.addEventListener('resize', function () { clearTimeout(rsT); rsT = setTimeout(archDraw, 120); });
+
+  /* ---- copying: what the dashboard offers to copy is built from Forge's own ids — it advises, you act ---- */
+  function copyText(txt, c, say) {
+    var done = function () { if (c) { c.classList.add('copied'); setTimeout(function () { c.classList.remove('copied'); }, 1400); } toast(say ? 'Copied — paste it in your Claude session' : 'Copied — paste it in a terminal, or ask the Claude session to run it'); };
+    var fallback = function () {
+      try {
+        var ta = D.createElement('textarea'); ta.value = txt; ta.setAttribute('readonly', ''); ta.style.cssText = 'position:fixed;left:-999px;top:0'; D.body.appendChild(ta);
+        ta.select(); D.execCommand('copy'); D.body.removeChild(ta); done();
+      } catch (_) { toast('Could not copy — select the text and copy it'); }
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(txt).then(done, fallback); else fallback();
+  }
+
+  /* ---- search: tasks, milestones, pages, commands, settings, documents and parts, from one box ---- */
+  var PAL = null, palShown = [], palAt = 0, palFocus = null;
+  function palIndex() {
+    var it = [];
+    all('#snav a[data-p], .tabs a').forEach(function (a) { var t = (a.firstChild && a.firstChild.nodeType === 3 ? a.firstChild.nodeValue : a.textContent).trim(); it.push({ k: 'Page', t: t, h: a.getAttribute('href'), page: 1 }); });
+    all('#work details.icd').forEach(function (r) {
+      var id = r.getAttribute('data-id') || '', tt = r.querySelector('.tt'), st = r.querySelector('.imeta .st');
+      it.push({ k: 'Task', c: id, t: tt ? tt.textContent : '', e: st ? st.textContent : '', h: '#/plan/' + encodeURIComponent(id), live: r.getAttribute('data-s') === 'IN_PROGRESS' || r.getAttribute('data-q') === '1' });
+    });
+    all('#work details.sec.sub').forEach(function (d) { var m = d.getAttribute('data-m') || '', b = d.querySelector('summary > b'); if (m && m.charAt(0) !== '(') it.push({ k: 'Milestone', c: m, t: b ? b.textContent : '', h: '#/plan/' + encodeURIComponent(m) }); });
+    all('.acard').forEach(function (c) { var b = c.querySelector('b'); it.push({ k: 'Part', t: b ? b.textContent : c.getAttribute('data-c'), h: '#/architecture/' + encodeURIComponent(c.getAttribute('data-c')) }); });
+    Object.keys(DOCS).forEach(function (key) { var d = DOCS[key]; it.push({ k: d.kind === 'brief' ? 'Brief' : d.kind === 'spec' ? 'Spec' : 'File', t: d.title || key, e: d.rel || '', doc: key }); });
+    all('table.cmdt tr[data-q]').forEach(function (r) { var c = r.querySelector('code.cmd'), d = r.cells[1]; if (c) it.push({ k: 'Command', t: c.textContent, e: d ? d.textContent : '', copy: c.textContent, mono: 1 }); });
+    all('table.cfgt tbody tr').forEach(function (r) { var c = r.querySelector('td code'); if (c) it.push({ k: 'Setting', t: c.textContent, e: r.cells[3] ? r.cells[3].textContent : '', h: '#/configuration', el: r, mono: 1 }); });
+    it.forEach(function (x) { x.s = ((x.c || '') + ' ' + x.t + ' ' + x.k + ' ' + (x.e || '')).toLowerCase(); });
+    return it;
+  }
+  function palRender() {
+    var q = ($('palq').value || '').toLowerCase().trim(), words = q.split(/\s+/).filter(Boolean), list = $('pallist');
+    if (!PAL) PAL = palIndex();
+    var hits = !words.length ? PAL.filter(function (x) { return x.page || x.live; })
+      : PAL.filter(function (x) { return words.every(function (w) { return x.s.indexOf(w) >= 0; }); });
+    if (words.length) {
+      var rank = function (x) { var c = (x.c || '').toLowerCase(), t = x.t.toLowerCase(); return c === q ? 0 : c.indexOf(q) === 0 ? 1 : t.indexOf(q) === 0 ? 2 : (c + ' ' + t).indexOf(q) >= 0 ? 3 : 4; };
+      hits = hits.map(function (x, i) { return { x: x, r: rank(x), i: i }; }).sort(function (a, b) { return a.r - b.r || a.i - b.i; }).map(function (o) { return o.x; });
+    }
+    palShown = hits.slice(0, 50); palAt = Math.min(palAt, Math.max(0, palShown.length - 1));
+    list.textContent = '';
+    if (!palShown.length) { var none = D.createElement('li'); none.className = 'palnone'; none.textContent = 'Nothing matches “' + $('palq').value + '”.'; list.appendChild(none); return; }
+    palShown.forEach(function (x, i) {
+      var li = D.createElement('li'); li.setAttribute('role', 'option'); li.setAttribute('data-i', i); if (i === palAt) { li.className = 'on'; li.setAttribute('aria-selected', 'true'); }
+      var k = D.createElement('i'); k.textContent = x.k; li.appendChild(k);
+      var s = D.createElement('span');
+      if (x.c) { var c = D.createElement('code'); c.textContent = x.c; s.appendChild(c); }
+      if (x.mono) { var m = D.createElement('code'); m.textContent = x.t; s.appendChild(m); } else s.appendChild(D.createTextNode(x.t));
+      li.appendChild(s);
+      var e = D.createElement('em'); e.textContent = x.copy ? 'copy' : x.k === 'Task' ? (x.e || '') : x.doc ? 'read' : ''; li.appendChild(e);
+      list.appendChild(li);
+    });
+    var on = list.querySelector('li.on'); if (on && on.scrollIntoView) on.scrollIntoView({ block: 'nearest' });
+  }
+  function palOpen() { var p = $('pal'); if (!p || !p.hidden) return; palFocus = D.activeElement; PAL = null; palAt = 0; p.hidden = false; var q = $('palq'); q.value = ''; palRender(); q.focus(); }
+  function palClose() { var p = $('pal'); if (!p || p.hidden) return; p.hidden = true; if (palFocus && palFocus.focus && D.contains(palFocus)) palFocus.focus(); }
+  function palRun(i) {
+    var x = palShown[i]; if (!x) return;
+    palClose();
+    if (x.doc) { openDoc(x.doc); return; }
+    if (x.copy) { copyText(x.copy, null, false); return; }
+    if (x.h) {
+      if (location.hash === x.h) route(); else location.hash = x.h;
+      if (x.el) setTimeout(function () { var cf = $('cfgfilter'); if (cf && (cf.value || cfgMode !== 'all')) { cf.value = ''; cfgMode = 'all'; cfgFilter(); } if (D.contains(x.el)) { x.el.scrollIntoView({ block: 'center' }); x.el.classList.remove('flash'); void x.el.offsetWidth; x.el.classList.add('flash'); } }, 80);
+    }
+  }
+
+  /* ---- dark and light: dark unless you choose light; Shift-click follows the system ---- */
+  function themeNow() { var t = D.documentElement.getAttribute('data-theme'); return t === 'auto' ? (W.matchMedia && W.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark') : (t || 'dark'); }
+  function setTheme(t) { D.documentElement.setAttribute('data-theme', t); store('forge.theme', t); }
+
+  /* ---- one listener for every click ---- */
+  D.addEventListener('click', function (e) {
+    var cueB = up(e.target, '[data-cue]'); if (cueB) { cueGo(cueB); return; }
+    var t = e.target, x;
+    if ((x = t && t.closest ? t.closest('code.copyable') : null)) { e.preventDefault(); copyText(x.textContent, x, x.classList.contains('say')); return; }
+    if ((x = up(t, '.docopen'))) { e.preventDefault(); e.stopPropagation(); openDoc(x.getAttribute('data-doc'), x.getAttribute('data-file') || null); return; }
+    if ((x = up(t, '#pallist li[data-i]'))) { palRun(+x.getAttribute('data-i')); return; }
+    if (t && t.id === 'pal') { palClose(); return; }
+    if ((x = up(t, 'summary.irow'))) {
+      if (up(t, 'a')) return;
+      e.preventDefault();
+      var id = x.parentElement.getAttribute('data-id'), want = '#/plan/' + encodeURIComponent(id);
+      if (curTask === id) closeTask(); else if (location.hash === want) route(); else location.hash = want;
+      return;
+    }
+    if ((x = up(t, '#wgseg button'))) { mode = x.getAttribute('data-f'); applyFilter(); if (curTask) renderTask(); return; }
+    if (up(t, '#wgfold')) { setFold(!folded); return; }
+    if ((x = up(t, '#snav a[data-g]'))) { var lg = lastTab[x.getAttribute('data-g')]; if (lg && !x.classList.contains('on')) { e.preventDefault(); location.hash = lg; return; } }
+    if ((x = up(t, '#wgcomp button'))) { location.hash = '#/plan'; return; }
+    if ((x = up(t, '#cfgseg button'))) { cfgMode = x.getAttribute('data-f'); cfgFilter(); return; }
+    if ((x = up(t, '.acard,.alink'))) { var cid = x.getAttribute('data-c'); if (location.hash !== '#/architecture/' + encodeURIComponent(cid)) history.replaceState(null, '', '#/architecture/' + encodeURIComponent(cid)); archSelect(cid); return; }
+    if ((x = up(t, 'a[data-scr]'))) { e.preventDefault(); var sid = x.getAttribute('data-scr'); location.hash = '#/screens'; setTimeout(function () { var g = $('scr-' + sid); if (g) g.scrollIntoView({ block: 'start' }); }, 40); return; }
+    if ((x = up(t, '#archseg button'))) {
+      var v = x.getAttribute('data-v'), wrapEl = $('archdiagram'), list = $('archlist');
+      all('#archseg button').forEach(function (b) { b.classList.toggle('on', b === x); });
+      if (wrapEl) wrapEl.hidden = v !== 'diagram'; if (list) list.hidden = v !== 'list'; if (v === 'diagram') archDraw();
+      return;
+    }
+    if (up(t, '#searchbtn')) { palOpen(); return; }
+    if (up(t, '#themebtn')) { if (e.shiftKey) { setTheme('auto'); toast('Theme follows the system'); } else setTheme(themeNow() === 'dark' ? 'light' : 'dark'); archDraw(); return; }
+    if (up(t, '#taskclose') || (t && t.id === 'taskscrim')) { closeTask(); return; }
+    if (up(t, '#taskprev')) { stepTask(-1); return; }
+    if (up(t, '#tasknext')) { stepTask(1); return; }
+    if (up(t, '#docclose') || (t && t.id === 'docscrim')) { closeDoc(); return; }
+  });
+  D.addEventListener('input', function (e) {
+    var t = e.target; if (!t) return;
+    if (t.id === 'wgfilter') { applyFilter(); if (curTask) renderTask(); }
+    else if (t.id === 'cfgfilter') cfgFilter();
+    else if (t.id === 'cmdfilter') filterList('.cmdgroup', 'tr[data-q]', t.value);
+    else if (t.id === 'scrfilter') filterList('.sgroup', '.scard', t.value);
+    else if (t.id === 'palq') { palAt = 0; palRender(); }
+  });
+  D.addEventListener('change', function (e) {
+    var t = e.target; if (!t) return;
+    if (t.id === 'usms') usageScope(true);
+    else if (t.id === 'forgeLive') { store('forgeLive', t.checked ? 'on' : 'off'); liveLabel(); if (t.checked) poll(); }
+  });
+  D.addEventListener('keydown', function (e) {
+    var typing = /^(INPUT|TEXTAREA|SELECT)$/.test((e.target && e.target.tagName) || '') || (e.target && e.target.isContentEditable);
+    var pal = $('pal'), palOn = pal && !pal.hidden;
+    if ((e.metaKey || e.ctrlKey) && !e.altKey && (e.key === 'k' || e.key === 'K')) { e.preventDefault(); if (palOn) palClose(); else palOpen(); return; }
+    if (palOn) {
+      if (e.key === 'Escape') { e.preventDefault(); palClose(); }
+      else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); if (palShown.length) { palAt = (palAt + (e.key === 'ArrowDown' ? 1 : -1) + palShown.length) % palShown.length; palRender(); } }
+      else if (e.key === 'Enter') { e.preventDefault(); palRun(palAt); }
+      return;
+    }
+    if (e.key === 'Escape') {
+      if (isOpen('docpanel')) closeDoc(); else if (isOpen('taskpanel')) closeTask(); else if (typing && e.target.blur) e.target.blur();
+      return;
+    }
+    if ((e.key === 'Enter' || e.key === ' ') && e.target && e.target.matches && e.target.matches('code.copyable')) { e.preventDefault(); copyText(e.target.textContent, e.target, e.target.classList.contains('say')); return; }
+    if (typing || e.metaKey || e.ctrlKey || e.altKey) return;
+    if (e.key === '/') { e.preventDefault(); palOpen(); return; }
+    if (isOpen('taskpanel') && !isOpen('docpanel')) {
+      if (e.key === 'j' || e.key === 'ArrowDown') { e.preventDefault(); stepTask(1); }
+      else if (e.key === 'k' || e.key === 'ArrowUp') { e.preventDefault(); stepTask(-1); }
+    }
+  });
+
+  /* ---- live: no reload. Every few seconds, while this tab is visible, the page loads its own file again in a
+     hidden frame; that copy answers with its content only when Forge has written something newer. The answer is
+     compared with what Forge wrote last time and only the difference is applied to what is on screen — a row
+     that did not change is not touched, so nothing moves, closes or loses its place. ---- */
+  var frame = null, unanswered = 0;
+  function key(n) {
+    if (n.nodeType !== 1) return null;
+    var k = n.id || n.getAttribute('data-key') || n.getAttribute('data-id') || n.getAttribute('data-m') || n.getAttribute('data-page') || n.getAttribute('data-p') || n.getAttribute('data-c') || n.getAttribute('data-ms');
+    return k ? n.nodeName + '#' + k : null;
+  }
+  function sameKind(a, b) { return a.nodeType === b.nodeType && a.nodeName === b.nodeName; }
+  function patchKids(live, prev, next) {
+    var L = [].slice.call(live.childNodes), P = [].slice.call(prev.childNodes), N = [].slice.call(next.childNodes), i;
+    if (L.length !== P.length) { live.textContent = ''; N.forEach(function (n) { live.appendChild(D.importNode(n, true)); }); return; }
+    var byKey = {}, loose = [], used = [];
+    P.forEach(function (p, j) { var k = key(p); if (k) (byKey[k] = byKey[k] || []).push(j); else loose.push(j); });
+    var at = 0, out = N.map(function (n) {
+      var k = key(n), j = -1;
+      if (k) { if (byKey[k] && byKey[k].length) j = byKey[k].shift(); }
+      else if (at < loose.length && sameKind(P[loose[at]], n)) j = loose[at++];
+      if (j < 0 || !sameKind(P[j], n)) return D.importNode(n, true);
+      used[j] = true; patch(L[j], P[j], n); return L[j];
+    });
+    for (i = 0; i < L.length; i++) if (!used[i] && L[i].parentNode === live) live.removeChild(L[i]);
+    for (i = 0; i < out.length; i++) if (live.childNodes[i] !== out[i]) live.insertBefore(out[i], live.childNodes[i] || null);
+  }
+  function patch(live, prev, next) {
+    if (prev.isEqualNode(next)) return;
+    if (live.nodeType !== 1) { if (live.nodeValue !== next.nodeValue) live.nodeValue = next.nodeValue; return; }
+    var pa = prev.attributes, na = next.attributes, i;
+    for (i = pa.length - 1; i >= 0; i--) if (!next.hasAttribute(pa[i].name)) live.removeAttribute(pa[i].name);
+    for (i = 0; i < na.length; i++) if (prev.getAttribute(na[i].name) !== na[i].value) live.setAttribute(na[i].name, na[i].value);
+    if (live.hasAttribute('data-client')) return; /* drawn here, not by Forge */
+    patchKids(live, prev, next);
+  }
+  function controls() {
+    all('code.copyable').forEach(function (c) { if (c.getAttribute('role')) return; c.setAttribute('role', 'button'); c.setAttribute('tabindex', '0'); c.setAttribute('aria-label', 'Copy: ' + c.textContent); });
+  }
+  function refresh() {
+    readDocs(); readArch(); PAL = null; controls();
+    if (curPage) show(curPage);
+    applyFilter(); cfgFilter(); usageScope(false); tick(); cuesSoon();
+    var cf = $('cmdfilter'); if (cf && cf.value) filterList('.cmdgroup', 'tr[data-q]', cf.value);
+    var sf = $('scrfilter'); if (sf && sf.value) filterList('.sgroup', '.scard', sf.value);
+    if (curTask && !renderTask()) closeTask();
+    if (curDoc && !DOCS[curDoc]) closeDoc();
+    var live = $('forgeLive'); if (live) live.checked = store('forgeLive') !== 'off';
+    liveLabel(); archDraw(); if (archSel) archSelect(archSel);
+  }
+  function applyLive(html, st) {
+    var tpl = D.createElement('template'); tpl.innerHTML = html;
+    var next = D.createElement('div'); next.appendChild(tpl.content);
+    try { patchKids(app, PREV, next); } catch (_) { app.innerHTML = html; }
+    PREV = next; stamp = st; D.body.setAttribute('data-stamp', st);
+    refresh();
+  }
+  function liveLabel() {
+    var box = $('forgeLive'), txt = $('livetxt'); if (!box || !txt) return;
+    var stale = box.checked && unanswered > 5;
+    var say = !box.checked ? 'Paused' : stale ? 'Not updating' : 'Live';
+    if (txt.textContent !== say) txt.textContent = say;
+    var lb = up(box, '.livebox'); if (lb) lb.title = !box.checked ? 'Updates are paused. Turn it on to follow Forge as it works.' : stale ? 'This browser did not let the page read its own file again. Reload the page to see changes.' : 'This page follows Forge as it works: only what changed is updated, nothing reloads.';
+  }
+  function poll() {
+    var box = $('forgeLive'); if (!box || !box.checked || D.visibilityState !== 'visible') return;
+    /* a new frame each time: navigating one frame again and again would fill the Back button with its history */
+    if (frame && frame.parentNode) frame.parentNode.removeChild(frame);
+    frame = D.createElement('iframe'); frame.setAttribute('aria-hidden', 'true'); frame.setAttribute('tabindex', '-1'); frame.title = 'Forge live update';
+    frame.style.cssText = 'display:none';
+    unanswered++;
+    try { frame.src = location.href.split('#')[0].split('?')[0] + '?forgelive=' + encodeURIComponent(stamp) + '&t=' + Date.now(); D.body.appendChild(frame); } catch (_) { }
+    liveLabel();
+  }
+  W.addEventListener('message', function (e) {
+    var d = e.data; if (!frame || e.source !== frame.contentWindow || !d || d.forge !== 'live') return;
+    unanswered = 0;
+    var lb = up($('forgeLive'), '.livebox'); if (lb) { lb.classList.remove('beat'); void lb.offsetWidth; lb.classList.add('beat'); }
+    liveLabel();
+    if (typeof d.html === 'string' && d.stamp && d.stamp !== stamp) applyLive(d.html, String(d.stamp));
+  });
+  D.addEventListener('visibilitychange', function () { if (D.visibilityState === 'visible') { tick(); poll(); } });
+  setInterval(poll, 3000);
+
+  /* ---- scroll cues: wherever something is cut off, a pair of arrows says so and moves it a screen at a time ---- */
+  function cueEl(box) { var id = box.getAttribute('data-for'); return id === 'page' ? (D.scrollingElement || D.documentElement) : $(id); }
+  function cues() {
+    all('.cues').forEach(function (box) {
+      var el = cueEl(box); if (!el) return;
+      var top = el.scrollTop, room = el.scrollHeight - el.clientHeight - top;
+      box.querySelector('[data-cue="up"]').hidden = top < 8;
+      box.querySelector('[data-cue="down"]').hidden = room < 8;
+    });
+  }
+  function cueGo(btn) {
+    var el = cueEl(btn.parentElement); if (!el) return;
+    var calm = W.matchMedia && W.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    el.scrollBy({ top: (btn.getAttribute('data-cue') === 'up' ? -1 : 1) * Math.round(el.clientHeight * 0.8), behavior: calm ? 'auto' : 'smooth' });
+  }
+  var cueT = null; function cuesSoon() { clearTimeout(cueT); cueT = setTimeout(cues, 60); }
+  W.addEventListener('scroll', cuesSoon, { passive: true }); W.addEventListener('resize', cuesSoon);
+  ['side', 'taskbody', 'docbody'].forEach(function (id) { var el = $(id); if (el) el.addEventListener('scroll', cuesSoon, { passive: true }); });
+  /* ---- start ---- */
+  refresh();
+  if (D.readyState === 'loading') D.addEventListener('DOMContentLoaded', route); else route();
+  W.addEventListener('load', function () { archDraw(); var fc = D.querySelector('#archbox .acard'); if (fc && !archSel) archSelect(fc.getAttribute('data-c')); });
 }
 
 // v0.25: one compact, machine-readable picture of the project for the dashboard, the cockpit and scripts
@@ -2779,8 +4019,29 @@ function milestoneBase(w, m) {
 
 function regenDashboard() {
   if (process.env.FORGE_DEFER_REGEN === '1') return; // v0.19.1: a change script regenerates once, at its end
+  // v0.33: Home lists what just happened, read from the trace — and this command's own line is written when the
+  // process ends. A command that will be listed there (task start/done/verify…, see eventText) is drawn once, at
+  // exit, after its line exists; drawn now, the page would always be one event behind. Everything else: now.
+  if (!TRACED && commandIsAnEvent()) { REGEN_AT_EXIT = true; return; }
+  regenNow();
+}
+function regenNow() {
   try { usageAutoRefresh(loadConfig()); } catch (_) { /* never block state ops */ }
   try { generateDashboard(); } catch (_) { /* dashboard is best-effort; never block state ops */ }
+}
+function commandIsAnEvent() {
+  const cmd = process.argv.slice(2).join(' ').slice(0, 300);
+  try { return !!(eventText({ cmd, outcome: 'ok' }) || eventText({ cmd, outcome: 'exit', exit: 1 })); } catch (_) { return false; }
+}
+
+// v0.33: Geist and Geist Mono (SIL OFL 1.1 — plugins/forge/fonts/OFL.txt), Latin subset, embedded so the page looks the
+// same on every machine and still fetches nothing. A missing font file is not an error: the system face is used.
+let DASH_FONTS;
+function dashFonts() {
+  if (DASH_FONTS !== undefined) return DASH_FONTS;
+  const face = (family, weight, file) => `@font-face{font-family:"${family}";font-style:normal;font-weight:${weight};font-display:swap;src:url(data:font/woff2;base64,${fs.readFileSync(path.join(__dirname, '..', 'fonts', file)).toString('base64')}) format("woff2")}`;
+  try { DASH_FONTS = [face('Outfit', '100 900', 'outfit-latin.woff2'), face('DM Mono', '400', 'dm-mono-latin-400.woff2'), face('DM Mono', '500', 'dm-mono-latin-500.woff2')].join(' '); } catch (_) { DASH_FONTS = ''; }
+  return DASH_FONTS;
 }
 
 function generateDashboard() {
@@ -2806,20 +4067,19 @@ function generateDashboard() {
   const total = w.order.length;
   const pct = total ? Math.round(100 * counts.DONE / total) : 0;
 
-  const sColor = { DONE: '#15803d', IN_PROGRESS: '#3b3f8f', BLOCKED: '#b91c1c', TODO: '#57606f', CANCELLED: '#9aa0ad', READY: '#0f766e' };
+  // v0.33: the snapshot the cockpit reads is taken first — task rows carry the step it puts them at
+  const CP = (() => { try { return cockpitPages(statusSnapshot()); } catch (_) { return cockpitPages(null); } })();
   const chip = (label, color) =>
-    `<span class="pill" style="border:1px solid ${color}33;color:${color};background:${color}12">${esc(label)}</span>`;
+    `<span class="pill" data-t="${color}">${esc(label)}</span>`;
   // v0.13.1: components loaded early — milestone sections show which components they touch
   // v0.19: the registry is split — architecture parts, screens (belonging to an app), plain tags
   const C = loadComps();
-  const kindColor = { frontend: '#3b3f8f', backend: '#0f766e', db: '#b45309', job: '#0f766e', integration: '#7c3aed',
-    auth: '#0f766e', hosting: '#3b3f8f', storage: '#b45309', cache: '#b45309', queue: '#0f766e' };
   const tagKind = id => { const r = tagRef(C, id); return !r ? null : r.type === 'component' ? r.rec.kind : r.type === 'screen' ? 'frontend' : null; };
   const comps = { length: Object.keys(C.components).length }; // retained name for the rail's kind dots below
   for (const [id] of [...Object.entries(C.tags), ...Object.entries(C.screens), ...Object.entries(C.components)]) comps[id] = { kind: tagKind(id) };
   // v0.15.1: component chips carry a kind swatch instead of being coloured pills —
   // quieter beside a status pill, and the colour still says which kind it is.
-  const compChip = (cid) => `<span class="cchip" title="${esc((tagRef(C, cid) || { type: 'tag' }).type)}"><i style="background:${kindColor[tagKind(cid)] || '#9aa0ad'}"></i>${esc(cid)}</span>`;
+  const compChip = (cid) => `<span class="cchip" title="${esc((tagRef(C, cid) || { type: 'tag' }).type)}">${esc(cid)}</span>`;
   const fmtD = ms2 => ms2 == null ? '\u2014' : (ms2 < 90000 ? Math.round(ms2 / 1000) + 's' : (ms2 < 5400000 ? Math.round(ms2 / 60000) + 'm' : (ms2 / 3600000).toFixed(1) + 'h'));
 
   // v0.15.3: readable documents — briefs and spec files are embedded so the
@@ -2885,8 +4145,8 @@ function generateDashboard() {
     const gate = (w.gates || {})[m];
     const allClosed = items.every(x => ['DONE', 'CANCELLED'].includes(x.t.status));
     const gateChip = m === '(no milestone)' ? '' :
-      gate && gate.approved ? chip('GATE APPROVED', '#15803d') :
-      allClosed ? chip('AWAITING HUMAN APPROVAL', '#b45309') : chip('gate pending', '#57606f');
+      gate && gate.approved ? chip('approved', 'ok') :
+      allClosed ? chip('waiting for your review', 'you') : '';
     // v0.13: collapsible — the milestone that needs attention opens, closed ones fold away
     const openAttr = (m === actM || m === '(no milestone)' || (allClosed && !(gate && gate.approved))) ? ' open' : '';
     const done = items.filter(x => x.t.status === 'DONE').length;
@@ -2899,7 +4159,6 @@ function generateDashboard() {
         && addDoc(briefKey, path.join(FORGE, 'briefs', `${t.id}.md`), `forge/briefs/${t.id}.md`, `${t.id} — work brief`, 'brief'));
       const stat = isReady ? 'READY' : t.status;
       const sCls = { DONE: 's-done', IN_PROGRESS: 's-prog', READY: 's-ready', BLOCKED: 's-block', TODO: 's-todo', CANCELLED: 's-cancel' }[stat] || 's-todo';
-      const sVar = { DONE: 'var(--done)', IN_PROGRESS: 'var(--progc)', READY: 'var(--readyc)', BLOCKED: 'var(--blockc)', TODO: 'var(--line)', CANCELLED: 'var(--line2)' }[stat] || 'var(--line)';
       // v0.14: design strip — the approved mock beside the latest build capture (intent vs built)
       let designStrip = '';
       {
@@ -2956,27 +4215,28 @@ function generateDashboard() {
       } else if (stat === 'IN_PROGRESS') {
         const st0 = t.attempts.filter(a => a.outcome === 'started').map(a => Date.parse(a.ts)).filter(Number.isFinite).pop();
         const agent = (disp.filter(d => d.kind !== 'message').pop() || {}).agent;
-        meta = `${st0 ? `<span data-since="${new Date(st0).toISOString()}">${fmtD(Date.now() - st0)}</span>` : ''}${agent ? ` · ${esc(agent)}` : ''}`;
+        const stg = CP.stages[t.id] && CP.stages[t.id] !== 'todo' ? STAGE_NAME[CP.stages[t.id]] : '';
+        meta = `${stg ? `<b class="stg">${esc(stg)}</b> · ` : ''}${st0 ? `<span data-since="${new Date(st0).toISOString()}">${fmtD(Date.now() - st0)}</span>` : ''}${agent ? ` · ${esc(agent)}` : ''}`;
       } else if (stat === 'READY') meta = fails ? `${fails} failed attempt(s)` : (t.id === NEXT_ID ? 'next up' : 'ready');
       else if (stat === 'BLOCKED') meta = isQuestionBlock(t) ? 'needs your answer' : 'waiting on other work';
       else if (stat === 'CANCELLED') meta = 'superseded';
       else meta = t.criteria.length ? 'planned' : 'thin item';
       const noScope = !((t.scope || {}).allowed || []).length && !['DONE', 'CANCELLED'].includes(t.status) && (m === actM || m === '(no milestone)');
-      const subline = t.status === 'BLOCKED' ? `<span class="sub">⛔ ${esc(t.blockReason || '')}</span>`
-        : t.status === 'CANCELLED' ? `<span class="sub">✕ ${esc(t.cancelReason || '')}</span>`
-        : noScope ? `<span class="warnv">⚠ no file scope — start will refuse (task update --allowed)</span>` : '';
-      return `<details class="icd" id="it-${esc(t.id)}" data-id="${esc(t.id)}" data-comp="${esc(t.component || '')}" data-arch="${esc(archOfTag(C, t.component) || '')}" data-s="${stat}" data-act="${m === actM || m === '(no milestone)' ? '1' : '0'}" data-q="${isQuestionBlock(t) ? '1' : '0'}"><summary class="irow">
-        <span class="stripe" style="background:${sVar}"></span>
+      const subline = t.status === 'BLOCKED' ? `<span class="sub">${esc(t.blockReason || '')}</span>`
+        : t.status === 'CANCELLED' ? `<span class="sub">cancelled — ${esc(t.cancelReason || '')}</span>`
+        : noScope ? `<span class="warnv">no file scope — start will refuse (task update --allowed)</span>` : '';
+      return `<details class="icd" id="it-${esc(t.id)}" data-id="${esc(t.id)}" data-comp="${esc(t.component || '')}" data-arch="${esc(archOfTag(C, t.component) || '')}" data-s="${stat}" data-act="${m === actM || m === '(no milestone)' ? '1' : '0'}" data-q="${isQuestionBlock(t) ? '1' : '0'}" data-stage="${esc(CP.stages[t.id] || '')}"><summary class="irow">
+        <span class="stripe"></span>
         <span class="iid">${VL.item[t.id] ? `<b class="vlab" title="version label — ${t.label ? 'frozen when work started' : 'provisional: renumbers if the plan is reordered'}">${esc(VL.item[t.id])}${t.label ? '' : '<i>·</i>'}</b>` : ''}${esc(t.id || '')}</span>
-        <span class="itt">${stat === 'IN_PROGRESS' ? '<span class="dot-open"></span>' : ''}${esc(t.title)}${t.component ? compChip(t.component) : ''}${t.origin && t.origin !== 'plan' ? `<span class="cchip origin-${esc(t.origin)}" title="${esc(t.origin)}${t.parent ? ` of ${esc(t.parent)}` : ''}">${t.origin === 'split' ? '⑂' : t.origin === 'review' ? '🔍' : t.origin === 'discovery' ? '💡' : '👤'} ${esc(t.origin)}${t.parent ? ` ↳ ${esc(t.parent)}` : ''}</span>` : ''}${designStrip ? '<span class="cchip">🎨 mock</span>' : ''}${hasBrief ? `<button type="button" class="cchip docopen" data-doc="${esc(briefKey)}" title="Read the brief">📄 brief</button>` : ''}${subline}</span>
+        <span class="itt">${stat === 'IN_PROGRESS' ? '<span class="dot-open"></span>' : ''}<span class="tt">${esc(t.title)}</span>${t.component ? compChip(t.component) : ''}${t.origin && t.origin !== 'plan' ? `<span class="cchip origin-${esc(t.origin)}" title="${esc(t.origin)}${t.parent ? ` of ${esc(t.parent)}` : ''}">${esc(t.origin)}${t.parent ? ` ↳ ${esc(t.parent)}` : ''}</span>` : ''}${designStrip ? '<span class="cchip">🎨 mock</span>' : ''}${hasBrief ? `<button type="button" class="cchip docopen" data-doc="${esc(briefKey)}" title="Read the brief">📄 brief</button>` : ''}${subline}</span>
         <span class="imeta"><span class="st ${sCls}">${stat === 'IN_PROGRESS' ? 'IN PROGRESS' : stat}</span>${meta ? `<span>${meta}</span>` : ''}</span>
       </summary><div class="icdb">
         ${designStrip}
         <div class="dgrid">
           <div><h4>Acceptance criteria</h4>${critList}${dspList}</div>
-          <div><h4>Scope &amp; evidence</h4>${kv}${hasBrief ? `<button type="button" class="briefbtn docopen" data-doc="${esc(briefKey)}">📄 Read the full brief — exactly what the worker was told</button>` : ''}</div>
+          <div><h4>Scope &amp; evidence</h4>${kv}${hasBrief ? `<button type="button" class="briefbtn docopen" data-doc="${esc(briefKey)}">Read the full brief — exactly what the worker was told</button>` : ''}</div>
         </div>
-        ${t.objective ? `<p style="margin-top:14px"><b>Objective</b> — ${esc(t.objective)}</p>` : ''}
+        ${t.objective ? `<p class="obj"><b>Objective</b>${esc(t.objective)}</p>` : ''}
       </div></details>`;
     }).join('');
     // v0.15: component chips removed from milestone headers (user feedback: pure noise at
@@ -2984,7 +4244,7 @@ function generateDashboard() {
     const gateState = m === '(no milestone)' ? 'none' : (gate && gate.approved ? 'approved' : allClosed ? 'awaiting' : 'pending');
     const mName = milestoneName(w, m);
     const mc = (gate || {}).commits;
-    return `<details class="sec sub"${openAttr} data-gate="${gateState}" data-m="${esc(m)}"><summary>${VL.milestone[m] ? `<span class="vtag">${esc(VL.milestone[m])}</span>` : ''}${esc(m)}${mName ? ` <b>${esc(mName)}</b>` : (m === '(no milestone)' ? '' : ' <span class="mut">(unnamed)</span>')} <span class="mut">${done}/${items.length} done</span> ${gateChip}${mc ? ` <span class="mut" title="git log ${esc(mc.base)}..${esc(mc.head)}">· ${esc(mc.base.slice(0, 7))}..${esc(mc.head.slice(0, 7))} (${mc.count})</span>` : ''}${(gate || {}).ship ? ` <a class="mut" href="${esc(gate.ship.pr)}">· PR</a>` : ''}<span class="mcount"></span></summary>
+    return `<details class="sec sub"${openAttr} data-gate="${gateState}" data-m="${esc(m)}"><summary>${VL.milestone[m] ? `<span class="vtag">${esc(VL.milestone[m])}</span>` : ''}${esc(m)}${mName ? ` <b>${esc(mName)}</b>` : (m === '(no milestone)' ? '' : ' <span class="mut">(unnamed)</span>')} <span class="mprog"><span class="pbar"><i style="width:${items.length ? Math.round(100 * done / items.length) : 0}%"></i></span><span class="mut num">${done}/${items.length} done</span></span>${gateChip ? ` ${gateChip}` : ''}${items.some(x => x.t.origin && x.t.origin !== 'plan') ? ` <span class="mut grow" title="tasks added after the plan was cut — Insights shows where they came from">+${items.filter(x => x.t.origin && x.t.origin !== 'plan').length} added</span>` : ''}${mc ? ` <span class="mut" title="git log ${esc(mc.base)}..${esc(mc.head)}">· ${esc(mc.base.slice(0, 7))}..${esc(mc.head.slice(0, 7))} (${mc.count})</span>` : ''}${(gate || {}).ship ? ` <a class="mut" href="${esc(gate.ship.pr)}">· PR</a>` : ''}<span class="mcount"></span></summary>
       <div class="mgb">${rows}</div></details>`;
   })()).join('');
 
@@ -3050,8 +4310,7 @@ function generateDashboard() {
         const pr = progressOf(itemsOfArch(x.id));
         const scr = Object.values(C.screens).filter(s => s.app === x.id).length;
         const sub = x.summary || (x.evidence && x.evidence[0] && x.evidence[0].why) || '';
-        const kc = kindColor[x.kind] || '#57606f';
-        return `<button type="button" class="acard${x.confirmed ? '' : ' draft'}" data-c="${esc(x.id)}" style="--kc:${kc}${col[x.id] != null ? `;grid-column:${col[x.id] + 1}` : ''}">
+        return `<button type="button" class="acard${x.confirmed ? '' : ' draft'}" data-c="${esc(x.id)}" ${col[x.id] != null ? ` style="grid-column:${col[x.id] + 1}"` : ''}>
           <b>${esc(x.name)}</b>${sub ? `<span class="as">${esc(sub)}</span>` : ''}
           <span class="ap">${pr.live ? `${pr.done}/${pr.live} done` : 'no items'}${pr.run ? ` · <em>${pr.run} running</em>` : ''}${scr ? ` · ${scr} screen${scr > 1 ? 's' : ''}` : ''}${x.confirmed ? '' : ' · <i>draft</i>'}</span></button>`;
       };
@@ -3067,7 +4326,7 @@ function generateDashboard() {
       const listRows = lanes.map(l => parts.filter(x => laneOf(x) === l).map(x => {
         const pr = progressOf(itemsOfArch(x.id));
         const outE = C.edges.filter(e => e.from === x.id).map(e => `${esc((C.components[e.to] || {}).name || e.to)}${e.label ? ` <span class="mut">(${esc(e.label)})</span>` : ''}${e.planned ? ' <span class="mut">· planned</span>' : ''}`);
-        return `<tr><td><button type="button" class="alink" data-c="${esc(x.id)}"><i style="background:${kindColor[x.kind] || '#57606f'}"></i>${esc(x.name)}</button><div class="mut"><code>${esc(x.id)}</code></div></td><td>${esc(x.kind)}</td><td>${esc(l)}</td><td>${outE.join('<br>') || '<span class="mut">—</span>'}</td><td class="num">${pr.done}/${pr.live}</td><td>${x.confirmed ? '<span class="ok">✓ confirmed</span>' : '<span class="warn">draft</span>'}</td></tr>`;
+        return `<tr><td><button type="button" class="alink" data-c="${esc(x.id)}">${esc(x.name)}</button><div class="mut"><code>${esc(x.id)}</code></div></td><td>${esc(x.kind)}</td><td>${esc(l)}</td><td>${outE.join('<br>') || '<span class="mut">—</span>'}</td><td class="num">${pr.done}/${pr.live}</td><td>${x.confirmed ? '<span class="ok">✓ confirmed</span>' : '<span class="warn">draft</span>'}</td></tr>`;
       }).join('')).join('');
       const data = { parts: Object.fromEntries(parts.map(x => {
         const pr = progressOf(itemsOfArch(x.id));
@@ -3075,16 +4334,12 @@ function generateDashboard() {
           evidence: (x.evidence || []).slice(0, 6), done: pr.done, live: pr.live, run: pr.run, next: pr.next,
           screens: Object.values(C.screens).filter(s => s.app === x.id).length }];
       })), edges: C.edges.map(e => ({ from: e.from, to: e.to, label: e.label || '', planned: !!e.planned, confirmed: !!e.confirmed, g: gapOf(e) })) };
-      const kinds = [...new Set(parts.map(x => x.kind))];
-      archBlock = `${archDraft ? `<div class="draftnote">✎ ${archDraft} of ${parts.length} part(s) are drafts${parts.some(x => x.source === 'scan') ? ' from <code>forge arch scan</code>' : ''} — check the drawing against reality, then <code>forge arch confirm --all</code> (or fix with <code>forge arch update / link / remove</code>).</div>` : ''}
-      <div class="archwrap" id="archdiagram"><div class="archcard" id="archbox"><svg class="archsvg" id="archsvg" aria-hidden="true"></svg>${laneHtml}</div></div>
+      archBlock = `${archDraft ? `<div class="draftnote">${archDraft} of ${parts.length} part(s) are drafts${parts.some(x => x.source === 'scan') ? ' from <code>forge arch scan</code>' : ''} — check the drawing against reality, then <code>forge arch confirm --all</code> (or fix with <code>forge arch update / link / remove</code>).</div>` : ''}
+      <div class="archwrap" id="archdiagram"><div class="archcard" id="archbox"><svg class="archsvg" id="archsvg" aria-hidden="true" data-client></svg>${laneHtml}</div></div>
       <div class="tblwrap" id="archlist" hidden><table><thead><tr><th>Part</th><th>Kind</th><th>Runs on</th><th>Talks to</th><th>Items</th><th></th></tr></thead><tbody>${listRows}</tbody></table></div>
       <div class="archfoot">
-        <div class="panel"><h4>Legend</h4><div class="alegend">${kinds.map(k => `<span><i style="background:${kindColor[k] || '#57606f'}"></i>${esc(k)}</span>`).join('')}</div>
-          <p class="footnote">Colour is the part's kind. Lanes are where it runs — one per distinct "runs on", browser first, external services last${C.lanes ? ' (order pinned with forge arch lanes)' : ''}. Dashed arrows are planned; a dashed card is a draft you have not confirmed.</p></div>
-        <div class="panel" id="archsel"><h4>Selected</h4><p class="mut">Click a part.</p></div>
-        <div class="panel"><h4>Screens</h4><p>${Object.keys(C.screens).length} screen(s) and their mocks live on their own page — <a href="#/screens">Screens &amp; mockups</a>. Each app here links to its screens.</p>
-          ${Object.values(C.screens).filter(s => !s.app && !s.standalone).length ? `<p class="mut">${Object.values(C.screens).filter(s => !s.app && !s.standalone).length} not assigned to an app yet (<code>forge screen assign &lt;app&gt; …</code>).</p>` : ''}</div>
+        <div class="panel" id="archsel" data-client><h4>Selected</h4><p class="mut">Click a part.</p></div>
+        <p class="footnote">Lanes are where a part runs — one per distinct "runs on", browser first, external services last${C.lanes ? ' (order pinned with forge arch lanes)' : ''}. Dashed arrows are planned; a dashed card is a draft you have not confirmed.${Object.values(C.screens).filter(s => !s.app && !s.standalone).length ? ` ${Object.values(C.screens).filter(s => !s.app && !s.standalone).length} screen(s) are not assigned to an app yet (<code>forge screen assign &lt;app&gt; …</code>).` : ''}</p>
       </div>
       <script type="application/json" id="archdata">${JSON.stringify(data).replace(/</g, '\\u003c')}</script>`;
     }
@@ -3111,7 +4366,7 @@ function generateDashboard() {
       };
       screensBlock = `<div class="workbar"><input class="filter" id="scrfilter" type="search" placeholder="Filter screens… (name, id, route)" aria-label="Filter screens">
         <span class="mut">${all.length} screen(s) · ${all.filter(s => s.mock).length} with a mock${groups[''] ? ` · ${groups[''].length} not assigned to an app yet` : ''}</span></div>` +
-        order.map(a => `<section class="sgroup" id="scr-${esc(a === '~standalone' ? 'standalone' : a || 'none')}"><h3>${a === '~standalone' ? 'Standalone pages <span class="mut">— maps, journeys and other pages that belong to no app</span>' : a ? `<i style="background:${kindColor[(C.components[a] || {}).kind] || '#57606f'}"></i>${esc((C.components[a] || {}).name || a)} <a class="mut" href="#/architecture/${encodeURIComponent(a)}">in the architecture →</a>` : 'Not assigned to an app'} <span class="mut">${groups[a].length}</span></h3>
+        order.map(a => `<section class="sgroup" id="scr-${esc(a === '~standalone' ? 'standalone' : a || 'none')}"><h3>${a === '~standalone' ? 'Standalone pages <span class="mut">— maps, journeys and other pages that belong to no app</span>' : a ? `${esc((C.components[a] || {}).name || a)} <a class="mut" href="#/architecture/${encodeURIComponent(a)}">in the architecture →</a>` : 'Not assigned to an app'} <span class="mut">${groups[a].length}</span></h3>
           <div class="sgrid">${groups[a].map(cardS).join('')}</div></section>`).join('');
     }
   }
@@ -3178,12 +4433,12 @@ function generateDashboard() {
     const agentRows = agentStats.map(x => {
       const pw = Math.round(100 * x.prep / maxT), ew = Math.round(100 * x.exec / maxT);
       return `<div class="hbar"><span class="lab" title="${esc(x.a)} — ${x.launches} launch(es)${x.msgs ? `, ${x.msgs} message(s)` : ''}">${esc(x.a)}</span>
-        <span class="tr"><i style="left:0;width:${pw}%;background:#a9b1e8"></i><i style="left:${pw}%;width:${ew}%;background:var(--progc)"></i></span>
+        <span class="tr"><i style="left:0;width:${pw}%"></i><i style="left:${pw}%;width:${ew}%"></i></span>
         <span class="vv">${fmtDur(x.prep)} + ${fmtDur(x.exec)}</span></div>`;
     }).join('');
     const timePanel =
       `<div class="panel"><h3>Development time <span class="mut">— trimmed medians, wall-clock (not agent runtime)</span></h3>
-      ${agentRows ? `<div class="legend"><span><i style="background:#a9b1e8"></i>Prep (start→dispatch)</span><span><i style="background:var(--progc)"></i>Execution (dispatch→verify)</span></div>
+      ${agentRows ? `<div class="legend"><span><i></i>Prep (start→dispatch)</span><span><i></i>Execution (dispatch→verify)</span></div>
       <div style="display:flex;flex-direction:column;gap:9px">${agentRows}</div>`
       : `<p class="mut">No dispatch records yet — they accumulate as items run under v0.12+ (<code>forge task dispatch</code>).</p>`}
       <div class="footnote">Median item start→done <b>${fmtDur(med(itemSpans))}</b>${itemSpans.length ? ` (${itemSpans.length} item(s))` : ''} · median verification run <b>${fmtDur(med(verifDurs))}</b>${gateWaits.length ? ` · your gate wait — ${gateWaits.join(', ')}` : ''}. Windows over 2h are excluded as session breaks; execution is bracketed by CLI events, so it is the window the worker ran in, not its exact runtime (see <code>forge usage</code>).</div></div>`;
@@ -3314,7 +4569,7 @@ function generateDashboard() {
     let g = '🔥', h = '', p = '';
     if (cfg.phase === 'spec') { g = '🎨'; h = 'Spec phase — the product is still being shaped'; p = 'Resume the interview in your Claude session; share any feature lists, notes, or mockups you have — they shape everything that follows.'; }
     else if (awaiting.length) { g = '👋'; h = `Milestone ${esc(awaiting[0])} is finished — your review is the next step`; p = 'Try the running slice, give your verdict, and say anything you want to change or add before the next milestone starts. Then Forge records the approval.'; }
-    else if (questionIds.length) { g = '⛔'; h = `${questionIds.length} item(s) are blocked and need your answer`; p = questionIds.map(id => `<code>${esc(id)}</code> — ${esc(w.items[id].blockReason || '')}`).join(' · ') + (inProgIds.length ? ` · meanwhile ${inProgIds.map(esc).join(', ')} keep${inProgIds.length === 1 ? 's' : ''} building` : ''); }
+    else if (questionIds.length) { g = '⛔'; h = `${questionIds.length} question${questionIds.length === 1 ? ' needs' : 's need'} your answer`; p = `${questionIds.map(id => `<code>${esc(id)}</code>`).join(', ')} wait${questionIds.length === 1 ? 's' : ''} on you` + (inProgIds.length ? ` · meanwhile ${inProgIds.map(esc).join(', ')} keep${inProgIds.length === 1 ? 's' : ''} building` : ''); }
     else if (apStop) { g = '⏸️'; h = `Autopilot stopped — your session is waiting for you`; p = `${esc(apStop.reason)}. Answer in the Claude session; autopilot carries on by itself once work moves again.`; }
     else if (inProgIds.length) { g = '⚙️'; h = `Building — ${inProgIds.map(esc).join(', ')} in progress`; p = (liveW.length ? `${liveW.map(x => `<code>${esc(x.id)}</code> → ${esc(x.agent || 'worker')} running (<span data-since="${new Date(x.since).toISOString()}">${pace.fmtDur ? pace.fmtDur(Date.now() - x.since) : ''}</span>)`).join(' · ')}. ` : '') + (waitIds.length ? `${waitIds.map(esc).join(', ')} wait${waitIds.length === 1 ? 's' : ''} on other work. ` : '') + 'Nothing needs you right now. Forge stops for exactly three things: a product decision, a high-risk approval, a milestone review.'; }
     else if (blockedIds.length) { g = '⛔'; h = `${blockedIds.length} item(s) are blocked`; p = blockedIds.map(id => `<code>${esc(id)}</code> — ${esc(w.items[id].blockReason || '')}`).join(' · ') + ' — not questions for you; the session resumes them when their wait ends.'; }
@@ -3324,9 +4579,6 @@ function generateDashboard() {
   }
 
   // ---- v0.14: KPI row ----
-  const doneItems = w.order.map(id => w.items[id]).filter(t => t.status === 'DONE');
-  const fpRate = doneItems.length ? Math.round(100 * doneItems.filter(firstPass).length / doneItems.length) : null;
-  const questionCount = w.order.filter(id => isQuestionBlock(w.items[id])).length;
   // v0.22: planned vs discovered — the plan's size at cut time against what building found
   const originKpi = (() => {
     const live = w.order.map(id => w.items[id]).filter(t => t.status !== 'CANCELLED');
@@ -3337,22 +4589,8 @@ function generateDashboard() {
     const pa = plannedVsAdded(w, live);
     return `${pa.planned} planned · <b title="${Object.entries(pa.by).map(([o, k]) => `${o} ${k}`).join(' · ') || 'none'} — added after their milestone started">${pa.added} added while building</b>${pa.by.split ? ` <span class="mut">(${pa.by.split} late split${pa.by.split === 1 ? '' : 's'})</span>` : ''}`;
   })();
-  const ringDash = Math.round(188 * pct / 100);
-  const kpiBlock = `<div class="kpis">
-    <div class="kpi hero"><svg width="72" height="72" viewBox="0 0 74 74" role="img" aria-label="${pct} percent complete">
-      <circle cx="37" cy="37" r="30" fill="none" stroke="#edebe4" stroke-width="9"/>
-      <circle cx="37" cy="37" r="30" fill="none" stroke="#178744" stroke-width="9" stroke-dasharray="${ringDash} 188" stroke-linecap="round" transform="rotate(-90 37 37)"/>
-      <text x="37" y="42" text-anchor="middle" font-size="15" font-weight="700" fill="#1b1d24">${pct}%</text></svg>
-      <div><div class="v">${counts.DONE}<small> / ${total}</small></div><div class="l">ITEMS DONE · WHOLE PROJECT</div>
-      <div class="d">${milestoneSeq(w).filter(m => (((w.gates || {})[m]) || {}).approved).length} of ${milestoneSeq(w).length || '—'} milestones approved</div></div></div>
-    <div class="kpi"><div class="v" style="color:#0f766e">${ready}</div><div class="l">READY TO BUILD</div><div class="d">${counts.TODO - ready} more in the plan · ${originKpi}</div></div>
-    <div class="kpi"><div class="v" style="color:#3b3f8f">${counts.IN_PROGRESS}</div><div class="l">IN PROGRESS</div><div class="d">${counts.CANCELLED ? counts.CANCELLED + ' cancelled' : '&nbsp;'}</div></div>
-    <div class="kpi"><div class="v" style="color:${questionCount ? '#b91c1c' : '#8a8e9a'}">${questionCount}</div><div class="l">QUESTIONS · NEED YOU</div><div class="d">${counts.BLOCKED - questionCount ? `${counts.BLOCKED - questionCount} blocked on other work` : '&nbsp;'}</div></div>
-    <div class="kpi"><div class="v">${fpRate == null ? '—' : fpRate + '%'}</div><div class="l">FIRST-PASS RATE</div><div class="d">${pace.itemSpans && pace.itemSpans.length ? 'median item ' + pace.fmtDur(pace.med(pace.itemSpans)) : '&nbsp;'}</div></div>
-  </div>`;
-
   // ---- v0.14: pace & forecast strip — a PROJECTION from observed pace, never a promise ----
-  let paceBlock = '';
+  let paceBlock = '', forecastLine = '';
   {
     let minStart = null;
     for (const id of w.order) for (const a of (w.items[id].attempts || [])) if (a.outcome === 'started') {
@@ -3367,43 +4605,17 @@ function generateDashboard() {
       const lo = pace.quant(spans, 0.25) * remaining, hi = pace.quant(spans, 0.75) * remaining;
       const gatesLeft = milestoneSeq(w).filter(m => !(((w.gates || {})[m]) || {}).approved).length;
       const medGate = pace.gateMs && pace.gateMs.length ? pace.med(pace.gateMs) : null;
+      forecastLine = remaining ? `≈ ${pace.fmtDur(lo)}–${pace.fmtDur(hi)} of building left · ${gatesLeft} review${gatesLeft === 1 ? '' : 's'} on you` : 'nothing left to build';
       paceBlock = `<div class="pacestrip">
         <div><div class="pk">ELAPSED</div><div class="pv"><span data-since="${new Date(minStart).toISOString()}">${calStr}</span> <small>calendar</small> · ${pace.fmtDur(activeMs)} <small>active build</small></div></div>
         <div class="pdiv"></div>
-        <div><div class="pk" style="color:#b3660a">PROJECTED REMAINING — BUILD</div><div class="pv">${remaining ? `≈ ${pace.fmtDur(lo)}–${pace.fmtDur(hi)} <small>active · ${remaining} item(s) at your pace</small>` : 'nothing left to build'}</div></div>
+        <div><div class="pk">PROJECTED REMAINING — BUILD</div><div class="pv">${remaining ? `≈ ${pace.fmtDur(lo)}–${pace.fmtDur(hi)} <small>active · ${remaining} item(s) at your pace</small>` : 'nothing left to build'}</div></div>
         <div class="pdiv"></div>
         <div><div class="pk">THE REST DEPENDS ON YOU</div><div class="pv">${gatesLeft} gate(s)${medGate ? ` <small>· your median review wait: ${pace.fmtDur(medGate)}</small>` : ''}</div></div>
-        <div class="pnote">Projection from YOUR observed pace (p25–p75 of item times; thin items assumed median-sized) — recomputed on every change, never a promise.</div>
+        <details class="pnote"><summary>How to read this</summary>Projection from YOUR observed pace (p25–p75 of item times; thin items assumed median-sized) — recomputed on every change, never a promise.</details>
       </div>`;
     } else if (minStart) {
       paceBlock = `<div class="pacestrip"><div class="pnote" style="margin-left:0;max-width:none">Pace &amp; forecast appear once a few items complete — Forge projects only from observed data.</div></div>`;
-    }
-  }
-
-  // ---- v0.14: milestone rail — the whole journey at a glance ----
-  let railBlock = '';
-  {
-    const seqR = milestoneSeq(w);
-    if (seqR.length) {
-      const VLr = computeLabels(w);
-      let lastR = undefined;
-      const nodes = seqR.map((m, i) => {
-        const r0 = releaseOf(w, m) || null;
-        const sep = (w.releaseOrder || []).length && r0 !== lastR ? `<div class="rsep"><span>${esc(r0 ? VLr.releaseLabel[r0] : '—')}</span><em>${esc(r0 ? ((w.releases[r0] || {}).name || r0) : 'no release')}</em></div>` : '';
-        lastR = r0;
-        return sep + (() => {
-        const ids = w.order.filter(id => w.items[id].milestone === m);
-        const doneN = ids.filter(id => ['DONE', 'CANCELLED'].includes(w.items[id].status)).length;
-        const g2 = (w.gates || {})[m]; const complete = milestoneComplete(w, m);
-        const cls = g2 && g2.approved ? 'done' : complete ? 'awaitg' : m === actM ? 'activeg' : 'futureg';
-        const sym = g2 && g2.approved ? '✓' : complete ? '!' : String((VLr.milestone[m] || '').split('.')[1] || (i + 1));
-        const label = cls === 'awaitg' ? 'your review' : cls === 'done' ? `${doneN}/${ids.length} · gate ✓` : `${doneN}/${ids.length} items`;
-        const mc = [...new Set(ids.map(id => w.items[id].component).filter(Boolean))].slice(0, 4);
-        return `<a class="mnode ${cls}" href="#/plan/${encodeURIComponent(m)}"><span class="mdot">${sym}</span><span class="mv">${esc(VLr.milestone[m] || '')}</span><span class="mn">${esc(m)}</span>${milestoneName(w, m) ? `<span class="mi">${esc(milestoneName(w, m))}</span>` : ''}<span class="mi">${label}</span>${mc.length ? `<span class="cdots">${mc.map(c => `<i style="background:${kindColor[(comps[c] || {}).kind] || '#57606f'}"></i>`).join('')}</span>` : ''}</a>`;
-        })();
-      }).join('');
-      railBlock = `<details class="sec" open id="milestones"><summary>Milestones <span class="mut">(the whole journey — click one to open it in the plan)</span></summary>
-        <div class="railcard"><div class="railwrap"><div class="rail">${nodes}</div></div></div></details>`;
     }
   }
 
@@ -3466,49 +4678,61 @@ function generateDashboard() {
         <div class="pdiv"></div>
         <div><div class="pk">LAST 7 DAYS</div><div class="pv">${doneWk} done <small>· ${addedWk} added · ${openNow} open now</small></div></div>
         ${pace.itemSpans && pace.itemSpans.length ? `<div class="pdiv"></div><div><div class="pk">MEDIAN ITEM</div><div class="pv">${pace.fmtDur(pace.med(pace.itemSpans))} <small>start → done</small></div></div>` : ''}
-        <div class="pnote">First-pass measures the brief: a worker that needed a retry or a mid-flight fix did not get a complete brief. An unreviewed item passes by construction — compare reviewed with reviewed. Added ≥ done for a week means the milestone is growing faster than it closes. <code>forge stats</code> prints the per-milestone table.</div>
+        <details class="pnote"><summary>How to read this</summary>First-pass measures the brief: a worker that needed a retry or a mid-flight fix did not get a complete brief. An unreviewed item passes by construction — compare reviewed with reviewed. Added ≥ done for a week means the milestone is growing faster than it closes. <code>forge stats</code> prints the per-milestone table.</details>
       </div>`;
     }
   }
-  // Overview: releases as progress bars, and what is happening right now
-  let releaseBlock = '';
-  {
-    const VLo = computeLabels(w);
-    const rels = w.releaseOrder || [];
-    const rowsR = (rels.length ? rels : [null]).map(r => {
-      const ms = milestoneSeq(w).filter(m => (releaseOf(w, m) || null) === r);
-      if (!ms.length) return '';
-      const ids = w.order.filter(id => ms.includes(w.items[id].milestone));
-      const d = ids.filter(id => w.items[id].status === 'DONE').length, live = ids.filter(id => w.items[id].status !== 'CANCELLED').length;
-      const appr = ms.filter(m => (((w.gates || {})[m]) || {}).approved).length;
-      const pctR = live ? Math.round(100 * d / live) : 0;
-      return `<a class="relrow" href="#/plan/${encodeURIComponent(ms.find(m => !(((w.gates || {})[m]) || {}).approved) || ms[0])}">
-        <span class="vtag rel">${esc(r ? VLo.releaseLabel[r] : '—')}</span><span class="rn">${esc(r ? ((w.releases[r] || {}).name || r) : 'All milestones')}</span>
-        <span class="pbar"><i style="width:${pctR}%"></i></span><span class="rm">${appr}/${ms.length} milestones · ${d}/${live} items${r && (w.releases[r] || {}).tag ? ` · ${esc(w.releases[r].tag)}` : ''}</span></a>`;
-    }).join('');
-    if (rowsR) releaseBlock = `<div class="panel"><h3>Releases</h3><div class="rels">${rowsR}</div></div>`;
-  }
+  // Home: what is in flight, the milestone on its way out, and how much closed lately
+  let msCard = '', actTile = '', railHead = '', railAll = '';
   let nowBlock = '';
   {
     const VLn = computeLabels(w);
     const inP = w.order.filter(id => w.items[id].status === 'IN_PROGRESS');
     const blk = w.order.filter(id => w.items[id].status === 'BLOCKED');
-    const li = id => `<li><a href="#/plan/${encodeURIComponent(id)}"><b class="vlab">${esc(VLn.item[id] || '')}</b>${esc(id)}</a> <span>${esc(w.items[id].title)}</span></li>`;
+
     const mIds = actM ? w.order.filter(id => w.items[id].milestone === actM) : [];
     const mDone = mIds.filter(id => w.items[id].status === 'DONE').length;
-    nowBlock = `<div class="panel"><h3>Now${actM ? ` <span class="mut">— <span class="vtag">${esc(VLn.milestone[actM] || '')}</span>${esc(milestoneName(w, actM) || actM)}</span>` : ''}</h3>
-      ${actM ? `<div class="nowbar"><span class="pbar"><i style="width:${mIds.length ? Math.round(100 * mDone / mIds.length) : 0}%"></i></span><span class="mut">${mDone}/${mIds.length} items in this milestone</span></div>` : ''}
-      ${inP.length ? `<h4>In progress</h4><ul class="nowl">${inP.map(li).join('')}</ul>` : ''}
-      ${blk.length ? `<h4>Blocked — needs you</h4><ul class="nowl">${blk.map(li).join('')}</ul>` : ''}
-      ${NEXT_ID ? `<h4>Next up</h4><ul class="nowl">${li(NEXT_ID)}</ul>` : ''}
-      ${!inP.length && !blk.length && !NEXT_ID ? '<p class="mut">Nothing in flight.</p>' : ''}</div>`;
+    // the active milestone as tiles, one per task (anything in flight elsewhere joins them): what waits on the
+    // owner first, then what is being built, what is next, what is blocked, what is left, what is done
+    const msIds = w.order.filter(id => w.items[id].milestone === actM && w.items[id].status !== 'CANCELLED');
+    const rank = id => { const t = w.items[id]; return isQuestionBlock(t) ? 0 : t.status === 'IN_PROGRESS' ? 1 : id === NEXT_ID ? 2 : t.status === 'BLOCKED' ? 3 : t.status === 'DONE' ? 5 : 4; };
+    const tileIds = [...inP.filter(id => !msIds.includes(id)), ...msIds].map((id, i) => [rank(id), i, id]).sort((a, b) => a[0] - b[0] || a[1] - b[1]).map(x => x[2]);
+    const tile = id => { const t = w.items[id], lw = liveW.find(x => x.id === id), q = isQuestionBlock(t);
+      const kind = q ? 'you' : t.status === 'IN_PROGRESS' ? 'run' : t.status === 'DONE' ? 'done' : t.status === 'BLOCKED' ? 'wait' : 'idle';
+      const stg = String(STAGE_NAME[CP.stages[id]] || 'in progress').toLowerCase();
+      const sub = q ? 'waiting on you' : lw ? `${esc(stg)} · <i data-since="${new Date(lw.since).toISOString()}"></i>` : t.status === 'IN_PROGRESS' ? esc(stg) : t.status === 'DONE' ? 'done' : t.status === 'BLOCKED' ? 'blocked on other work' : id === NEXT_ID ? 'up next' : t.status === 'READY' ? 'ready' : 'to do';
+      return `<li class="tile t-${kind}" data-key="${esc(id)}"><a href="#/plan/${encodeURIComponent(id)}"${lw ? ` title="${esc(lw.agent || 'worker')} is on it"` : ''}><span class="mk"></span><span class="tn">${esc(t.title)}</span><span class="ts"><b>${esc(id)}</b>${sub}</span></a></li>`; };
+    const TILE_MAX = 12, tileShow = tileIds.length > TILE_MAX ? tileIds.slice(0, TILE_MAX - 1) : tileIds, tileMore = tileIds.length - tileShow.length;
+    nowBlock = !tileIds.length ? '' : `<div class="msec" id="inflight"><h2 class="tl">${actM ? `<a href="#/plan/${encodeURIComponent(actM)}">${esc(milestoneName(w, actM) || actM)}</a>` : 'In flight'} <span class="mut">${actM ? `${esc(actM)} · ` : ''}${liveW.length ? `${liveW.length} worker${liveW.length > 1 ? 's' : ''} running` : 'nothing is being built right now'}</span></h2>
+      <ul class="tiles">${tileShow.map(tile).join('')}${tileMore ? `<li class="tile t-more"><a href="#/plan/${encodeURIComponent(actM || '')}"><span class="tn">${tileMore} more</span><span class="ts">in the plan</span></a></li>` : ''}</ul></div>`;
+    const msDoneN = msIds.filter(id => w.items[id].status === 'DONE').length;
+    railHead = actM && msIds.length ? `<div class="railnum"><b class="num">${msDoneN}</b> of ${msIds.length}</div><div class="railsub">closed in <a href="#/plan/${encodeURIComponent(actM)}">${esc(milestoneName(w, actM) || actM)}</a></div>`
+      : total ? `<div class="railnum"><b class="num">${counts.DONE}</b> of ${total}</div><div class="railsub">tasks closed</div>` : '';
+    const msAll = milestoneSeq(w);
+    railAll = `${counts.DONE} of ${total} tasks closed · ${msAll.filter(m => (((w.gates || {})[m]) || {}).approved).length} of ${msAll.length} milestones approved`;
+    msCard = !total ? '' : `<div class="panel" id="milestone"><h3>${actM ? `<a href="#/plan/${encodeURIComponent(actM)}">${esc(milestoneName(w, actM) || actM)}</a>` : 'No active milestone'}${actM ? ` <span class="mut">${esc(actM)}${VLn.milestone[actM] ? ` · ${esc(VLn.milestone[actM])}` : ''}</span>` : ''}</h3>
+      ${CP.flow}
+      <dl class="msfacts">${forecastLine ? `<div><dt>Forecast</dt><dd>${forecastLine}</dd></div>` : ''}
+        <div><dt>Whole project</dt><dd>${counts.DONE}/${total} tasks · ${msAll.filter(m => (((w.gates || {})[m]) || {}).approved).length} of ${msAll.length || '—'} milestones approved<span class="pbar"><i style="width:${pct}%"></i></span></dd></div>
+        <div><dt>Scope</dt><dd>${originKpi}</dd></div></dl></div>`;
+    // closed per day, last 14 days — is it moving, and faster or slower than the week before
+    const d0 = new Date(); d0.setHours(24, 0, 0, 0);
+    const perDay = new Array(14).fill(0);
+    for (const id of w.order) { const t = w.items[id]; if (t.status !== 'DONE') continue; const p = [...(t.attempts || [])].reverse().find(a => a.outcome === 'passed'); if (!p) continue; const k = Math.floor((d0.getTime() - Date.parse(p.ts)) / 86400000); if (k >= 0 && k < 14) perDay[13 - k]++; }
+    const wkNow = perDay.slice(7).reduce((a, b) => a + b, 0), wkPrev = perDay.slice(0, 7).reduce((a, b) => a + b, 0), dayMax = Math.max(1, ...perDay);
+    const dayName = i => new Date(d0.getTime() - (14 - i) * 86400000).toLocaleDateString('en', { weekday: 'short', day: 'numeric', month: 'short' });
+    actTile = !counts.DONE ? '' : `<div class="panel" id="activity"><h3>Closed <span class="mut">last 14 days</span></h3>
+      <div class="actnum"><b class="num">${wkNow}</b><span>in the last 7 days<br><span class="mut">${wkPrev} the week before</span></span></div>
+      <div class="bars" role="img" aria-label="Tasks closed per day over the last 14 days: ${perDay.join(', ')}">${perDay.map((n, i) => `<i class="${i === 13 ? 'now' : ''}${n ? '' : ' z'}" style="--h:${n ? Math.max(12, Math.round(100 * n / dayMax)) : 0}%" title="${esc(dayName(i))}: ${n} closed"></i>`).join('')}</div>
+      <div class="barsx"><span>${esc(dayName(0))}</span><span>today</span></div></div>`;
   }
   // System: plan standards (forge upgrade) and the git/verify settings in force
   let standardsBlock = '', standardsMet = 0, standardsAll = 0;
   try {
     const st = upgradeStatus();
     standardsAll = st.length; standardsMet = st.filter(x => x.done).length;
-    standardsBlock = st.map(x => `<div class="sysrow"><span class="bdg ${x.done ? 'ok' : x.kind === 'auto' ? 'bad' : 'warn'}">${x.done ? 'MET' : x.kind === 'auto' ? 'AUTO' : 'REVIEW'}</span><span class="n">${esc(x.id)} <span class="mut">${esc(x.since)}</span></span><span class="d">${esc(x.title)}${x.accepted ? ` · kept as-is: ${esc(x.accepted.reason)}` : ''}${x.findings.length ? `<br>${x.findings.slice(0, 3).map(esc).join('<br>')}` : ''}</span></div>`).join('');
+    const stRow = x => `<div class="sysrow"><span class="bdg ${x.done ? 'ok' : x.kind === 'auto' ? 'bad' : 'warn'}">${x.done ? 'MET' : x.kind === 'auto' ? 'AUTO' : 'REVIEW'}</span><span class="n">${esc(x.id)} <span class="mut">${esc(x.since)}</span></span><span class="d">${esc(x.title)}${x.accepted ? ` · kept as-is: ${esc(x.accepted.reason)}` : ''}${x.findings.length ? `<br>${x.findings.slice(0, 3).map(esc).join('<br>')}` : ''}</span></div>`;
+    standardsBlock = st.filter(x => !x.done).map(stRow).join('') + (standardsMet ? `<details class="metmore"><summary>${standardsMet} met</summary>${st.filter(x => x.done).map(stRow).join('')}</details>` : '');
   } catch (_) { /* never block the dashboard */ }
   const gcD = (() => { try { return gitCfg(cfg); } catch (_) { return null; } })();
   // ---- v0.20.1: Configuration and Commands pages ------------------------------------
@@ -3537,12 +4761,26 @@ function generateDashboard() {
       : gsD.choice === 'skip' ? '<p class="mut">Skipped by choice. Agents orient with explorer runs and grep.</p>' : '<p class="mut">No choice recorded. <code>forge config set options.graphify use</code> after installing it, or <code>skip</code>.</p>'}
   </div>`;
   const cfgGroups = [...new Set(CONFIG_DOCS.map(d => d.group))];
-  const configPage = `<div class="cfgintro panel"><p><b>This page is how Forge and the development setup are configured</b> — verify commands, gates, git flow, the build loop, delegation. It says nothing about the application itself: what the application must do lives in <a href="#/specs">Specs</a>.</p>
+  // v0.33: where a value comes from (Forge default, profile, this machine, this project) — "Changed here" lists
+  // only the project's own choices. A project that has not adopted the layers owns every value it holds.
+  const SRC = (() => { try { return optionSources(loadProjectConfig()); } catch (_) { return null; } })();
+  const cfgSrc = (key, v) => {
+    if (!v) return { own: false, label: '' };
+    if (!SRC || key.indexOf('options.') !== 0) return { own: true, label: SRC ? 'this project' : '' };
+    const k = key.slice(8);
+    const hits = k === 'models.<role>' ? Object.keys(SRC).filter(x => x.indexOf('models.') === 0).map(x => SRC[x]) : (SRC[k] ? [SRC[k]] : []);
+    const mine = hits.find(x => x.layer === 'project') || hits.find(x => x.layer === 'machine');
+    return { own: !!mine && mine.layer === 'project', label: (mine || hits[0] || {}).label || '' };
+  };
+  const configPage = `<details class="cfgintro panel hint"><summary>How this page works <span class="mut">— what the settings are, what the risk labels mean, how to change one</span></summary><p><b>This page is how Forge and the development setup are configured</b> — verify commands, gates, git flow, the build loop, delegation. It says nothing about the application itself: what the application must do lives in <a href="#/specs">Specs</a>.</p>
     <p><b>Delegation switches are reversible.</b> Turn on one per milestone, record a baseline first (<code>forge usage --baseline --label &lt;switch&gt;</code>), and watch first-pass and the orchestrator's share of calls on <a href="#/plan">Plan</a> and <a href="#/usage">Usage</a>. If first-pass drops by more than one task, turn it back off. Risk: <b>none</b> — no effect on how work is done · <b>low</b> — changes the process, easy to see if it misbehaves · <b>test first</b> — try it on one milestone before keeping it.</p>
-    <p><b>How to change a setting:</b> run the command in the last column in a terminal, from the project folder — or ask the Claude session to run it. The CLI validates the value and records the decisions it needs (opting out of the git flow asks for a reason). Settings live in <code>forge/config.json</code>; change them through the CLI, not by editing the file. The dashboard refreshes on the next command. Click a command to copy it.</p></div>
+    <p><b>How to change a setting:</b> run the command in the last column in a terminal, from the project folder — or ask the Claude session to run it. The CLI validates the value and records the decisions it needs (opting out of the git flow asks for a reason). Settings live in <code>forge/config.json</code>; change them through the CLI, not by editing the file. The dashboard follows the next command by itself. Click a command to copy it.</p></details>
+    <div class="workbar" style="margin-top:14px"><input class="filter" id="cfgfilter" type="search" placeholder="Filter settings… (e.g. autopilot, verify, model)" aria-label="Filter settings">
+      <div class="seg" id="cfgseg" role="group" aria-label="Which settings"><button data-f="mine">Changed here<span class="n"></span></button><button class="on" data-f="all">All settings</button></div></div>
+    <p class="noresult" id="cfgnone" hidden>No setting matches.</p>
     ${graphCard}
     ${cfgGroups.map(gname => `<h3 class="h3s">${esc(gname)}</h3><div class="tblwrap"><table class="cfgt"><colgroup><col style="width:19%"><col style="width:6%"><col style="width:7%"><col style="width:26%"><col style="width:21%"><col style="width:6%"><col style="width:15%"></colgroup><thead><tr><th>Setting</th><th>Now</th><th>Default</th><th>What it does</th><th>Why you'd change it</th><th>Risk</th><th>How to change</th></tr></thead><tbody>${
-      CONFIG_DOCS.filter(d => d.group === gname).map(d => { const v = cfgVal(d.key); return `<tr><td><code>${esc(d.key)}</code></td><td>${v || '<span class="mut">default</span>'}</td><td class="mut">${esc(d.def)}</td><td>${esc(d.what)}</td><td>${esc(d.why)}</td><td><span class="risk risk-${d.risk.replace(/\s+/g, '')}">${esc(d.risk)}</span></td><td><code class="cmd copyable" title="Click to copy">${esc(d.change)}</code></td></tr>`; }).join('')
+      CONFIG_DOCS.filter(d => d.group === gname).map(d => { const v = cfgVal(d.key); const src = cfgSrc(d.key, v); return `<tr data-mine="${src.own ? '1' : '0'}"><td><code>${esc(d.key)}</code></td><td>${v || '<span class="mut">default</span>'}${v && src.label ? `<div class="src">${esc(src.label)}</div>` : ''}</td><td class="mut">${esc(d.def)}</td><td>${esc(d.what)}</td><td>${esc(d.why)}</td><td><span class="risk risk-${d.risk.replace(/\s+/g, '')}">${esc(d.risk)}</span></td><td><code class="cmd copyable" title="Click to copy">${esc(d.change)}</code></td></tr>`; }).join('')
     }</tbody></table></div>`).join('')}`;
   const commandsPage = `<div class="workbar"><input class="filter" id="cmdfilter" type="search" placeholder="Filter commands… (e.g. milestone, verify, autopilot)" aria-label="Filter commands"><span class="mut">every command is <code>node &lt;forge&gt;/bin/forge.js …</code> — in a Claude session just say what you want; <code>forge help</code> prints the full reference</span></div>
     ${COMMAND_DOCS.map(g => `<section class="cmdgroup"><h3 class="h3s">${esc(g.group)}</h3><div class="tblwrap"><table class="cmdt"><tbody>${g.items.map(([c, wtxt]) => `<tr data-q="${esc((c + ' ' + wtxt).toLowerCase())}"><td><code class="cmd">${esc(c)}</code></td><td>${esc(wtxt)}</td></tr>`).join('')}</tbody></table></div></section>`).join('')}`;
@@ -3565,412 +4803,87 @@ function generateDashboard() {
   } catch (_) { }
   const specCount = (specRows.match(/<tr>/g) || []).length;
 
-  const CP = (() => { try { return cockpitPages(statusSnapshot()); } catch (_) { return { nav: '', pages: '', css: '', js: '' }; } })(); // v0.29
   const html = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Forge — ${esc(cfg.project)}</title>
 <link rel="icon" type="image/png" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAUQ0lEQVR42r1ba3RV1bX+5to7CeQhEAwEggkYxIgChgCiCNEAJkHNLeZCwShKoDAQGQOq4FUqqFgV8WJF26iBcIMUexEqBcrDPJDHDZQQMEmRCLHtGFGoUhg1ekvCOWuu+2M/zj4n+zwCeE/GHjln770ec65vPtaccxH8PwRAmd+vA3A/gFwAtwHoRYQYpaCZ78HxLjnaKpff1ocD7zkG9AKQALoA0M3vBEBztKWA74IAUuZ9ArGCYgDtBPxdAScBfAJgB4DvXGj0+wjHC08AOE2+ydqX271rcdGP298ZAE86aBTBiE8CUOFo6AFw2fzvdaxS4MUAmMj1WbDLG+QKfC6v8HLO3WLIPgC9ApkgzFVPAnDCJLzNbGgTF/D9WlxBGRnw/Ir6J0cfRPCYNCkAxwH0tkQIpowJU1Ys4p2DW53wNWYAa5omNU1jImPC1JEBwQjrNLPJ6M9iwn5Tz9gomO0gPthKRTx4OGYJIVgI4YcCoWnyR0CZG9LaTHGYbxEfB+C0+bInTCdXNRkiYk3T7N95eXnyZz+bbU9O0zRpMqazUA/LAIdIeIiIiXDapB3/Zq6+14KKqcyugtCO93QH4RkZGXLjxo1SKSWVUrJ63z4eN26cDXtd15mIrpbwUAzxmjTfDwBvmg8uB9Xu7p1ENBEhNJuYHt178PLly/n71u+lUkp++eWXsqbmsFRKsVKK33v/PR4wYIBTR1wNoXZbF91y2WTAahCw22HyZARwd33uMIHGbyH84P7oo4/y6S9Os1KKpVRy2bJlskePHhwbG8uPPPIIf/PNN6yU4n/84x/886d+zl26xATqi6u+TEUryTKNhD0A8D8BDOi0UvO3FiSdcB83bhxXVlaytcqbN2/m9PR0OXLECFlRUcnHj9dxQUEBJyUl8dtvv22/d/ToUX7wwQcdIhRaLCgyRcgOH0EBOAwAxwIZQFcmb1JzaPK01FQuLS21CWpoaOTs7Gzu1asXv//++7K+vl5OmzZNjh49WlZXV/PHH3/MN998M992661cVVVlt/voo818yy23+I1BVy77gQw4CgD1FgOIyLXz8HIuWAghAcguXbrIRQsX2ZC+cOECP/HEPE5MTOQFCxZwY2OjfGnFChnTJcZP3xQXF3N9fT2/8cYq7tWrF0+bNk3+9a9/ZaUUt37Xyi+++CL36NHDQhlrmuisMvTzEk1TeAwAGhwI6BThgWZtypQpfOLECXv1Vq9ezddffz3fd18u19XV8ZYtW/jGGwcEmj2pGczjhIQEfvPNN7m+vp6nT5/O3bpdxy+/vMLu74svvuCioiI/JdlJ/SADrEADADSG0wHhCB82bBhv/f3v7YlWV1fzsKHD+OabB/GWLVv50KFDcsKECbZ4REXpkoikw8uUuq7ZYw+57TbetWsXV1dX86hRozgjI4O3btlq979nzx4efedon37QNUYYsxnEDH7hZIDX4TKGcl9tpZicnMwrV67kS5faWCnFTU1NPHnyZO7Z83p+9dVXuampiRctWuS34qYis8ax/1vQ1nXdHquw8CE+cuQIl5SUcEpKCufl5fGpU6dYKcWeyx5+6623OCUlxUarc1HCXBYDmgNFQAZuJJxyrplw0zSN582bxy0tLayU4kuX2njx4sUc2zWWH364iOvrG3jNmjW2zAohLOUVEcIcY0lN0+TS55bKEydO8JNPPsndu3fnhQsX8g8//MBKKT579iwvWLDAZpzTbFJ4BpxxZUAoszZx4kQ+dPAgm14cl/9XOffr149HjBjBVVVV/Mknn8jMzEy/VY/Qv3DdLFntUlJS+IMPNvDBgwc5JyeHU9NSuby83BaLgwcP8MSJE31tdS2U2YyIAX7mY9CgQbxhwwfWgPLIkSPyzjvvlCkpKbx27Vo+evQoP/TQQzbjdD1AzkMzQYbwQfz0Q05ODh84cIA3btzI6ek38siRI7mm5rDNiPLyck5PTw+3hfcTgT87dYBT0RERd+vWTT7//PP83XffsVKKv/32W545c6ZMSLhOLl68WJ48eZKXLl1qQVAKIaRlEkOYoc4wgN30w/z58/n48Tp+4YUXuGfPnlxcXMwXL1xgpRSfP39ePv/88zIlJUUSkQxAglMJ/iWYFZC6rksAcubMmVIpxW1tbVxaWsq9e/fm/Px8efRorfzggw+kpYQCIRvh1tRpWcIFR2wZtxRpz56Jcu3atbK2tlbe/8D9sm/fvvzuu+9a4ikfefQRSURS8zeVMhABPkfIhQHFxcXS6/Xy6tWrOS4ujj/88HdcWVkpx4wZIwN2b5HKeKRMCBkcMcVCApBZWVly9+7dctu2bTx8+HD5YMGDctSoUbYOC+EHfKE7I8LKF3W1o75ejxeapuGbb75Bbm4uevbsoSZMmAAA0DQNzAyv1+ts4xpiDvFRACgxMREXL14EEaAiaOT1ShARNCFQV1eH/Px8zJ41S91+++0oKyszxieC8nWmXOZHIvzsFAAoTdPQfvkyGhoaQUSIjo6GlNI5gCtlmqZBE+7D6JoR8X7xhRfR1NSEu8feTUrZ95UQQgkhVBACSCkFr5QQQkAIgbXr1qGsrAyapkEIEZJ486bQ3ULEbpMkAgQRYmJioJQCM7uusvO3EAJSysD7RARFRGBmxMfFYcZjM5CUlIReSb18kADsMYQmwJID8xC+ZAOzkUAw52qNGQqR5nchIkMpIKVUBkcVORIfpNzwTARNE2BmlZMzXg3PylIKBtEAoBQIILBSGDJkKFJTU/HV11+hurragJsycJeRkYERI0aAJUPTNFjtrQUJmAdJKYMSHwgD5QiJa25cte5JcxWUAogENE0PyShhwl1KxtNPL0ZVVSW2b/sDYmNj/WYuhCAANH78eBJC4MjhI+qf//wnYqJ1AArx8QmorKzE4cOHMXv2LEhpyLzwMdF9lSno4rt9WDhEQLmksmw5IiIigtI0TZk9dnhX1w2lqGka3nnnHaxa9ToBoP/e/DtcvnwZQhDI7I+ZoWs6Jkw0FGpVVRWICKwM4trb26iqqgq6rqO0dC1WrHgJzAxWCpoWVGoJykaFEyFBge30A6S/mTGcjhmPPspKKX722We5oKCAS0pKpNNMOiM2ADgpKYl37dplhr4kP/30036OFQH2nuKmgTdx63et3Nrayhk3Z9j7BiJiIYz3X375l3bwdNOmTTI+PsG3A7zy8LhlBj8PawXIhLQQwlghlhQAORUTpSuv9KohQ4agsrIK+fn5uHjxIqZOnYo33ngDUboBa0u2yexr7NixSLguAcePH8eZ5jNm/0zGu0b/v/jFUsyZMwdtl9owffp07NmzG6mpqfB6pS1uEQPeTWIdOsD1ownNhqxSyh7UkjUigXaPF5MmTcKn+z5VQ4cOQXNzM+67L1dt3bpV6bquvF6vKTbGn1JGX/fcey8AYP/+/ZBS2lpcKZ/oRUdFobS0FJPun4SzZ89izJgx2LdvH+644w5T3ERobRfCDFoM8IZ6iZW/GbZ1AoAoU+YnT34I27ZtQ2LPROzcsQM5OTmoqztG0VE6vF6voSwUFKCUIENBdu/WHdnZ4wAAFRUVNpMD9I/yeL3Qdd0muu7YMdx4442qoqJCDR06FMzGorhqcAoLBSlM+QjhCbGNK8vhMBjj08SpqakUFRVFUko609yMlpYWaJoGKZkosJjAbH/XXXchNTUVTU1NqKursx0bt+W02vft2xdx8fG2rWfLETNFq0PLEE6aBWARzhGyutA0DUopEBmmnwiWF0ZvvfUrLH1uKTRNw6JFi7Bp0ybDU2RWwnKkfKuiAKjxpjtdUVGBS5cuGfA3HARfjp8Mpnu8XkybNg1VVVXIyMhQp06dwvjx4/HnkyeVEMKB0sjF32yhh2WA0+Aq5YCp8nlhggivvPoK5syZC4/Hg+nTp2PnH3eiV1ISpJQQmmYzUkqJrl27YnxOjgKAyspKPy/NZrjpykrJWLbsBXz44YcUHx9P27dvx7hx43D8+HEIITqKTQTEO5ikhTWDjz32GCul+LnnnuOCggJ+t6SEA80gEXF0VBQD4EmTJvG3355npRTXHTvGAwem27syK06QmTlctre387lzZ7lPn2Q7HmiZKyGMXWFCfLzc9NvfWmaQV61aZWeVtc5lkx1z9QuI/MWpA9h9x0RumyPnXaWUUpc9Hui6jl27dmHChPH4/PPPMTwrCxUVlcjMHA4A6BITBQCUc++9FB0djcOHj+Dcub9D0wRsP5sISgH90/pj9+49mP7ww/jX//4LxcXFavHixQCUEkJAGv4/RbjStioKUAteESg21GEP4PXbdDCroFDzmhq7oaEBeXl5qqamRvXv3x+FhQ8ZcDbhOnHiRADA7t27fGwmQ2tH6YaumTVrFsbcPQZnzpxB/qR8rF+/nqJ0HUqBmJmgFKnQRCvVsXaow5ZAD2cwlfL3sQWFHld6jfhBS0sL8vPzUVhYiJ07d4KI0N7uQVpaGu4acxfa29txYP8BW1sb4xjbWwAo31AOVozS0vfx1VdfQ9d1eLzeSJVbh/1BMIOghwtcWISbK6/cTIvfAGTsHIkIra2tWL9+vb2t9kqJnHtzVEJCAvbv34/mL78ECYLyKTKyxmlubsby5cvJVIiWM0UhaCbb7geYxYApk5kZhlIQVp1d4MbBARlSlisshEB0TIy5NXUfwPKTTJMJXdchBEGYHtvQYcNM+O82vD+huTGfhCDSdR2CCJLZJi2ox2qaaWVsW8PqBz8EhIgdKD1KN6MzhK5dY0FEhmkTUbYZ6oAg4wYppZQZLoPXY0D71++8g7+fO4u169aFDF4wKzB7ncvsClTf9luquPh4Sr3hBpw6dcrecrOltHw7WMszNV5RIdAPgLweDwCgra0dtbVHMXbsWMyZOwcej8fc0mqhXE47YMGmR9n8ZTNWvv46Lly4ENZbCyXmBro0UzEzpk6dioP7DyBnfA66dOliKW3lmBspFw6KcM6T1VlRURFSU1ORn5+P/Lx8HDp0ENnZ2fBKCVZKWRuZEEAlACSISNd18glsZ503QNc0ZaBLqqysLOzYsQPTpk3H4zMfx+mm0zh27JiqqalRWVlZAcqhw1jkzAzJwPwcEXFmZqZsbGy09+QlJSUyuU+yfOCBB/hPR//E68rKOLl3bwmAhZk1pqsrZwtWk2TFCiQAmZjYU7733nuy9mitLCwslDfddJNct26doyCjQd5zzz1SEAWm0GVgauyEIzPEbnH62NhYuWTJEuksepg7dy4nJibyU089xSdPnpTPPPOMjCBvHy4zJN0Km4jIL8f45Pwn5ZEjR+SSJUtknz595MKFC2VbW5tUSnFLSws/8cQTNqMC8gJWjZDFgFMg4DMidwZYXLcGTk29gX/zm1/bXG5sbOTc3Fzun5bG69ev55qaGr4v9z4/d9olLRWYJQ6VKLFS3hKAzM3NlQcOHJDr1pXJAQMGyAcefEB+fuqUVErJtrY2uWrV6zI5Odkew5miczDWRgABTQDwWTAE2GWmRoZYOgufnHU8mz7cxGn90zg7O5v3799vFEINTPerKQhSrBSUeGeuPz09nTdv/oirKqvk2LFj5eBbB8udO3faYrl9+3Z5++23S19iVpMECpeLtEWg3skACgFPYUDRfjZjxgxuampiK3e4eMkSTkpK4nnz5vHJkyd55cqV3LVrV7fy2KDi4Mzvx3aN5ddee40bGhq4uLiY+/TpK1/55SvSKedTpkxxEB6+wNLJAALOgIBG0z56Iy2IdiQouXv3brx82TL+/vtWVkrx3/72Ny4sLOR+/frx22vWcF1dHU/96U8DKkzItezGmf0tKiri2tpaXrVqFffr149nzJjB586dM2sJL/Az//EMx8XFySusJfQxwFki09mKcCcaBg++hTdv3uxXxzN48GAeNmwY7927l3ft3sWZmZmubZ3fs7Ky+JO9n/DOP/6RhwwZwiNGjORP931q97tx40YeOHCgjaROlMUEFYEGNx1AkVZeEvmFqAsKCvhY7TFHpdh/ckpKChcVFfFnn9XzmjVruFu3bj64m2hISkrikpISrqk5zD+ZPJnTBw7ktWvX2v0cOnSIJ0yYwL7stdZBw3eiaFuSgwHHTTg40+Nu9fuRlsBzl5gYXrhwIZ8/f94qWODHHn+ck5KS+OUVK/jEZyd41uzZdtunfv4U19fX87PPPsu9e/XmBQsW2DVALS0tPH/+fI4yAy6mib2ikpsAU6jIOFOEg84CCbr6QxD297S0NC4r8zknNTU1PPrO0XzLLRm8fft2rqqq4srKKi4vL+dBgwZxbm4u19c32EmVNWvWcHJysmvfnagMdat9NM0g/QkAtgQygK7xuYB7srO5urraZkRZWRmnpqbylH+fwnl5eXzbrbfxxx9/bD/fvmMH3zHqDr/KE0txUudrmDvMjUCWH/AHEPCSKQ+Xr/WJDSEEC7OkVQgh582bx19//bVR/traynPnzuXXXnvNadZ4ypQpYS3GNTjHYNUKvwAA9/6IZ4OcBZISAKf07ctvvrmavV6vXXF24cIFXrJkCcfFx/kQdI1K5MNUi94NANGmJWCQr17YTRTcmEOdqAfSHN7kyJEjee/evbxhwwbZ4ZAEhVZwFNn4ztI8R4IWl802tc54yGRTDNpNRvxoR+NEgFsdYt9wxYeyAqpdA++3m7T+xC85AGCDqRjaIjWDFH4yQQ82aprhTVrmMwKiOnVyLcjVbtK40Um7dYAwFsBe8lkET8CAHXdrnRSBKy2ZDXNUJ5K2Hofi22nSKgCQMzXuAbAVQAqA4Y6UmUTw+Hqws7p8lWeBEckz8sX+2eU96551MFQQ8CsAxabFg1so0/oUADjgiJz8vx58vsb9X4JxHnq8G60UJIhpBervAjAWQIZ53jY6MI5I/pVizraBVWnOLKZbGs4ZtxOO9s7QvRW6C4wVOledzIVrgeHqHjSjXpbM+439fx/jcjxbW9s+AAAAAElFTkSuQmCC">
+<script>try{var t=localStorage.getItem('forge.theme');document.documentElement.setAttribute('data-theme',t==='light'||t==='auto'?t:'dark');}catch(_){document.documentElement.setAttribute('data-theme','dark');}</script>
 <style>
-:root{--ink:#1b1d24;--ink2:#565b68;--ink3:#8a8e9a;--ground:#f4f3ef;--surface:#fff;--line:#e6e4dd;--line2:#efede8;
---side:#15171e;--sideink:#c6c9d3;--sidemut:#787d8b;--sideline:#262a35;--accent:#d4551a;--accsoft:#d4551a14;
---done:#178744;--readyc:#0c8a70;--progc:#4553c4;--blockc:#bb2d2d;--awaitc:#b3660a;--todoc:#8a8e9a;
---mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
---shadow:0 1px 2px rgba(27,29,36,.05),0 10px 30px -18px rgba(27,29,36,.18);--r:12px}
-*{box-sizing:border-box;margin:0;padding:0}
-html{scroll-behavior:smooth}
-body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,Helvetica,Arial,sans-serif;background:var(--ground);color:var(--ink);line-height:1.55;font-size:14px;-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}
-h1,h2,h3,h4{letter-spacing:-.015em}
-h1{font-size:24px;font-weight:700} h2{font-size:17px;font-weight:700} h3{font-size:14px;font-weight:700;margin:0}
-.mut{color:var(--ink3);font-size:12.5px;font-weight:400}
-.num{font-variant-numeric:tabular-nums}
-code{font-family:var(--mono);font-size:.88em;background:var(--line2);border-radius:5px;padding:1px 5px}
-a{color:var(--accent);text-decoration:none} a:hover{text-decoration:underline}
-/* ---- shell ---- */
-.shell{display:flex;min-height:100vh}
-aside{width:228px;flex:none;background:var(--side);color:var(--sideink);display:flex;flex-direction:column;position:sticky;top:0;height:100vh;padding:22px 0 16px}
-.brand{padding:0 20px 18px;border-bottom:1px solid var(--sideline)}
-.brand img{height:29px;display:block;margin-bottom:12px}
-.proj{font-size:12.5px;color:var(--sidemut)} .proj b{display:block;color:var(--sideink);font-size:13.5px;font-weight:600}
-.phase{display:inline-block;margin-top:7px;font-size:9.5px;font-weight:700;letter-spacing:.09em;text-transform:uppercase;color:#e9b98a;border:1px solid #6b4a2b;background:#d4551a1f;border-radius:99px;padding:2px 9px}
-#snav{padding:14px 10px;display:flex;flex-direction:column;gap:2px;flex:1;overflow-y:auto}
-#snav a{display:flex;justify-content:space-between;align-items:center;color:var(--sidemut);font-size:13px;font-weight:500;padding:8px 12px;border-radius:8px}
-#snav a:hover{color:var(--sideink);background:#ffffff0a;text-decoration:none}
-#snav a.on{color:#fff;background:#ffffff12}
-#snav a .k{font-size:11px;color:var(--sidemut);font-variant-numeric:tabular-nums}
-.sidefoot{padding:14px 20px 0;border-top:1px solid var(--sideline);font-size:10.5px;color:var(--sidemut);line-height:1.5}
-.sidefoot b{color:var(--sideink)}
-main{flex:1;min-width:0;padding:26px clamp(16px,3.5vw,44px) 80px}
-.wrap{max-width:1140px;margin:0 auto}
-/* ---- overview ---- */
-.tophead{display:flex;flex-wrap:wrap;align-items:flex-end;justify-content:space-between;gap:12px;margin-bottom:14px}
-.stamp{font-size:11px;color:var(--ink3);text-align:right;line-height:1.5}
-.stamp code{background:#fff}
-.needsyou{border:1px solid var(--line);border-left:4px solid var(--awaitc);border-radius:var(--r);display:flex;gap:16px;align-items:flex-start;padding:16px 20px;background:linear-gradient(0deg,#b3660a08,#b3660a08),var(--surface);margin-bottom:14px;box-shadow:var(--shadow)}
-.needsyou .glyph{width:38px;height:38px;flex:none;border-radius:10px;background:#b3660a1a;display:grid;place-items:center;font-size:18px}
-.needsyou h3{font-size:15px} .needsyou p{font-size:13px;color:var(--ink2);margin-top:3px;max-width:78ch}
-.kpis{display:grid;grid-template-columns:minmax(0,1.35fr) repeat(4,minmax(0,1fr));gap:12px}
-@media (max-width:1240px) and (min-width:941px){.kpis{grid-template-columns:repeat(4,minmax(0,1fr))} .kpi.hero{grid-column:1/-1}}
-.kpi{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:16px 18px;display:flex;flex-direction:column;gap:1px;justify-content:center;box-shadow:var(--shadow)}
-.kpi.hero{flex-direction:row;align-items:center;justify-content:flex-start;gap:16px}
-.kpi .v{font-weight:700;font-size:26px;letter-spacing:-.025em;font-variant-numeric:tabular-nums;line-height:1.15}
-.kpi .v small{font-size:14px;color:var(--ink3);font-weight:500;letter-spacing:0}
-.kpi .l{font-size:10.5px;color:var(--ink3);font-weight:600;letter-spacing:.05em;margin-top:2px}
-.kpi .d{font-size:11.5px;color:var(--ink2)}
-.pacestrip{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);margin-top:12px;padding:14px 20px;display:flex;flex-wrap:wrap;gap:8px 34px;align-items:center;box-shadow:var(--shadow)}
-.pk{font-size:10px;font-weight:700;letter-spacing:.08em;color:var(--ink3)}
-.pv{font-weight:700;font-size:17px;letter-spacing:-.02em;font-variant-numeric:tabular-nums}
-.pv small{font-size:12px;color:var(--ink3);font-weight:500;letter-spacing:0}
-.pdiv{width:1px;height:34px;background:var(--line)}
-.pnote{font-size:11px;color:var(--ink3);max-width:280px;line-height:1.45;margin-left:auto}
-/* ---- sections ---- */
-details.sec{margin:32px 0 0;scroll-margin-top:16px}
-details.sec>summary{cursor:pointer;user-select:none;list-style:none;display:flex;align-items:baseline;gap:9px;padding:0 0 12px;font-size:17px;font-weight:700;letter-spacing:-.015em}
-details.sec>summary::-webkit-details-marker{display:none}
-details.sec>summary::before{content:"";flex:none;width:0;height:0;border:5px solid transparent;border-left-color:var(--ink3);transform:translateY(-1px);transition:transform .15s ease}
-details.sec[open]>summary::before{transform:rotate(90deg) translateY(0)}
-details.sec>summary:hover{color:var(--accent)}
-details.sec>summary:hover::before{border-left-color:var(--accent)}
-details.sec>summary .mut{font-weight:400;font-size:12.5px}
-/* ---- milestone groups ---- */
-details.sec.sub{margin:12px 0 0;background:var(--surface);border:1px solid var(--line);border-radius:var(--r);box-shadow:var(--shadow);overflow:hidden}
-details.sec.sub>summary{padding:13px 18px;font-size:14.5px;align-items:center;flex-wrap:wrap;gap:10px}
-details.sec.sub>summary:hover{background:var(--line2);color:inherit}
-details.sec.sub>summary:hover::before{border-left-color:var(--ink3)}
-details.sec.sub>summary .mut{font-variant-numeric:tabular-nums}
-.mgb{border-top:1px solid var(--line)}
-/* ---- item rows + drawer ---- */
-details.icd{border-bottom:1px solid var(--line2)}
-details.icd:last-child{border-bottom:0}
-summary.irow{display:grid;grid-template-columns:4px 168px minmax(0,1fr) auto;gap:0 14px;align-items:center;padding-right:18px;cursor:pointer;user-select:none;list-style:none;font-size:13px}
-summary.irow::-webkit-details-marker{display:none}
-summary.irow:hover{background:#faf9f5}
-details.icd[open]>summary.irow{background:#faf9f5}
-.stripe{align-self:stretch;min-height:44px}
-.iid{font-family:var(--mono);font-size:11.5px;color:var(--ink2);padding:12px 0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.itt{padding:12px 0;display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-weight:500;min-width:0}
-.itt .sub{font-size:11.5px;color:var(--ink3);font-weight:400;flex-basis:100%}
-.itt .warnv{font-size:11.5px;color:var(--awaitc);font-weight:500;flex-basis:100%}
-.imeta{display:flex;align-items:center;gap:12px;font-size:11.5px;color:var(--ink3);padding:12px 0;justify-content:flex-end;font-variant-numeric:tabular-nums;white-space:nowrap}
-.st{font-size:9.5px;font-weight:700;letter-spacing:.06em;border-radius:6px;padding:3px 7px;white-space:nowrap}
-.st.s-done{color:var(--done);background:#17874414}
-.st.s-prog{color:var(--progc);background:#4553c414}
-.st.s-ready{color:var(--readyc);background:#0c8a7014}
-.st.s-block{color:var(--blockc);background:#bb2d2d12}
-.st.s-todo{color:var(--ink3);background:var(--line2)}
-.st.s-cancel{color:var(--ink3);background:var(--line2);text-decoration:line-through}
-.dot-open{display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--progc);margin-right:2px;vertical-align:1px}
-.icdb{background:#faf9f5;border-top:1px dashed var(--line);padding:16px 22px 18px 36px;font-size:12.5px;color:#464b58}
-.icdb h4{font-size:10.5px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--ink3);margin:0 0 8px}
-.icdb h4+h4,.dgrid h4:not(:first-child){margin-top:16px}
-.dgrid{display:grid;grid-template-columns:1.25fr 1fr;gap:24px}
-.crit{list-style:none;display:flex;flex-direction:column;gap:7px;font-size:12.5px}
-.crit li{display:flex;gap:9px;align-items:baseline}
-.crit .ck{flex:none;width:16px;height:16px;border-radius:5px;display:grid;place-items:center;font-size:10px;font-weight:800;transform:translateY(3px)}
-.ck.ok{background:#17874418;color:var(--done)} .ck.no{background:#bb2d2d14;color:var(--blockc)} .ck.un{background:var(--line2);color:var(--ink3)}
-.kv{display:flex;flex-direction:column;gap:8px;font-size:12.5px}
-.kv .row{display:flex;gap:10px}
-.kv .k{flex:none;width:92px;color:var(--ink3);font-size:11.5px;padding-top:1px}
-.kv .vl{min-width:0;word-break:break-word}
-.dsp{list-style:none;display:flex;flex-direction:column;gap:6px;font-size:12px}
-.dsp li{display:flex;gap:9px;align-items:baseline}
-.dsp .t{color:var(--ink3);font-size:11px;flex:none;width:82px;font-family:var(--mono)}
-.briefbtn{display:inline-flex;align-items:center;gap:7px;margin-top:14px;font:inherit;font-weight:600;font-size:12.5px;color:var(--accent);border:1px solid #d4551a3d;background:var(--accsoft);border-radius:9px;padding:7px 13px;cursor:pointer;text-align:left}
-.briefbtn:hover{text-decoration:none;background:#d4551a22}
-button.cchip{font:inherit;font-size:10.5px;font-weight:600;border:0;cursor:pointer}
-button.cchip:hover{background:var(--accsoft);color:var(--accent)}
-.docopen{cursor:pointer}
-.mcount{font-size:10.5px;color:var(--accent);font-weight:600}
-.segwrap{display:flex;flex-direction:column;gap:2px}
-.seg button .n{font-size:10px;opacity:.75;margin-left:5px;font-variant-numeric:tabular-nums}
-.noresult{color:var(--ink3);font-size:13px;padding:14px 2px}
-/* ---- document reader ---- */
-.docscrim{position:fixed;inset:0;background:#1b1d2455;opacity:0;pointer-events:none;transition:opacity .15s;z-index:40}
-.docscrim.on{opacity:1;pointer-events:auto}
-.docpanel{position:fixed;top:0;right:0;bottom:0;width:min(760px,94vw);background:var(--surface);border-left:1px solid var(--line);
-  box-shadow:-24px 0 60px -30px rgba(27,29,36,.5);transform:translateX(102%);transition:transform .18s ease;z-index:41;display:flex;flex-direction:column}
-.docpanel.on{transform:none}
-.dochead{flex:none;padding:16px 22px;border-bottom:1px solid var(--line);display:flex;align-items:flex-start;gap:12px;flex-wrap:wrap}
-.dochead h3{font-size:15px;letter-spacing:-.015em;color:var(--ink)}
-.dochead .p{font-family:var(--mono);font-size:11px;color:var(--ink3);margin-top:3px;word-break:break-all}
-.docacts{margin-left:auto;display:flex;gap:7px;align-items:center}
-.docbtn{font:inherit;font-size:11.5px;font-weight:600;color:var(--ink2);background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:6px 11px;cursor:pointer;text-decoration:none;white-space:nowrap}
-.docbtn:hover{border-color:var(--ink3);color:var(--ink);text-decoration:none}
-.docbtn.x{padding:6px 10px;font-size:14px;line-height:1}
-.docbody{flex:1;overflow-y:auto;padding:22px 26px 60px;font-size:13.5px;line-height:1.62;color:#33373f}
-.docbody h1{font-size:20px;margin:0 0 12px}
-.docbody h2{font-size:16px;margin:24px 0 8px;padding-bottom:5px;border-bottom:1px solid var(--line2)}
-.docbody h3{font-size:14px;margin:18px 0 6px}
-.docbody h4{font-size:12.5px;margin:14px 0 5px;color:var(--ink2)}
-.docbody p{margin:9px 0}
-.docbody ul,.docbody ol{margin:9px 0 9px 22px}
-.docbody li{margin:4px 0}
-.docbody code{font-size:12px}
-.docbody pre{background:#f4f3ef;border:1px solid var(--line);border-radius:9px;padding:12px 14px;overflow-x:auto;margin:11px 0}
-.docbody pre code{background:none;padding:0;font-size:12px;line-height:1.5}
-.docbody blockquote{border-left:3px solid var(--line);margin:11px 0;padding:2px 0 2px 14px;color:var(--ink2)}
-.docbody hr{border:0;border-top:1px solid var(--line);margin:18px 0}
-.docbody table{margin:11px 0;font-size:12.5px}
-.docbody a{word-break:break-word}
-.docmiss{color:var(--ink3);font-size:13px}
-@media (max-width:940px){.docpanel{width:100vw}}
-.cchip{display:inline-flex;align-items:center;gap:5px;font-size:10.5px;font-weight:600;border-radius:7px;padding:2px 8px;background:var(--line2);color:var(--ink2);white-space:nowrap}
-.cchip i{width:7px;height:7px;border-radius:2px;display:block;flex:none}
-.pill{display:inline-block;font-size:9.5px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;border-radius:99px;padding:3px 9px;white-space:nowrap}
-/* ---- workbar ---- */
-.workbar{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin:0 0 4px}
-.filter{flex:1;min-width:220px;max-width:420px;font:inherit;font-size:13px;padding:9px 14px;border:1px solid var(--line);border-radius:10px;background:var(--surface);outline:none}
-.filter:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accsoft)}
-.seg{display:flex;border:1px solid var(--line);border-radius:10px;overflow:hidden;background:var(--surface)}
-.seg button{font:inherit;font-size:12px;font-weight:600;padding:8px 13px;border:0;border-right:1px solid var(--line);background:none;color:var(--ink3);cursor:pointer}
-.seg button:last-child{border-right:0}
-.seg button:hover{color:var(--ink)}
-.seg button.on{background:var(--ink);color:#fff}
-/* ---- milestone rail ---- */
-.railcard{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);box-shadow:var(--shadow);padding:16px 8px 8px}
-.railwrap{overflow-x:auto;padding:4px 2px 8px}
-.rail{display:flex;min-width:max-content}
-.mnode{position:relative;width:112px;flex:none;display:flex;flex-direction:column;align-items:center;gap:6px;padding-top:4px;color:inherit}
-.mnode:hover{text-decoration:none} .mnode:hover .mn{color:var(--accent)}
-.mnode::before{content:"";position:absolute;top:16px;left:-50%;width:100%;height:2px;background:var(--line)}
-.mnode:first-child::before{display:none}
-.mnode.done::before{background:var(--done)}
-.mdot{width:26px;height:26px;border-radius:50%;display:grid;place-items:center;font-size:11.5px;font-weight:700;z-index:1;background:var(--surface);border:2px solid var(--line);color:var(--ink3)}
-.mnode.done .mdot{background:var(--done);border-color:var(--done);color:#fff}
-.mnode.awaitg .mdot{border-color:var(--awaitc);color:var(--awaitc);box-shadow:0 0 0 4px #b3660a1f}
-.mnode.activeg .mdot{border-color:var(--accent);color:var(--accent);box-shadow:0 0 0 4px var(--accsoft)}
-.mn{font-size:10.5px;font-weight:600;text-align:center;line-height:1.22;max-width:102px;color:var(--ink)}
-.mnode.futureg .mn{color:var(--ink3);font-weight:500}
-.mi{font-size:10px;color:var(--ink3);font-variant-numeric:tabular-nums}
-/* ---- v0.18 version labels ---- */
-.mv{font-size:10.5px;font-weight:700;color:var(--accent);font-variant-numeric:tabular-nums;letter-spacing:.02em}
-.mnode.futureg .mv{color:var(--ink3)}
-.rsep{flex:none;width:74px;display:flex;flex-direction:column;align-items:center;justify-content:flex-start;gap:3px;padding-top:2px;border-left:1px dashed var(--line);margin-left:6px}
-.rsep span{font-size:12px;font-weight:800;color:var(--ink);letter-spacing:.03em}
-.rsep em{font-style:normal;font-size:9.5px;color:var(--ink3);text-align:center;line-height:1.2;max-width:68px}
-.vtag{display:inline-block;font-size:11px;font-weight:700;font-variant-numeric:tabular-nums;color:var(--accent);background:var(--accsoft);border-radius:5px;padding:1px 6px;margin-right:8px;vertical-align:1px}
-.vtag.rel{font-size:12.5px;padding:2px 8px;color:#fff;background:var(--accent)}
-.relh{margin:18px 0 8px;font-size:14px;font-weight:700;color:var(--ink);display:flex;align-items:center;gap:6px}
-.relh .mut{font-weight:500;font-size:12px}
-.vlab{font-weight:700;color:var(--accent);margin-right:6px;font-variant-numeric:tabular-nums}
-.vlab i{font-style:normal;color:var(--ink3);margin-left:1px}
-.cdots{display:flex;gap:3px} .cdots i{width:6px;height:6px;border-radius:50%;display:block}
-/* ---- v0.20.1 configuration & commands ---- */
-.cfgintro p{font-size:13px;color:var(--ink2)}
-.gcard{margin:12px 0 18px} .gcard pre{background:#f4f3ef;border:1px solid var(--line);border-radius:9px;padding:10px 12px;overflow-x:auto} .gcard pre code{background:none;padding:0;font-size:12px}
-.gfix{font-size:13px}
-table.cfgt{table-layout:fixed} table.cfgt th:nth-child(1){width:19%} table.cfgt th:nth-child(2){width:20%} table.cfgt th:nth-child(3){width:10%} table.cfgt th:nth-child(5){width:21%}
-table.cfgt td{overflow-wrap:anywhere} table.cfgt td code{white-space:normal;word-break:break-word} table.cfgt td:nth-child(4){color:var(--ink2)} table.cfgt td div{margin:1px 0}
-code.cmd{white-space:pre-wrap;word-break:break-word}
-.risk{display:inline-block;font-size:11.5px;font-weight:600;padding:1px 7px;border-radius:999px;white-space:nowrap;background:var(--line2);color:var(--ink2)}
-.risk-low{background:#0c8a7014;color:var(--readyc)}
-.risk-testfirst{background:#b3660a14;color:var(--awaitc)}
-.risk-medium{background:#b3660a14;color:var(--awaitc)}
-code.copyable{cursor:copy}
-table.cfgt{table-layout:fixed;width:100%}
-table.cfgt td{overflow-wrap:anywhere}
-code.copyable.copied{outline:1px solid var(--done)}
-table.cmdt td:first-child{width:44%}
-.cmdgroup{margin-top:14px}
-/* ---- v0.19 pages ---- */
-.phase.ap{color:#9be3c4;border-color:#2b6b55;background:#0c8a7026}
-.phase.apstop{color:#f3c98f;border-color:#8a5a14;background:#b3660a26}
-.pbar{height:6px;border-radius:99px;background:var(--line2);overflow:hidden;display:block}
-.pbar i{display:block;height:100%;border-radius:99px;background:var(--done)}
-section.page[hidden]{display:none}
-.phead{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin:2px 0 16px}
-.phead h2{font-size:22px;letter-spacing:-.02em}
-.h3s{margin:4px 0 9px}
-.warnk{color:#e9b98a!important}
-.ovgrid{display:grid;grid-template-columns:minmax(0,1.7fr) minmax(0,1fr);gap:12px;margin-top:12px;align-items:start}
-.ovgrid>*,.panel{min-width:0}
-.ovgrid .panel h4,.archfoot h4{font-size:10.5px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--ink3);margin:4px 0 -4px}
-.nowl{list-style:none;display:flex;flex-direction:column;gap:6px;font-size:12.5px}
-.nowl li{display:flex;gap:8px;align-items:baseline;min-width:0}
-.nowl li>span{flex:1;min-width:0;color:var(--ink2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.nowl a{font-family:var(--mono);font-size:11.5px;white-space:nowrap}
-.nowbar{display:flex;align-items:center;gap:12px} .nowbar .pbar{flex:1}
-.rels{display:flex;flex-direction:column;gap:10px}
-.relrow{display:grid;grid-template-columns:auto minmax(0,1fr);grid-template-areas:"t n" "b b" "m m";gap:4px 8px;color:inherit;align-items:center}
-.relrow:hover{text-decoration:none} .relrow:hover .rn{color:var(--accent)}
-.relrow .vtag{grid-area:t;margin:0} .relrow .rn{grid-area:n;font-weight:600;font-size:13px}
-.relrow .pbar{grid-area:b} .relrow .rm{grid-area:m;font-size:11.5px;color:var(--ink3);font-variant-numeric:tabular-nums}
-.telgrid.one{grid-template-columns:1fr}
-.compfilter[hidden]{display:none}
-.compfilter{display:inline-flex;align-items:center;gap:6px;font-size:12px;background:var(--accsoft);color:var(--accent);border-radius:9px;padding:6px 6px 6px 11px}
-.compfilter button{border:0;background:none;color:inherit;cursor:pointer;font-size:12px;padding:0 5px}
-details.icd.flash>summary,details.sec.sub.flash>summary{animation:flash 1.6s ease}
-@keyframes flash{0%,40%{background:#d4551a22}100%{background:transparent}}
-.empty{background:var(--surface);border:1px dashed var(--line);border-radius:var(--r);padding:22px 24px;max-width:760px}
-.empty h3{margin-bottom:8px} .empty p{font-size:13px;color:var(--ink2);margin-top:6px}
-/* ---- v0.19 architecture ---- */
-.draftnote{font-size:12.5px;color:#7a4a0c;background:#b3660a12;border:1px solid #b3660a33;border-radius:10px;padding:9px 14px;margin-bottom:12px}
-.archwrap{overflow-x:auto;border-radius:var(--r)}
-.archcard{position:relative;background:var(--surface);border:1px solid var(--line);border-radius:var(--r);box-shadow:var(--shadow);padding:18px;display:flex;flex-direction:column;gap:34px;min-width:760px}
-.archsvg{position:absolute;left:0;top:0;pointer-events:none;z-index:2;overflow:visible}
-.lane{display:grid;grid-template-columns:118px minmax(0,1fr);gap:14px;align-items:center;background:#f7f6f2;border:1px solid var(--line2);border-radius:12px;padding:16px 14px}
-.lane.ext{background:#f4f3fb}
-.lanehead b{display:block;font-size:10.5px;letter-spacing:.09em;color:var(--ink2)}
-.lanehead span{display:block;font-size:10.5px;color:var(--ink3);line-height:1.4;margin-top:3px}
-.lanebody{display:grid;gap:18px 22px;align-items:stretch}
-.acard{position:relative;z-index:3;text-align:left;font:inherit;background:var(--surface);border:1px solid var(--line);border-left:4px solid var(--kc);border-radius:10px;padding:10px 13px;display:flex;flex-direction:column;gap:3px;cursor:pointer;box-shadow:0 1px 2px rgba(27,29,36,.06);width:100%;max-width:240px;justify-self:center;min-width:0}
-.acard:hover{border-color:var(--ink3);border-left-color:var(--kc)}
-.acard.sel{box-shadow:0 0 0 3px var(--accsoft);border-color:var(--accent);border-left-color:var(--kc)}
-.acard.draft{border-style:dashed;border-left-style:solid}
-.acard b{font-size:13px;letter-spacing:-.01em;color:var(--ink)}
-.acard .as{font-size:11.5px;color:var(--ink2);line-height:1.35;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;overflow-wrap:anywhere}
-.acard .ap{font-size:11px;color:var(--ink3);font-variant-numeric:tabular-nums}
-.acard .ap em{font-style:normal;color:var(--progc);font-weight:600} .acard .ap i{font-style:normal;color:var(--awaitc)}
-.aedge path{stroke:#6b7080;stroke-width:1.4}
-.aedge.planned path{stroke-dasharray:5 4}
-.aedge.draft path{stroke:#a5a9b5}
-.aedge.hl path{stroke:var(--accent);stroke-width:2}
-.aedge text{font-size:10.5px;fill:#565b68;font-family:inherit}
-.aedge.hl text{fill:var(--accent);font-weight:600}
-.aedge .lbg{fill:#fff;opacity:.92}
-.archfoot{display:grid;grid-template-columns:1fr 1.25fr 1fr;gap:12px;margin-top:12px;align-items:start}
-.archfoot p{font-size:12.5px;color:var(--ink2)}
-.alegend{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:12px;color:var(--ink2)}
-.alegend i,.alink i,.sgroup h3 i{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:6px;vertical-align:-1px}
-.alink{font:inherit;font-weight:600;border:0;background:none;cursor:pointer;color:var(--ink);padding:0;text-align:left}
-.alink:hover{color:var(--accent)}
-.selbtn{display:inline-block;margin-top:12px}
-/* ---- v0.19 screens ---- */
-.sgroup{margin-top:20px}
-.sgroup h3{display:flex;align-items:center;gap:8px;margin-bottom:10px;font-size:15px}
-.sgroup h3 a{font-weight:400;font-size:12px}
-.sgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(196px,1fr));gap:12px}
-.scard{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);box-shadow:var(--shadow);overflow:hidden;display:flex;flex-direction:column}
-.sthumb{display:block;height:150px;background:#f1efe9;border-bottom:1px solid var(--line2);overflow:hidden}
-.sthumb img{width:100%;height:100%;object-fit:cover;object-position:top;display:block}
-.sthumb.none{display:grid;place-items:center;font-size:11px;color:var(--ink3);background:repeating-linear-gradient(45deg,#f1efe9 0 8px,#eceae3 8px 16px)}
-.sb{padding:10px 12px 12px;display:flex;flex-direction:column;gap:2px;min-width:0}
-.sb b{font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.sb .mut{font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.sp{font-size:11.5px;margin-top:3px}
-/* ---- telemetry ---- */
-.telgrid{display:grid;grid-template-columns:1.15fr 1fr;gap:12px;align-items:start}
-.panel{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);box-shadow:var(--shadow);padding:18px 20px;display:flex;flex-direction:column;gap:13px}
-.panel h3 .mut{font-weight:400;font-size:11.5px}
-.hbar{display:grid;grid-template-columns:118px 1fr 78px;gap:10px;align-items:center}
-.hbar .lab{font-family:var(--mono);font-size:11px;color:var(--ink2);text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.hbar .tr{height:16px;border-radius:5px;background:var(--line2);position:relative;overflow:hidden}
-.hbar .tr i{position:absolute;top:0;bottom:0;border-radius:5px}
-.hbar .vv{font-size:11.5px;color:var(--ink2);text-align:right;font-variant-numeric:tabular-nums}
-.legend{display:flex;gap:16px;font-size:11.5px;color:var(--ink2);flex-wrap:wrap}
-.legend i{width:10px;height:10px;border-radius:3px;display:inline-block;margin-right:5px;vertical-align:-1px}
-.tokrow{display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:10px;font-size:12.5px;padding:7px 0;border-bottom:1px solid var(--line2);align-items:baseline}
-.tokrow:last-child{border-bottom:0}
-.tokrow b{font-variant-numeric:tabular-nums} .tokrow .n{color:var(--ink3);font-size:11px}
-.tokrow .m{color:var(--ink2);overflow:hidden;text-overflow:ellipsis}
-.tokrow .m i{display:inline-block;width:9px;height:9px;border-radius:3px;margin-right:6px}
-.donutwrap{display:flex;gap:18px;align-items:center;flex-wrap:wrap}
-.usfilter{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:0 0 12px;font-size:12px}
-.usfilter label{color:var(--ink3);text-transform:uppercase;letter-spacing:.06em;font-size:10px;font-weight:700}
-.usfilter select{font:inherit;font-size:12px;padding:5px 8px;border:1px solid var(--line);border-radius:6px;background:var(--surface);color:var(--ink)}
-tr[data-ms].sel td{background:rgba(69,83,196,.08)}
-.footnote{font-size:11px;color:var(--ink3);line-height:1.5}
-/* ---- journal ---- */
-.jgrid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
-.jcol{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);box-shadow:var(--shadow);padding:18px 20px}
-.jcol h3{margin-bottom:13px}
-.jitem{position:relative;padding:0 0 15px 20px;border-left:2px solid var(--line);margin-left:5px}
-.jitem:last-child{padding-bottom:2px;border-left-color:transparent}
-.jitem::before{content:"";position:absolute;left:-6px;top:4px;width:10px;height:10px;border-radius:50%;background:var(--surface);border:2.5px solid var(--ink3)}
-.jitem.human::before{border-color:var(--accent)}
-.jitem b{font-size:13px;display:block;font-weight:600;letter-spacing:-.01em}
-.jitem p{font-size:12.5px;color:var(--ink2);margin-top:3px}
-.jitem .ts{font-size:10.5px;color:var(--ink3);font-variant-numeric:tabular-nums}
-.tag{font-size:9px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;border-radius:5px;padding:2px 6px;margin-left:7px;vertical-align:1px}
-.tag.h{color:var(--accent);background:var(--accsoft)} .tag.f{color:var(--ink3);background:var(--line2)}
-/* ---- system ---- */
-.syscard{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);box-shadow:var(--shadow);overflow:hidden}
-.sysrow{display:flex;align-items:baseline;gap:12px;padding:10px 18px;border-bottom:1px solid var(--line2);font-size:13px}
-.sysrow:last-child{border-bottom:0}
-.sysrow .bdg{font-size:9.5px;font-weight:700;letter-spacing:.06em;width:46px;flex:none}
-.sysrow .n{width:168px;flex:none;font-weight:500}
-.sysrow .d{color:var(--ink3);font-size:12.5px;min-width:0;overflow-wrap:anywhere}
-.ok{color:var(--done)} .warn{color:var(--awaitc)} .bad{color:var(--blockc)}
-/* ---- shared ---- */
-.tblwrap{overflow-x:auto;background:var(--surface);border:1px solid var(--line);border-radius:var(--r);box-shadow:var(--shadow)}
-table{width:100%;border-collapse:collapse;font-size:12.5px}
-th{font-size:10px;text-transform:uppercase;letter-spacing:.07em;color:var(--ink3);text-align:left;padding:9px 14px;border-bottom:1px solid var(--line);font-weight:600}
-td{padding:9px 14px;border-bottom:1px solid var(--line2);vertical-align:top} tr:last-child td{border-bottom:none}
-tbody tr:hover{background:#faf9f5}
-.design{margin-bottom:14px} .design>h4{margin-bottom:8px}
-.dpair{display:grid;grid-template-columns:1fr 1fr;gap:12px;max-width:640px}
-.dpair a{display:block} .dpair img{width:100%;max-height:170px;object-fit:cover;object-position:top;border-radius:8px;border:1px solid var(--line);background:#fff;display:block}
-.dpair span{display:block;font-size:10.5px;color:var(--ink3);margin-top:4px}
-.dmiss{border:1px dashed var(--line);border-radius:8px;display:grid;place-items:center;min-height:80px;font-size:11px;color:var(--ink3);padding:10px;text-align:center;background:repeating-linear-gradient(45deg,#f1efe9 0 8px,#eceae3 8px 16px)}
-@media (max-width:940px){
-  .shell{flex-direction:column}
-  aside{position:static;width:100%;height:auto;flex-direction:row;align-items:center;flex-wrap:wrap;gap:10px;padding:12px 16px}
-  .brand{border:0;padding:0} .brand img{margin:0 10px 0 0;display:inline-block;vertical-align:middle}
-  #snav{flex-direction:row;flex-wrap:wrap;padding:0;overflow:visible} #snav a .k{display:none}
-  .sidefoot{display:none}
-  .kpis{grid-template-columns:1fr 1fr} .kpi.hero{grid-column:1/-1}
-  .telgrid,.jgrid,.dgrid,.dpair,.ovgrid,.archfoot{grid-template-columns:minmax(0,1fr)}
-  .lane{grid-template-columns:1fr}
-  summary.irow{grid-template-columns:4px minmax(0,1fr) auto} .iid{display:none}
-  .icdb{padding-left:22px}
-  .pnote{margin-left:0}
-}
-@media (max-width:640px){
-  #snav{flex:1 1 100%;flex-wrap:nowrap;overflow-x:auto;width:100%;scrollbar-width:none;-webkit-overflow-scrolling:touch} #snav::-webkit-scrollbar{display:none}
-  #snav a{flex:none}
-  .pdiv{display:none}
-}
-@media (prefers-reduced-motion:reduce){html{scroll-behavior:auto}*{transition:none!important}}
-${CP.css}
-</style></head><body>
-<div class="shell">
-<aside>
-  <div class="brand">
-    <img src="data:image/png;base64,${LOGO_B64}" alt="FORGE">
-    <div class="proj"><b>${esc(cfg.project)}</b>${esc(cfg.phase)} phase · v${VERSION}</div>
-    ${actM ? `<span class="phase">${esc(actM)} active</span>` : ''}${autopilotCfg(cfg).on ? (apStop ? ` <span class="phase apstop" title="${esc(apStop.reason)}">autopilot stopped</span>` : ` <span class="phase ap" title="forge autopilot status">autopilot on${autopilotMode(cfg) === 'runner' ? ' · runner' : ''}${liveW.length ? ` · ${liveW.length} worker${liveW.length > 1 ? 's' : ''} running` : ''}</span>`) : ''}
+${dashFonts()}
+${dashCss()}
+</style></head><body data-stamp="@@STAMP@@">
+<div class="bg" aria-hidden="true"></div>
+<a class="skip" href="#main">Skip to content</a>
+<div class="shell" id="app">
+<aside class="side" aria-label="Where the project stands"><div class="sidein" id="side">
+  <div class="railtop"><a class="brand" href="#/overview" title="${esc(cfg.project)} — ${esc(cfg.phase)} phase · Forge v${VERSION}"><img src="data:image/png;base64,${LOGO_B64}" alt="FORGE"></a><span class="ver" title="Forge version">v${VERSION}</span></div>
+  <div><div class="proj">${esc(cfg.project)}</div>${railHead}</div>
+  ${CP.count ? `<a class="railneed" href="#/overview"><span class="mk"></span><span><b>${CP.count} thing${CP.count > 1 ? 's wait' : ' waits'} on you</b><span>Open Home to answer</span></span></a>` : ''}
+  <div class="phases"><span class="phase ph" data-k="Phase">${esc(cfg.phase)}</span>${autopilotCfg(cfg).on ? (apStop ? `<span class="phase apstop" data-k="Autopilot" title="${esc(apStop.reason)}">Stopped</span>` : `<span class="phase ap" data-k="Autopilot" title="${autopilotMode(cfg) === 'runner' ? 'runner mode · ' : ''}${liveW.length} worker${liveW.length === 1 ? '' : 's'} running · forge autopilot status">On</span>`) : '<span class="phase" data-k="Autopilot">Off</span>'}</div>
+  ${CP.gate ? `<div class="railsec"><h2>Before it ships</h2>${CP.gate}</div>` : ''}
+  ${total ? `<div class="railsec"><h2>Whole project</h2><span class="pbar"><i style="width:${pct}%"></i></span><div class="mut">${railAll}</div></div>` : ''}
+  <div class="railfoot">
+    <label class="livebox"><input type="checkbox" id="forgeLive" checked><i></i><span id="livetxt">Live</span></label>
+    <button type="button" class="iconbtn" id="themebtn" aria-label="Switch between dark and light" title="Dark or light (Shift-click: follow the system)"></button>
   </div>
-  <nav id="snav">
-    <a href="#/overview" data-p="overview">Overview</a>
-    ${CP.nav}
-    <a href="#/plan" data-p="plan">Plan <span class="k">${counts.DONE}/${total}</span></a>
-    <a href="#/architecture" data-p="architecture">Architecture <span class="k">${archCount ? (archDraft ? `${archCount} · ${archDraft} draft` : archCount) : '—'}</span></a>
-    <a href="#/screens" data-p="screens">Screens &amp; mockups <span class="k">${screenCount || '—'}</span></a>
-    <a href="#/usage" data-p="usage">Usage</a>
-    <a href="#/journal" data-p="journal">Journal <span class="k">${decisions.length + discoveries.length}</span></a>
-    <a href="#/specs" data-p="specs">Specs <span class="k">${specCount || ''}</span></a>
-    <a href="#/configuration" data-p="configuration">Configuration${gpD.length ? ' <span class="k warnk">graphify</span>' : ''}</a>
-    <a href="#/commands" data-p="commands">Commands</a>
-    <a href="#/system" data-p="system">System${standardsAll && standardsMet < standardsAll ? ` <span class="k warnk">upgrade ${standardsMet}/${standardsAll}</span>` : ''}</a>
-  </nav>
-  <div class="sidefoot">${CP.js ? '<label class="livebox"><input type="checkbox" id="forgeLive"> live — reload every 10 s</label>' : ''}<b>Generated projection.</b><br>State wins — never edit this file.<br>regenerated <span data-since="${new Date().toISOString()}" data-post=" ago">just now</span> · ${new Date().toISOString().slice(0, 16).replace('T', ' ')} UTC</div>
-</aside>
-<main><div class="wrap">
+</div><div class="cues" data-for="side"><button type="button" data-cue="up" aria-label="Scroll the status rail up" hidden></button><button type="button" data-cue="down" aria-label="Scroll the status rail down" hidden></button></div></aside>
+<div class="stage">
+<nav class="tabs" data-g="product" aria-label="Product" hidden>
+  <a href="#/specs" data-p="specs">Specs <span class="k">${specCount || ''}</span></a>
+  <a href="#/screens" data-p="screens">Screens &amp; mockups <span class="k">${screenCount || ''}</span></a>
+  <a href="#/architecture" data-p="architecture">Architecture <span class="k">${archCount ? (archDraft ? `${archCount} · ${archDraft} draft` : archCount) : ''}</span></a>
+  <a href="#/journal" data-p="journal">Journal <span class="k">${decisions.length + discoveries.length || ''}</span></a>
+</nav>
+<nav class="tabs" data-g="setup" aria-label="Setup" hidden>
+  <a href="#/configuration" data-p="configuration">Configuration${gpD.length ? ' <span class="k warnk">graphify</span>' : ''}</a>
+  <a href="#/commands" data-p="commands">Commands</a>
+  <a href="#/system" data-p="system">Health${standardsAll && standardsMet < standardsAll ? ` <span class="k warnk">upgrade ${standardsMet}/${standardsAll}</span>` : ''}</a>
+</nav>
+<main class="wrap" id="main" tabindex="-1">
 
 <section class="page" data-page="overview" id="overview">
-  <div class="tophead">
-    <h1>${esc(cfg.project)} — where things stand</h1>
-    <div class="stamp">auto-updates on every change · refresh: <code>forge dashboard</code><br>Verify: ${Object.keys(cfg.verify || {}).length ? Object.keys(cfg.verify).map(esc).join(', ') : 'not set'} · Graphify: ${esc((cfg.options || {}).graphify || 'unset')}</div>
+  <h1 class="sr">${esc(cfg.project)} — where things stand</h1>
+  <div class="hero">
+    ${bannerBlock || `<div class="needsyou"><div><h3>${total ? 'Nothing is moving right now' : 'No work is planned yet'}</h3><p>${total ? 'Say “continue” in your Claude session to pick up the next task.' : 'Open a Claude session in this project and Forge starts with the spec.'}</p></div></div>`}
   </div>
-  ${bannerBlock}
-  ${kpiBlock}
-  <div class="ovgrid">${nowBlock}${releaseBlock}</div>
-  ${railBlock}
+  ${CP.needs}
+  ${nowBlock}
+  <div class="ovgrid">${CP.recent}${CP.steer}</div>
 </section>
 
-${CP.pages}
-
 <section class="page" data-page="plan" id="plan" hidden>
-  <div class="phead"><h2>Plan</h2><span class="mut">releases → milestones → tasks, in the order they are built · click any task for its full story</span></div>
-  ${outcomesBlock}
-  ${paceBlock}
-  <div class="telgrid one" style="margin-top:12px">${timePanelOut}</div>
-  <div class="workbar" style="margin-top:22px">
-  <input class="filter" id="wgfilter" type="search" placeholder="Filter items… (id, title, component, status)" aria-label="Filter work items">
+  <div class="phead"><h2>Plan</h2><span class="mut">${CP.flowHead ? `${CP.flowHead} · ` : ''}releases → milestones → tasks, in the order they are built</span></div>
+  <div class="workbar">
+  <input class="filter" id="wgfilter" type="search" placeholder="Filter tasks… (id, title, component, status)" aria-label="Filter tasks">
   <div class="seg" id="wgseg" role="group" aria-label="Quick filters"><button class="on" data-f="all">All<span class="n"></span></button><button data-f="needs">Needs me<span class="n"></span></button><button data-f="active">Active<span class="n"></span></button><button data-f="done">Done<span class="n"></span></button></div>
   <span class="compfilter" id="wgcomp" hidden>Showing work for <b></b> <button type="button" aria-label="Clear">✕</button></span>
+  <button type="button" class="ghost" id="wgfold" aria-pressed="false">Milestones only</button>
   </div>
   <p class="noresult" id="wgnone" hidden></p>
   <div id="work">${milestoneBlocks || '<p class="mut">No work items yet.</p>'}</div>
+</section>
+
+<section class="page" data-page="insights" id="insights" hidden>
+  <div class="phead"><h2>Insights</h2><span class="mut">measured from Forge's own records — never estimated</span></div>
+  ${msCard || actTile ? `<div class="duo">${msCard}${actTile}</div>` : ''}
+  <h3 class="h3s" id="in-quality">Quality <span class="mut">— how well briefs land</span></h3>
+  ${outcomesBlock || '<p class="mut">First-pass rate and rework appear once the first tasks close.</p>'}
+  <h3 class="h3s" id="in-forecast">Pace and forecast</h3>
+  ${paceBlock || '<p class="mut">Pace and the forecast appear once a few tasks close.</p>'}
+  ${CP.scope ? `<h3 class="h3s" id="in-scope">Scope <span class="mut">— planned against added while building · ${CP.scopeHead}</span></h3>${CP.scope}` : ''}
+  <h3 class="h3s" id="in-time">Time and tokens</h3>
+  <div class="telgrid one">${timePanelOut}</div>
+  <div class="insec" id="in-tokens">${usagePanelOut}</div>
+</section>
+
+<section class="page" data-page="specs" id="specs" hidden>
+  <div class="phead"><h2>Specs</h2><span class="mut">what the application must do — the intent the plan is cut from</span></div>
+  ${specRows ? `<div class="tblwrap"><table><thead><tr><th>File <span class="mut">(${esc(cfg.specDir)}/)</span></th><th>Size</th><th>Modified</th></tr></thead><tbody>${specRows}</tbody></table></div>` : `<div class="empty"><h3>No spec files yet</h3><p>${cfg.specDir ? `${esc(cfg.specDir)}/ was not found. ` : ''}The spec is written with you in the first Claude session; its files appear here to read in place.</p></div>`}
+</section>
+
+<section class="page" data-page="screens" id="screens" hidden>
+  <div class="phead"><h2>Screens &amp; mockups</h2><span class="mut">the screens of each app and their approved mocks</span></div>
+  ${screensBlock}
 </section>
 
 <section class="page" data-page="architecture" id="architecture" hidden>
@@ -3979,28 +4892,12 @@ ${CP.pages}
   ${archBlock}
 </section>
 
-<section class="page" data-page="screens" id="screens" hidden>
-  <div class="phead"><h2>Screens &amp; mockups</h2><span class="mut">the screens of each app and their approved mocks — tasks tagged with a screen show intended vs built</span></div>
-  ${screensBlock}
-</section>
-
-<section class="page" data-page="usage" id="usage" hidden>
-  <div class="phead"><h2>Usage</h2><span class="mut">tokens and model calls, observed from session logs — never estimated</span></div>
-  ${usagePanelOut}
-</section>
-
 <section class="page" data-page="journal" id="journal" hidden>
   <div class="phead"><h2>Journal</h2><span class="mut">decisions bind the product · discoveries change the plan — latest first</span></div>
   <div class="jgrid">
   <div class="jcol"><h3>Decisions</h3>${logBlock(decisions, 'None recorded yet.')}</div>
   <div class="jcol"><h3>Discoveries</h3>${logBlock(discoveries, 'None recorded yet.')}</div>
   </div>
-</section>
-
-<section class="page" data-page="specs" id="specs" hidden>
-  <div class="phead"><h2>Specs</h2><span class="mut">what the application must do — the source of intent the plan is cut from. How Forge and the development setup are configured is under <a href="#/configuration">Configuration</a>.</span></div>
-  ${specRows ? `<h3 class="h3s">Specification <span class="mut">(${esc(cfg.specDir)}/)</span></h3>
-  <div class="tblwrap"><table><thead><tr><th>File</th><th>Size</th><th>Modified</th></tr></thead><tbody>${specRows}</tbody></table></div>` : `<p class="mut">No spec folder configured${cfg.specDir ? ` (${esc(cfg.specDir)}/ not found)` : ''}.</p>`}
 </section>
 
 <section class="page" data-page="configuration" id="configuration" hidden>
@@ -4014,7 +4911,7 @@ ${CP.pages}
 </section>
 
 <section class="page" data-page="system" id="system" hidden>
-  <div class="phead"><h2>System</h2><span class="mut">plan standards · preflight · baseline · change scripts — the plumbing</span></div>
+  <div class="phead"><h2>Health</h2><span class="mut">what needs attention comes first</span></div>
   ${standardsBlock ? `<h3 class="h3s">Plan standards <span class="mut">— ${standardsMet}/${standardsAll} met for Forge v${VERSION}${standardsMet < standardsAll ? ' · <code>forge upgrade</code> shows how to close the rest' : ''}</span></h3><div class="syscard">${standardsBlock}</div>` : ''}
   <div class="jgrid" style="margin-top:18px">
   <div><h3 class="h3s">Preflight ${pf ? `<span class="mut">${esc(pf.ts.slice(0, 16).replace('T', ' '))} · <span data-since="${esc(pf.ts)}" data-post=" ago"></span> — rerun with <code>forge preflight</code></span>` : ''}</h3>
@@ -4024,11 +4921,36 @@ ${CP.pages}
   </div>
   ${changeRows ? `<h3 class="h3s" style="margin-top:18px">Plan change scripts <span class="mut">(forge/changes/ — re-cuts and Forge upgrades, newest first)</span></h3>
   <div class="tblwrap"><table><thead><tr><th>File</th><th>Size</th><th>Modified</th></tr></thead><tbody>${changeRows}</tbody></table></div>` : ''}
-  <p class="mut" style="margin-top:18px">Settings and what they do: <a href="#/configuration">Configuration</a> · commands: <a href="#/commands">Commands</a></p>
 </section>
 
-</div></main>
+</main>
+<footer class="foot"><b>Generated projection.</b> State wins — never edit this file. · ${esc(cfg.phase)} phase · Forge v${VERSION} · regenerated <span data-since="${new Date().toISOString()}" data-post=" ago">just now</span> · ${new Date().toISOString().slice(0, 16).replace('T', ' ')} UTC</footer>
+<div class="dockwrap"><div class="cues" data-for="page"><button type="button" data-cue="up" aria-label="Scroll the page up" hidden></button><button type="button" data-cue="down" aria-label="Scroll the page down" hidden></button></div>
+<nav id="snav" aria-label="Pages">
+  <a href="#/overview" data-p="overview" data-g="home">Home${CP.count ? ` <span class="k warnk" title="${CP.count} thing(s) need you">${CP.count}</span>` : ''}</a>
+  <a href="#/plan" data-p="plan" data-g="plan">Plan <span class="k">${counts.DONE}/${total}</span></a>
+  <a href="#/insights" data-p="insights" data-g="insights">Insights</a>
+  <a href="#/specs" data-g="product">Product</a>
+  <a href="#/configuration" data-g="setup">Setup${gpD.length || (standardsAll && standardsMet < standardsAll) ? ' <span class="k warnk" title="something in Setup wants a look">!</span>' : ''}</a>
+  <button type="button" class="searchbtn" id="searchbtn" aria-haspopup="dialog"><span>Search</span><kbd>⌘K</kbd></button>
+</nav>
 </div>
+</div>
+<script type="application/json" id="docdata">${JSON.stringify(docs).replace(/</g, '\\u003c')}</script>
+</div>
+<div class="docscrim" id="taskscrim"></div>
+<aside class="docpanel" id="taskpanel" role="complementary" aria-labelledby="tasktitle" aria-hidden="true">
+  <div class="dochead">
+    <div><h3 id="tasktitle">Task</h3><div class="p" id="taskmeta"></div></div>
+    <div class="docacts">
+      <button type="button" class="docbtn" id="taskprev" aria-label="Previous task" title="Previous task (K)">↑</button>
+      <button type="button" class="docbtn" id="tasknext" aria-label="Next task" title="Next task (J)">↓</button>
+      <button type="button" class="docbtn x" id="taskclose" aria-label="Close">✕</button>
+    </div>
+  </div>
+  <div class="docbody task" id="taskbody" tabindex="-1"></div>
+  <div class="cues" data-for="taskbody"><button type="button" data-cue="up" aria-label="Scroll the task up" hidden></button><button type="button" data-cue="down" aria-label="Scroll the task down" hidden></button></div>
+</aside>
 <div class="docscrim" id="docscrim"></div>
 <aside class="docpanel" id="docpanel" role="dialog" aria-modal="true" aria-labelledby="doctitle" aria-hidden="true">
   <div class="dochead">
@@ -4037,387 +4959,28 @@ ${CP.pages}
       <a class="docbtn" id="docopenfile" href="#" target="_blank" rel="noopener">Open file</a>
       <a class="docbtn" id="docdownload" href="#" download>Download</a>
       <a class="docbtn" id="docfolder" href="#" target="_blank" rel="noopener">Open folder</a>
-      <button class="docbtn x" id="docclose" aria-label="Close">✕</button>
+      <button type="button" class="docbtn x" id="docclose" aria-label="Close">✕</button>
     </div>
   </div>
   <div class="docbody" id="docbody" tabindex="-1"></div>
+  <div class="cues" data-for="docbody"><button type="button" data-cue="up" aria-label="Scroll the document up" hidden></button><button type="button" data-cue="down" aria-label="Scroll the document down" hidden></button></div>
 </aside>
-<script type="application/json" id="docdata">${JSON.stringify(docs).replace(/</g, '\\u003c')}</script>
-<script>
-/* v0.15.2: durations are computed in the browser from embedded ISO timestamps,
-   so an open dashboard keeps telling the truth between CLI calls. */
-(function(){
-  function human(ms){
-    if(ms<0)ms=0; var s=ms/1000;
-    if(s<90)return Math.round(s)+'s';
-    var m=s/60; if(m<90)return Math.round(m)+'m';
-    var h=m/60; if(h<36)return (h<10?h.toFixed(1):Math.round(h))+'h';
-    var d=h/24; return (d<10?d.toFixed(1):Math.round(d))+' days';
-  }
-  function tick(){
-    var now=Date.now();
-    document.querySelectorAll('[data-since]').forEach(function(el){
-      var t=Date.parse(el.getAttribute('data-since'));
-      if(!isFinite(t))return;
-      el.textContent=(el.getAttribute('data-pre')||'')+human(now-t)+(el.getAttribute('data-post')||'');
-    });
-  }
-  tick(); setInterval(tick,30000);
-})();
-(function(){
-  var i=document.getElementById('wgfilter'), seg=document.getElementById('wgseg'),
-      none=document.getElementById('wgnone');
-  if(!i) return;
-  var mode='all', comp=null, chip=document.getElementById('wgcomp');
-  var groups=[].slice.call(document.querySelectorAll('details.sec.sub'));
-  /* "Needs me" is the human's queue: an item blocked on your answer, and every
-     item of a milestone whose gate is waiting for your review — the gate IS the
-     thing that needs you. "Active" is work in flight plus what is still open in
-     the milestone currently being built. */
-  function matches(r, gate){
-    var s=r.getAttribute('data-s')||'';
-    if(mode==='all') return true;
-    if(mode==='needs') return (s==='BLOCKED'&&r.getAttribute('data-q')==='1')||gate==='awaiting';
-    if(mode==='active') return s==='IN_PROGRESS'||s==='READY'||
-      (r.getAttribute('data-act')==='1'&&s!=='DONE'&&s!=='CANCELLED');
-    if(mode==='done') return s==='DONE';
-    return true;
-  }
-  var EMPTY={
-    needs:'Nothing needs you right now — no item is blocked on a question for you and no milestone is waiting for your review.',
-    active:'No work is in flight — nothing is in progress and nothing is open in the current milestone.',
-    done:'Nothing is finished yet.',
-    all:'No work items yet.'
-  };
-  function apply(){
-    var q=i.value.toLowerCase(), narrowed=!!q||mode!=='all'||!!comp, total=0;
-    groups.forEach(function(d){
-      var gate=d.getAttribute('data-gate')||'', n=0;
-      d.querySelectorAll('details.icd').forEach(function(r){
-        var hit=matches(r,gate)&&(!q||r.textContent.toLowerCase().indexOf(q)>=0)&&
-          (!comp||r.getAttribute('data-comp')===comp||r.getAttribute('data-arch')===comp);
-        r.style.display=hit?'':'none'; if(hit)n++;
-      });
-      total+=n;
-      var c=d.querySelector('.mcount');
-      if(c) c.textContent=narrowed&&n?('· '+n+' shown'):'';
-      if(narrowed){ if(d.dataset.wasOpen===undefined){ d.dataset.wasOpen=d.open?'1':'0'; } d.open=n>0; d.style.display=n?'':'none'; }
-      else { d.style.display=''; if(d.dataset.wasOpen!==undefined){ d.open=d.dataset.wasOpen==='1'; delete d.dataset.wasOpen; } }
-    });
-    if(none){
-      var show=narrowed&&!total;
-      none.hidden=!show;
-      none.textContent=show?(q?('Nothing matches “'+i.value+'”.'):comp?('No work is tagged to '+comp+'.'):EMPTY[mode]):'';
-    }
-  }
-  /* v0.19: #/plan/c:<id> narrows the plan to one architecture part (its screens' work
-     included) or one screen/tag */
-  window.forgePlan={setComp:function(id){
-    comp=id||null;
-    if(chip){ chip.hidden=!comp; var b=chip.querySelector('b'); if(b) b.textContent=comp||''; }
-    apply();
-  }};
-  if(chip) chip.querySelector('button').addEventListener('click',function(){ location.hash='#/plan'; });
-  /* counts use the same predicate the filter uses, so a button can never promise
-     items the filter would not show */
-  function counts(){
-    if(!seg) return;
-    var saved=mode;
-    [].forEach.call(seg.children,function(b){
-      mode=b.getAttribute('data-f');
-      var n=0;
-      groups.forEach(function(d){
-        var gate=d.getAttribute('data-gate')||'';
-        d.querySelectorAll('details.icd').forEach(function(r){ if(matches(r,gate)) n++; });
-      });
-      var sp=b.querySelector('.n'); if(sp) sp.textContent=n;
-    });
-    mode=saved;
-  }
-  i.addEventListener('input',apply);
-  if(seg) seg.addEventListener('click',function(e){
-    var b=e.target&&e.target.closest?e.target.closest('button'):null; if(!b)return;
-    mode=b.getAttribute('data-f');
-    [].forEach.call(seg.children,function(x){ x.classList.toggle('on',x===b); });
-    apply();
-  });
-  counts();
-})();
-
-/* v0.15.3: read a brief or a spec file in place. The text is embedded (a file://
-   page cannot fetch its siblings), rendered with a small Markdown pass, and the
-   original file stays one click away. */
-(function(){
-  var el=document.getElementById('docdata'); if(!el) return;
-  var DOCS={}; try{ DOCS=JSON.parse(el.textContent||'{}'); }catch(e){}
-  var panel=document.getElementById('docpanel'), scrim=document.getElementById('docscrim'),
-      body=document.getElementById('docbody'), title=document.getElementById('doctitle'),
-      pathEl=document.getElementById('docpath'), openF=document.getElementById('docopenfile'),
-      dl=document.getElementById('docdownload'), folder=document.getElementById('docfolder'),
-      closeB=document.getElementById('docclose'), lastFocus=null;
-  function esc(t){ return t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
-  function inline(t){
-    return t
-      .replace(/\`([^\`]+)\`/g,function(m,c){ return '<code>'+c+'</code>'; })
-      .replace(/\\*\\*([^*]+)\\*\\*/g,'<b>$1</b>')
-      .replace(/(^|[\\s(])\\*([^*\\n]+)\\*/g,'$1<i>$2</i>')
-      .replace(/(^|[\\s(])_([^_\\n]+)_/g,'$1<i>$2</i>')
-      .replace(/\\[([^\\]]+)\\]\\(([^)\\s]+)\\)/g,'<a href="$2">$1</a>');
-  }
-  function md(src){
-    var lines=esc(src).split('\\n'), out=[], k=0, fence=null, list=null;
-    function endList(){ if(list){ out.push('</'+list+'>'); list=null; } }
-    for(;k<lines.length;k++){
-      var l=lines[k];
-      if(/^\\s*\`\`\`/.test(l)){
-        if(fence===null){ endList(); fence=''; out.push('<pre><code>'); } else { out.push('</code></pre>'); fence=null; }
-        continue;
-      }
-      if(fence!==null){ out.push(l+'\\n'); continue; }
-      if(/^\\s*$/.test(l)){ endList(); continue; }
-      if(/^\\s*(---+|\\*\\*\\*+|___+)\\s*$/.test(l)){ endList(); out.push('<hr>'); continue; }
-      var h=l.match(/^(#{1,6})\\s+(.*)$/);
-      if(h){ endList(); var n=Math.min(h[1].length,4); out.push('<h'+n+'>'+inline(h[2])+'</h'+n+'>'); continue; }
-      var q=l.match(/^\\s*&gt;\\s?(.*)$/);
-      if(q){ endList(); out.push('<blockquote>'+inline(q[1])+'</blockquote>'); continue; }
-      var ul=l.match(/^\\s*[-*+]\\s+(.*)$/);
-      if(ul){ if(list!=='ul'){ endList(); out.push('<ul>'); list='ul'; } out.push('<li>'+inline(ul[1])+'</li>'); continue; }
-      var ol=l.match(/^\\s*\\d+[.)]\\s+(.*)$/);
-      if(ol){ if(list!=='ol'){ endList(); out.push('<ol>'); list='ol'; } out.push('<li>'+inline(ol[1])+'</li>'); continue; }
-      endList(); out.push('<p>'+inline(l)+'</p>');
-    }
-    if(fence!==null) out.push('</code></pre>');
-    endList();
-    return out.join('');
-  }
-  function openDoc(key, fileHref){
-    var d=DOCS[key]; if(!d) return;
-    lastFocus=document.activeElement;
-    title.textContent=d.title||key;
-    pathEl.textContent=d.rel||'';
-    var href=fileHref||('../'+d.rel);
-    openF.href=href; dl.href=href;
-    dl.setAttribute('download',(d.rel||'document').split('/').pop());
-    folder.href=href.replace(/[^/]+$/,'');
-    body.innerHTML=d.text==null
-      ? '<p class="docmiss">This file is '+Math.round((d.size||0)/1024)+' KB — too large to embed in the dashboard. Open it directly with the buttons above.</p>'
-      : md(d.text);
-    body.scrollTop=0;
-    panel.classList.add('on'); scrim.classList.add('on');
-    panel.setAttribute('aria-hidden','false');
-    body.focus();
-  }
-  function closeDoc(){
-    panel.classList.remove('on'); scrim.classList.remove('on');
-    panel.setAttribute('aria-hidden','true');
-    if(lastFocus&&lastFocus.focus) lastFocus.focus();
-  }
-  document.addEventListener('click',function(e){
-    var t=e.target&&e.target.closest?e.target.closest('.docopen'):null;
-    if(!t) return;
-    e.preventDefault(); e.stopPropagation();
-    openDoc(t.getAttribute('data-doc'), t.getAttribute('data-file')||null);
-  });
-  closeB.addEventListener('click',closeDoc);
-  scrim.addEventListener('click',closeDoc);
-  document.addEventListener('keydown',function(e){ if(e.key==='Escape'&&panel.classList.contains('on')) closeDoc(); });
-})();
-/* v0.21: click a configuration command to copy it (works opened from disk; falls back to a selection copy) */
-(function(){
-  document.addEventListener('click',function(e){
-    var c=e.target&&e.target.closest?e.target.closest('code.copyable'):null; if(!c) return;
-    var txt=c.textContent, done=function(){ c.classList.add('copied'); setTimeout(function(){ c.classList.remove('copied'); },900); };
-    var fallback=function(){ try{ var r=document.createRange(); r.selectNodeContents(c); var sel=window.getSelection(); sel.removeAllRanges(); sel.addRange(r); document.execCommand('copy'); sel.removeAllRanges(); done(); }catch(_){} };
-    if(navigator.clipboard&&navigator.clipboard.writeText) navigator.clipboard.writeText(txt).then(done,fallback); else fallback();
-  });
-})();
-/* v0.19: one page at a time. The side menu switches pages; the hash is the address
-   (#/plan/<item or milestone>, #/plan/c:<part or screen>, #/architecture/<part>),
-   so links, the back button and bookmarks work. Old #anchors still land. */
-(function(){
-  var LEGACY={overview:'overview',milestones:'overview',work:'plan',map:'architecture',telemetry:'usage',journal:'journal',system:'system'};
-  var pages=[].slice.call(document.querySelectorAll('section.page'));
-  var links=[].slice.call(document.querySelectorAll('#snav a'));
-  function show(name){
-    var hit=false;
-    pages.forEach(function(p){ var on=p.getAttribute('data-page')===name; p.hidden=!on; if(on)hit=true; });
-    if(!hit){ name='overview'; pages.forEach(function(p){ p.hidden=p.getAttribute('data-page')!=='overview'; }); }
-    links.forEach(function(a){ a.classList.toggle('on', a.getAttribute('data-p')===name); });
-    var nav=document.getElementById('snav'), on=nav&&nav.querySelector('a.on');
-    if(on&&nav.scrollWidth>nav.clientWidth+1) nav.scrollLeft=Math.max(0,on.offsetLeft-(nav.clientWidth-on.offsetWidth)/2);
-    return name;
-  }
-  function focusEl(el){
-    if(!el) return;
-    var d=el; while(d){ if(d.tagName==='DETAILS') d.open=true; d=d.parentElement; }
-    el.classList.remove('flash'); void el.offsetWidth; el.classList.add('flash');
-    setTimeout(function(){ el.scrollIntoView({block:'start'}); window.scrollBy(0,-12); }, 30);
-  }
-  function route(){
-    var h=location.hash||'';
-    var m=h.match(/^#\\/([\\w-]+)(?:\\/(.*))?$/);
-    var page, arg=null;
-    if(m){ page=m[1]; arg=m[2]?decodeURIComponent(m[2]):null; }
-    else { page=LEGACY[h.replace(/^#/,'')]||'overview'; }
-    page=show(page);
-    if(page==='plan'){
-      if(window.forgePlan) window.forgePlan.setComp(arg&&arg.indexOf('c:')===0?arg.slice(2):null);
-      if(arg&&arg.indexOf('c:')!==0){
-        var el=document.getElementById('it-'+arg)||document.querySelector('details.sec.sub[data-m="'+(window.CSS&&CSS.escape?CSS.escape(arg):arg)+'"]');
-        focusEl(el); return;
-      }
-    }
-    if(page==='architecture'&&window.forgeArch){ window.forgeArch.draw(); if(arg) window.forgeArch.select(arg); }
-    window.scrollTo(0,0);
-  }
-  window.addEventListener('hashchange',route);
-  /* v0.22.2: the Usage page scope — whole project or one milestone; the per-milestone row is highlighted */
-  (function(){
-    var sel=document.getElementById('usms'); if(!sel) return;
-    function apply(){
-      var v=sel.value;
-      document.querySelectorAll('.usview').forEach(function(el){ el.hidden = el.getAttribute('data-ms')!==v; });
-      document.querySelectorAll('tr[data-ms]').forEach(function(tr){ tr.classList.toggle('sel', tr.getAttribute('data-ms')===v); });
-      try{ localStorage.setItem('forge.usage.scope', v); }catch(_){ }
-    }
-    try{ var saved=localStorage.getItem('forge.usage.scope'); if(saved && Array.prototype.some.call(sel.options,function(o){ return o.value===saved; })) sel.value=saved; }catch(_){ }
-    sel.addEventListener('change',apply); apply();
-  })();
-  /* run after every script on the page has defined its hooks */
-  if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',route); else setTimeout(route,0);
-  window.addEventListener('load',function(){ if(window.forgeArch) window.forgeArch.draw(); });
-})();
-
-/* v0.19: the architecture drawing — cards are laid out by the generator; here we only
-   measure them and draw orthogonal arrows between them. */
-(function(){
-  var el=document.getElementById('archdata'); if(!el) return;
-  var D={}; try{ D=JSON.parse(el.textContent||'{}'); }catch(e){ return; }
-  var wrapEl=document.getElementById('archdiagram'), box=document.getElementById('archbox'), svg=document.getElementById('archsvg'), sel=document.getElementById('archsel');
-  var list=document.getElementById('archlist'), seg=document.getElementById('archseg');
-  var NS='http://www.w3.org/2000/svg';
-  function card(id){ return box.querySelector('.acard[data-c="'+id+'"]'); }
-  function esc(t){ return String(t==null?'':t).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
-  function mk(tag,attrs){ var n=document.createElementNS(NS,tag); for(var k in attrs) n.setAttribute(k,attrs[k]); return n; }
-  function draw(){
-    if(!box||box.offsetParent===null) return;
-    var B=box.getBoundingClientRect();
-    svg.setAttribute('width',B.width); svg.setAttribute('height',B.height);
-    svg.innerHTML='';
-    var defs=mk('defs',{});
-    defs.appendChild((function(){ var m=mk('marker',{id:'ah',viewBox:'0 0 10 10',refX:'9',refY:'5',markerWidth:'7',markerHeight:'7',orient:'auto-start-reverse'}); m.appendChild(mk('path',{d:'M0,0 L10,5 L0,10 z',fill:'#6b7080'})); return m; })());
-    svg.appendChild(defs);
-    var R={}; [].forEach.call(box.querySelectorAll('.acard'),function(c){ var r=c.getBoundingClientRect(); R[c.getAttribute('data-c')]={x:r.left-B.left,y:r.top-B.top,w:r.width,h:r.height}; });
-    // spread arrow ports along each side so parallel arrows do not overlap
-    var ports={};
-    (D.edges||[]).forEach(function(e,i){
-      var a=R[e.from], b=R[e.to]; if(!a||!b) return;
-      var down=b.y>a.y+a.h/2, up=b.y+b.h<a.y+a.h/2;
-      e._sa=down?'b':up?'t':'b'; e._sb=down?'t':up?'b':'b'; e._same=!down&&!up;
-      (ports[e.from+e._sa]=ports[e.from+e._sa]||[]).push({e:e,end:'a',o:b});
-      (ports[e.to+e._sb]=ports[e.to+e._sb]||[]).push({e:e,end:'b',o:a});
-    });
-    Object.keys(ports).forEach(function(k){
-      var ps=ports[k]; ps.sort(function(p,q){ return (p.o.x+p.o.w/2)-(q.o.x+q.o.w/2) || (p.o.y-q.o.y); });
-      ps.forEach(function(p,i){ p.e['_f'+p.end]=(i+1)/(ps.length+1); });
-    });
-    // lane rects give each gap's top and bottom; arrows in a gap get evenly spaced tracks
-    var L={}; [].forEach.call(box.querySelectorAll('.lane'),function(l){ var r=l.getBoundingClientRect(); L[l.getAttribute('data-li')]={top:r.top-B.top,bottom:r.bottom-B.top}; });
-    function pt(r,side,f){ f=f==null?.5:(.3+.4*f);
-      if(side==='b') return [r.x+r.w*f, r.y+r.h]; if(side==='t') return [r.x+r.w*f, r.y];
-      if(side==='r') return [r.x+r.w, r.y+r.h*f]; return [r.x, r.y+r.h*f]; }
-    var byGap={};
-    (D.edges||[]).forEach(function(e){ var a=R[e.from], b=R[e.to]; if(!a||!b) return; e._s=pt(a,e._sa,e._fa); e._t=pt(b,e._sb,e._fb); if(e.g!=null)(byGap[e.g]=byGap[e.g]||[]).push(e); });
-    Object.keys(byGap).forEach(function(g){
-      var es=byGap[g], top=(L[g]||{}).bottom, bot=(L[+g+1]||{}).top; if(top==null||bot==null) return;
-      es.sort(function(p,q){ return Math.min(p._s[0],p._t[0])-Math.min(q._s[0],q._t[0]); });
-      var step=es.length>1?(bot-top-20)/(es.length-1):0;
-      es.forEach(function(e,i){ e._y=es.length>1?top+10+i*step:(top+bot)/2; });
-    });
-    var seen={};
-    (D.edges||[]).forEach(function(e){
-      if(!e._s) return;
-      var s=e._s, t=e._t, d, lx, ly, anchor='middle';
-      if(e._y!=null){
-        if(Math.abs(s[0]-t[0])<3){ d='M'+s[0]+','+s[1]+' L'+t[0]+','+t[1]; lx=s[0]+5; ly=e._y+4; anchor='start'; }
-        else { d='M'+s[0]+','+s[1]+' L'+s[0]+','+e._y+' L'+t[0]+','+e._y+' L'+t[0]+','+t[1]; lx=(s[0]+t[0])/2; ly=e._y-3; }
-      } else { /* same lane: under the cards, in the lane's bottom padding */ var yy=Math.max(s[1],t[1])+16; d='M'+s[0]+','+s[1]+' L'+s[0]+','+yy+' L'+t[0]+','+yy+' L'+t[0]+','+t[1]; lx=(s[0]+t[0])/2; ly=yy-3; }
-      var g=mk('g',{'class':'aedge'+(e.planned?' planned':'')+(e.confirmed?'':' draft'),'data-from':e.from,'data-to':e.to});
-      g.appendChild(mk('path',{d:d,fill:'none','marker-end':'url(#ah)'}));
-      /* one label per meaning: the same label into the same part, or out of the same part, is said once */
-      var k1=e.to+'|'+e.label, k2=e.from+'|'+e.label;
-      if(e.label&&!seen[k1]&&!seen[k2]){
-        seen[k1]=seen[k2]=1;
-        var tx=mk('text',{x:lx,y:ly,'text-anchor':anchor}); tx.textContent=e.label;
-        g.appendChild(tx);
-      }
-      svg.appendChild(g);
-    });
-    // label halos after layout so text stays readable over lines
-    [].forEach.call(svg.querySelectorAll('text'),function(tx){ try{ var bb=tx.getBBox(); var r=mk('rect',{x:bb.x-4,y:bb.y-1,width:bb.width+8,height:bb.height+2,rx:4,'class':'lbg'}); tx.parentNode.insertBefore(r,tx); }catch(e){} });
-  }
-  function select(id){
-    var p=D.parts[id]; if(!p) return;
-    [].forEach.call(box.querySelectorAll('.acard'),function(c){ c.classList.toggle('sel',c.getAttribute('data-c')===id); });
-    [].forEach.call(svg.querySelectorAll('.aedge'),function(g){ var on=g.getAttribute('data-from')===id||g.getAttribute('data-to')===id; g.classList.toggle('hl',on); });
-    var outs=(D.edges||[]).filter(function(e){return e.from===id;}).map(function(e){ return esc((D.parts[e.to]||{}).name||e.to)+(e.label?' <span class="mut">('+esc(e.label)+')</span>':'')+(e.planned?' <span class="mut">· planned</span>':''); });
-    var ins=(D.edges||[]).filter(function(e){return e.to===id;}).map(function(e){ return esc((D.parts[e.from]||{}).name||e.from)+(e.label?' <span class="mut">('+esc(e.label)+')</span>':''); });
-    var ev=(p.evidence||[]).map(function(v){ return '<code>'+esc(v.path)+'</code>'+(v.why?' <span class="mut">'+esc(v.why)+'</span>':''); });
-    sel.innerHTML='<h4>Selected · '+esc(p.name)+(p.confirmed?'':' <span class="warn">draft</span>')+'</h4>'+
-      '<div class="kv">'+
-      '<div class="row"><span class="k">Runs on</span><span class="vl">'+esc(p.runsOn)+' · '+esc(p.kind)+'</span></div>'+
-      (p.summary?'<div class="row"><span class="k">What</span><span class="vl">'+esc(p.summary)+'</span></div>':'')+
-      '<div class="row"><span class="k">Talks to</span><span class="vl">'+(outs.join(', ')||'<span class="mut">—</span>')+'</span></div>'+
-      '<div class="row"><span class="k">Called by</span><span class="vl">'+(ins.join(', ')||'<span class="mut">—</span>')+'</span></div>'+
-      '<div class="row"><span class="k">Items</span><span class="vl">'+p.done+'/'+p.live+' done'+(p.run?' · '+p.run+' running':'')+'</span></div>'+
-      (p.next?'<div class="row"><span class="k">Next</span><span class="vl"><a href="#/plan/'+encodeURIComponent(p.next)+'">'+esc(p.next)+'</a></span></div>':'')+
-      (p.screens?'<div class="row"><span class="k">Screens</span><span class="vl"><a href="#/screens" data-scr="'+esc(id)+'">'+p.screens+' screen(s)</a></span></div>':'')+
-      (ev.length?'<div class="row"><span class="k">Evidence</span><span class="vl">'+ev.join('<br>')+'</span></div>':'')+
-      '</div>'+(p.live?'<a class="docbtn selbtn" href="#/plan/c:'+encodeURIComponent(id)+'">Show its work items</a>':'');
-  }
-  document.addEventListener('click',function(e){
-    var c=e.target&&e.target.closest?e.target.closest('.acard,.alink'):null;
-    if(c){ var id=c.getAttribute('data-c'); if(location.hash!=='#/architecture/'+id) history.replaceState(null,'','#/architecture/'+encodeURIComponent(id)); select(id); return; }
-    var s=e.target&&e.target.closest?e.target.closest('a[data-scr]'):null;
-    if(s){ e.preventDefault(); location.hash='#/screens'; setTimeout(function(){ var g=document.getElementById('scr-'+s.getAttribute('data-scr')); if(g) g.scrollIntoView({block:'start'}); },40); }
-  });
-  if(seg) seg.addEventListener('click',function(e){
-    var b=e.target&&e.target.closest?e.target.closest('button'):null; if(!b) return;
-    var v=b.getAttribute('data-v');
-    [].forEach.call(seg.children,function(x){ x.classList.toggle('on',x===b); });
-    wrapEl.hidden=v!=='diagram'; list.hidden=v!=='list'; if(v==='diagram') draw();
-  });
-  var t=null; window.addEventListener('resize',function(){ clearTimeout(t); t=setTimeout(draw,120); });
-  window.forgeArch={draw:draw,select:select};
-  var fc=box.querySelector('.acard'); if(fc) select(fc.getAttribute('data-c'));
-})();
-
-(function(){
-  var f=document.getElementById('cmdfilter'); if(!f) return;
-  f.addEventListener('input',function(){
-    var q=f.value.toLowerCase();
-    [].forEach.call(document.querySelectorAll('.cmdgroup'),function(g){
-      var n=0; [].forEach.call(g.querySelectorAll('tr[data-q]'),function(r){ var hit=!q||r.getAttribute('data-q').indexOf(q)>=0; r.style.display=hit?'':'none'; if(hit)n++; });
-      g.style.display=n?'':'none';
-    });
-  });
-})();
-(function(){
-  var f=document.getElementById('scrfilter'); if(!f) return;
-  f.addEventListener('input',function(){
-    var q=f.value.toLowerCase();
-    [].forEach.call(document.querySelectorAll('.sgroup'),function(g){
-      var n=0; [].forEach.call(g.querySelectorAll('.scard'),function(c){ var hit=!q||c.getAttribute('data-q').indexOf(q)>=0; c.style.display=hit?'':'none'; if(hit)n++; });
-      g.style.display=n?'':'none';
-    });
-  });
-})();
-</script>
-<script>${CP.js}</script>
+<div class="pal" id="pal" role="dialog" aria-modal="true" aria-label="Search" hidden>
+  <div class="palbox">
+    <input id="palq" type="search" autocomplete="off" spellcheck="false" placeholder="Search tasks, milestones, pages, commands, settings…" aria-label="Search" aria-controls="pallist">
+    <ul id="pallist" role="listbox" aria-label="Results"></ul>
+    <div class="palfoot"><span>↑ ↓ to move</span><span>Enter to open, or copy a command</span><span>Esc to close</span></div>
+  </div>
+</div>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+<script>(${dashClient.toString()})();</script>
 </body></html>`;
 
+  // v0.33: the stamp names this content. An open dashboard loads this file again in a hidden frame and asks
+  // "anything other than <stamp>?" — the copy answers with its content only when the stamps differ.
+  const stamp = crypto.createHash('sha1').update(html).digest('hex').slice(0, 16);
   fs.mkdirSync(FORGE, { recursive: true });
-  fs.writeFileSync(DASHBOARD_FILE, html);
+  fs.writeFileSync(DASHBOARD_FILE, html.replace('@@STAMP@@', stamp));
 }
 
 // ---------------------------------------------------------------------------
@@ -9078,7 +9641,7 @@ const commands = {
     if (!loadConfig()) die('No forge project here (run: forge init).');
     regenDashboard();   // v0.15.2: also brings the token snapshot up to date
     out(`Dashboard regenerated: ${path.relative(PROJECT, DASHBOARD_FILE)}`);
-    out('Open it in a browser. It also auto-regenerates after every state change — just reload the tab.');
+    out('Open it in a browser. Forge regenerates it after every state change, and an open tab follows by itself — no reload.');
   },
 
   // -- hooks ------------------------------------------------------------------

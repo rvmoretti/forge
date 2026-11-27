@@ -684,15 +684,12 @@ claude</span>
       <tr><td>A quick answer in chat</td><td><i>"where are we?"</i> or <code>/forge:status</code></td>
         <td>Phase, work counts, what's in progress or blocked, what needs you.</td></tr>
       <tr><td>The visual picture</td><td>open <code>forge/dashboard.html</code> in a browser</td>
-        <td>One page per menu entry (v0.19): <b>Overview</b> (what needs you, now and next,
-        releases), <b>Plan</b> (the work by release and milestone, with outcomes and pace beside it),
-        <b>Architecture</b> (the runtime parts in lanes by where they run, arrows for who talks to
-        whom, each part linking to its work), <b>Screens &amp; mockups</b> (a gallery per app), then
-        Usage, Journal, Specs and System. Plus <b>telemetry</b>: development
-        time per agent (live from state — median prep and execution per worker type; wall-clock,
-        honestly labeled, session breaks trimmed) and token totals from the last
-        <code>forge usage --write</code> snapshot, stamped with when it was taken. Regenerates on
-        every change; just reload the tab.</td></tr>
+        <td>A status rail, a dock with five destinations (v0.33): <b>Home</b> (what needs you, the active milestone
+        as tiles, what just happened), <b>Plan</b> (the work by release and milestone), <b>Insights</b>
+        (quality, pace, scope, time per agent — wall-clock, honestly labeled — and tokens from the usage
+        snapshot), <b>Product</b> (specs, screens &amp; mockups, the architecture in lanes, the journal) and
+        <b>Setup</b> (configuration, commands, health). Regenerates on every change; an open tab follows
+        by itself (see below).</td></tr>
       <tr><td>Process health</td><td><code>/forge:stats</code></td>
         <td>First-pass rate, retries, escalations, how long items take, per-milestone health.
         Falling first-pass rate = briefs or criteria degrading.</td></tr>
@@ -1064,12 +1061,27 @@ claude</span>
   (<code>options.push</code>); <code>forge ci runs</code> shows what a milestone costs in workflow runs. Preflight names
   e2e harness costs it can see: the dev server, no saved sign-in.</p>
 
-  <h3>The dashboard as the place to manage Forge (v0.29)</h3>
-  <p>The dashboard has three more pages: <b>Needs you</b> — each card says where to act and what to type
-  (for a question, the session phrase and the command for every option); <b>Loop</b> — the active
-  milestone's tasks at their step; <b>Project</b> — every milestone and how it grew. It advises and never
-  drives Claude: what it offers to copy is built only from Forge's own ids. <b>live</b> (side menu) reloads
-  it every 10 seconds while you look at it.</p>
+  <h3>The dashboard as the place to manage Forge (v0.29, reorganized in v0.33)</h3>
+  <p>A rail on the left says where the project stands on every page (Forge's version, the active milestone's
+  count, what waits on you, phase and autopilot, the gate, the whole project); a dock at the bottom holds five
+  destinations, every fact said once. <b>Home</b> — the state in one sentence, what
+  needs you (each card says where to act and what to type; for a question, the session phrase and the
+  command for every option), the active milestone as tiles, one per task (what waits on you first, then what
+  is being built, with its step) and what just happened. <b>Plan</b> — releases, milestones and tasks in build
+  order; a milestone header carries its progress, <i>Milestones only</i> folds the page into the roadmap, and
+  a task opens beside the list (J/K or the arrows step through). <b>Insights</b> — the milestone's ring by step, tasks closed per day,
+  quality, pace and forecast, scope growth, time, tokens. <b>Product</b> (tabs) — Specs, Screens &amp; mockups, Architecture,
+  Journal. <b>Setup</b> (tabs) — Configuration (opens on what this project changed), Commands, Health
+  (what needs attention first).</p>
+  <p>It advises and never drives Claude: what it offers to copy is built only from Forge's own ids.
+  <b>Live</b> (the rail, on by default) follows Forge without reloading: the page reads its own file again
+  every few seconds and updates only what changed, so the scroll, an open task and a typed filter stay put.
+  Where something is cut off (the rail on a short window, the page under the dock, an open task or document)
+  a pair of arrows at its bottom edge moves it one screen per click.
+  <b>Search</b> (the dock, ⌘K / Ctrl-K, or <code>/</code>) finds tasks, milestones, pages, commands,
+  settings, briefs and specs. One solid surface: what waits on you and the button that answers it; selected
+  is raised glass, amber means someone has to look, coral means it failed. Dark by default, light from the
+  button in the rail. The typefaces (Outfit, DM Mono, SIL OFL 1.1) are embedded, so it stays one file.</p>
 
   <h3>What lives in your project</h3>
   <div class="tblwrap"><table>

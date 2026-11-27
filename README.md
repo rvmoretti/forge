@@ -113,7 +113,8 @@ plans the gap — spec, mocks, and a milestone cut across everything.
 **Dashboard:** `forge/dashboard.html` — a generated projection of everything on
 disk (progress, work graph by milestone, attempts/verifications, decisions,
 discoveries, preflight, baseline, spec files). It regenerates automatically on
-every state change, zero tokens; open it in a browser and just reload. State
+every state change, zero tokens; open it in a browser and leave it open — it
+follows Forge by itself, without reloading. State
 wins — never edit it, never treat it as the source of truth.
 
 You get interrupted for exactly three things: a product decision the spec

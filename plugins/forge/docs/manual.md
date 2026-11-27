@@ -469,27 +469,68 @@ New projects get it; an existing project takes it with `forge config adopt`.
 - **Task pushes that do not start CI.** `options.push auto` (default): a task commit is pushed as it closes only when no workflow runs on pushes to the milestone branch; otherwise it stays local and `forge milestone ship` pushes the milestone once. `task` / `milestone` force either. `forge ci runs` shows what a milestone costs in workflow runs and flags a workflow that runs twice at ship (push and pull request) or again after the merge.
 - **e2e harness.** Preflight names what it can see in `playwright.config.*`: e2e against the dev server, no saved sign-in. The testing pack says how to fix both and to resolve the stack's environment once.
 
-## The dashboard as the place to manage Forge (v0.29)
+## The dashboard as the place to manage Forge (v0.29, reorganized in v0.33)
 
-`forge/dashboard.html` has three pages built from the same snapshot as the cockpit (`status --json`):
+`forge/dashboard.html` is drawn from the same snapshot as the cockpit (`status --json`). Since v0.33 every
+fact is said once. A **rail** on the left is on every page: Forge's version, the active milestone's count,
+what waits on you, phase and autopilot, the gate (tasks, full test run, security pass, your review, ship)
+and the whole project. A **dock** at the bottom holds five destinations:
 
-- **Needs you** (with its count in the side menu): one card per thing waiting on you. A **question** shows
-  each option, the recommended one marked, with what to type in the Claude session (`B: spec`) or the
-  command to run (`forge question answer B --choice spec`). A **Claude Code session waiting on you**
-  (a permission prompt, a reply, a dialog) says which session and to go to that terminal. Milestones to
-  review, releases to harden and audits to triage say what to type. Autopilot's state with the command
-  to stop it, and how to leave a note for the next brief.
-- **Loop**: the active milestone's tasks at their step (to do → brief → implement → verify → review →
-  done), with the worker on each and its last verify.
-- **Project**: every milestone, its progress, and how it grew (planned, split, review, discovery, human,
-  audit).
+- **Home** (with the count of what needs you). The state in one sentence; then **Needs you** — one card per
+  thing waiting on you. A **question** shows each option, the recommended one marked, with what to type in
+  the Claude session (`B: spec`) and, under it, the command for a terminal
+  (`forge question answer B --choice spec`). A **Claude Code session waiting on you** (a permission prompt,
+  a reply, a dialog) says which session and to go to that terminal. Milestones to review, releases to harden
+  and audits to triage say what to type. Then the **active milestone as tiles**, one per task (the first
+  twelve when it has more): the one that waits on you first, then what is being built with its step and how
+  long, what is next, what is blocked on other work, what is left, what is done. **What happened**: the last
+  events, latest first. **Autopilot**: its state, how to start or stop it, how to leave a note.
+- **Plan**: releases → milestones → tasks, in the order they are built. A milestone's header carries its
+  progress bar, its approval and how many tasks were added after the plan was cut — **Milestones only**
+  folds the page into the roadmap. One filter row: search, All / Needs me / Active / Done. A task's mark
+  says its state (a tick, a pulsing dot, a ring); the row that waits on you is the solid one. A task opens **beside the
+  list**, which stays usable; J/K or the arrows step through the visible tasks, Esc closes.
+- **Insights**: the active milestone's ring by step with its forecast and scope, tasks closed per day over
+  14 days, quality (first-pass, clean run, rework), pace and forecast, scope (planned against added, per
+  milestone, by origin), time per agent, tokens. The notes on how to read each one fold away.
+- **Product** (tabs): Specs · Screens & mockups · Architecture · Journal.
+- **Setup** (tabs): **Configuration** — each setting is a card (what it does, when you would change it, what
+  it is now and where that value comes from, the command to change it); it opens on **Changed here**, what
+  this project set itself, with a filter over all settings. **Commands**. **Health** — plan standards,
+  preflight and baseline, what needs attention first; what is met folds away.
+
+Addresses from before v0.33 still land (`#/needs`, `#/loop`, `#/project`, `#/usage`…).
 
 The dashboard **advises; it never drives Claude**. What it offers to copy is built only from Forge's own
 ids and keys; words that came from elsewhere (a notification, a question's wording) are shown as quoted
-context. Click a command or a phrase to copy it. **live** (in the side menu, on by default, remembered
-per browser) reloads the page every 10 seconds while it is visible, keeping the page and the scroll.
+context. Click a command or a phrase to copy it.
+
+**Live** (the rail, on by default, remembered per browser) follows Forge **without reloading**. Every few
+seconds, while the tab is visible, the page loads its own file again in a hidden frame; that copy answers
+with its content only when Forge has written something newer (the file carries a stamp of its content), and
+the page applies only the difference — a row that did not change is not touched, so the scroll, an open
+task, an opened milestone and a typed filter stay where they are. No second file is written beside
+`dashboard.html`. If a browser will not let a page opened from disk read its own file again, the switch
+says *Not updating* and a manual reload still shows the current state.
+
+**Scroll arrows.** Wherever something is cut off — the rail on a short window, the page under the dock, an
+open task or document — a pair of arrows at its bottom edge says so; a click moves it one screen. They show
+only while there is more that way.
+
+**Search** (the dock, ⌘K / Ctrl-K, or `/`) finds tasks, milestones, pages, architecture parts, briefs
+and specs, commands (Enter copies one) and settings.
+
+**One solid surface.** What waits on you, and the button that answers it, is the only solid surface on the
+page (white in the dark theme, near-black in the light one); "selected" and "you are here" are raised glass.
+Amber marks what someone has to look at, coral what failed; the generator writes no colour into the markup.
+Dark is the default; the button in the rail switches to light (Shift-click follows the system). The
+typefaces (Outfit and DM Mono, SIL OFL 1.1, licence in `plugins/forge/fonts/`) are embedded in the file, so
+it stays one self-contained file that opens from disk; without them it falls back to system fonts.
+
 Forge regenerates the file on every state change and whenever a Claude Code session starts or stops
-waiting on you.
+waiting on you. A command that appears under *What happened* (task start/done/verify, a question answered,
+a milestone approved…) draws the page once, as it exits — after its own line is in the trace — so the list
+is never one event behind.
 
 ## The cockpit inside Claude Code (v0.28)
 

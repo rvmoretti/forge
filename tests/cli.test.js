@@ -1089,12 +1089,13 @@ test('durations on the page are computed in the browser, not frozen at generatio
 });
 
 // --- v0.15.3: rail card, working quick filters, in-place document reader -------
+// v0.33: the rail is gone — the plan is the journey: each milestone header carries its own progress, said once
 
-test('the milestone rail sits in a card', () => {
+test('the journey is the plan itself: a milestone header carries its progress, and no second list repeats it', () => {
   addItem('C1', ['--milestone', 'M1']);
   const dash = fs.readFileSync(path.join(dir, 'forge', 'dashboard.html'), 'utf8');
-  assert.match(dash, /<div class="railcard">/);
-  assert.match(dash, /\.railcard\{background:var\(--surface\)/);
+  assert.match(dash, /<details class="sec sub"[^>]*data-m="M1"><summary>[^\n]*<span class="mprog"><span class="pbar"><i style="width:0%"><\/i><\/span><span class="mut num">0\/1 done<\/span><\/span>/);
+  assert.doesNotMatch(dash, /class="railcard"|class="rail"|class="relrow"|class="kpis"/);
 });
 
 test('quick filters can see gate state and the active milestone', () => {
@@ -1824,7 +1825,7 @@ test('dashboard shows release headers, milestone and task version labels', () =>
   assert.match(html, /class="vtag rel">V0<\/span>MVP/);
   assert.match(html, /class="vtag">V0\.1<\/span>pass/);
   assert.match(html, /class="vlab"[^>]*>V0\.1\.1<\/b>P1/);
-  assert.match(html, /class="rsep"><span>V1<\/span><em>Stays<\/em>/);
+  assert.match(html, /class="vtag rel">V1<\/span>Stays/); // v0.33: the release header in the plan; the rail that repeated it is gone
   assert.strictEqual((html.match(/>next up</g) || []).length, 1);
 });
 
@@ -1980,7 +1981,7 @@ test('dashboard v0.19: one page per menu entry, architecture drawing data, scree
   forge(['screen', 'add', 'Cart', '--name', 'Cart', '--app', 'member-app', '--mock', 'spec/mocks/Cart.png']);
   addItem('D1', ['--component', 'Cart', '--milestone', 'M1']);
   const dash = fs.readFileSync(path.join(dir, 'forge', 'dashboard.html'), 'utf8');
-  for (const p of ['overview', 'plan', 'architecture', 'screens', 'usage', 'journal', 'specs', 'system'])
+  for (const p of ['overview', 'plan', 'architecture', 'screens', 'insights', 'journal', 'specs', 'system']) // v0.33: usage is a section of insights
     assert.match(dash, new RegExp(`<section class="page" data-page="${p}"`));
   assert.match(dash, /href="#\/architecture" data-p="architecture">Architecture <span class="k">3 · 3 draft/);
   const data = JSON.parse(dash.match(/<script type="application\/json" id="archdata">([\s\S]*?)<\/script>/)[1]);
@@ -2373,7 +2374,7 @@ test('v0.21.2: overview has no journal card; overview grids cannot be widened by
   assert.doesNotMatch(ov, /Latest in the journal/);
   assert.match(dash, /\.ovgrid\{display:grid;grid-template-columns:minmax\(0,1\.7fr\) minmax\(0,1fr\)/);
   assert.match(dash, /\.ovgrid>\*,\.panel\{min-width:0\}/);
-  assert.match(dash, /\.kpis\{display:grid;grid-template-columns:minmax\(0,1\.35fr\)/);
+  assert.match(dash, /\.msfacts>div\{display:grid;grid-template-columns:104px minmax\(0,1fr\)/); // v0.33: the milestone card's facts replace the KPI tiles
 });
 
 test('v0.21.2: a task blocked mid-work on the user\'s stray change resumes with unblock — same attempt, verification kept — and closes', () => {
@@ -2439,7 +2440,7 @@ test('v0.21.2: a blocked task is shown as needing you even while others are in p
   forge(['task', 'start', 'A']); forge(['task', 'start', 'B']);
   forge(['task', 'block', 'B', '--reason', 'question: which?']);
   const dash = fs.readFileSync(path.join(dir, 'forge', 'dashboard.html'), 'utf8');
-  assert.match(dash, /1 item\(s\) are blocked and need your answer/);
+  assert.match(dash, /<h3>1 question needs your answer<\/h3>/);
 });
 
 // --- v0.22 -------------------------------------------------------------------
@@ -2564,12 +2565,12 @@ test('v0.22: the banner — a question always wins; a dependency block while oth
   let dash = fs.readFileSync(path.join(dir, 'forge', 'dashboard.html'), 'utf8');
   assert.match(dash, /<h3>Building — A in progress<\/h3>/);
   assert.match(dash, /B waits on other work/);
-  assert.doesNotMatch(dash, /need your answer/);
-  assert.match(dash, /QUESTIONS · NEED YOU<\/div><div class="d">1 blocked on other work/);
+  assert.doesNotMatch(dash, /needs? your answer/);
+  assert.match(dash, /<li class="tile t-wait" data-key="B"><a href="#\/plan\/B"><span class="mk"><\/span><span class="tn">[^<]*<\/span><span class="ts"><b>B<\/b>blocked on other work<\/span>/); // v0.33: a tile, not on the owner
   assert.match(dash, /data-s="BLOCKED" data-act="1" data-q="0"/);
   forge(['task', 'start', 'C']); forge(['task', 'block', 'C', '--reason', 'question: which currency?']);
   dash = fs.readFileSync(path.join(dir, 'forge', 'dashboard.html'), 'utf8');
-  assert.match(dash, /1 item\(s\) are blocked and need your answer/);
+  assert.match(dash, /<h3>1 question needs your answer<\/h3>/);
   assert.match(dash, /meanwhile A keeps building/);
   assert.match(dash, /data-s="BLOCKED" data-act="1" data-q="1"/);
   // a stop recorded before a dispatch does not outlive the worker it did not know about
